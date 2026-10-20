@@ -37,8 +37,9 @@ export function hubHeadline(bot: BotMediaOverview): string {
 export function hubFacts(bot: BotMediaOverview, now: number): string[] {
   const facts: string[] = [];
   if (bot.video) {
+    if (bot.video.paused) facts.push('Paused');
     facts.push(qualityLabel(bot.video.quality, bot.video.preset));
-    facts.push(encoderLabel(bot.video.encoder));
+    facts.push(bot.video.direct ? `Direct${bot.video.encoder?.codec ? ' ' + bot.video.encoder.codec.toUpperCase() : ''}` : encoderLabel(bot.video.encoder));
     if (bot.video.sourceMode) facts.push(SOURCE_MODE_LABELS[bot.video.sourceMode]);
     if (bot.video.health?.speed != null) facts.push(healthLabel(bot.video.health));
     facts.push(`${bot.video.viewerCount} viewer${bot.video.viewerCount === 1 ? '' : 's'}`);
@@ -68,8 +69,11 @@ export function videoDetails(bot: BotMediaOverview, now: number): { label: strin
   if (!v) return [];
   const details = [
     { label: 'Quality', value: qualityLabel(v.quality, v.preset) },
-    { label: 'Encoder', value: encoderLabel(v.encoder) },
+    v.direct
+      ? { label: 'Encoder', value: `Direct ${v.encoder?.codec ? v.encoder.codec.toUpperCase() : ''}: not re-encoded`.replace('  ', ' ') }
+      : { label: 'Encoder', value: encoderLabel(v.encoder) },
   ];
+  if (v.paused) details.unshift({ label: 'State', value: 'Paused' });
   if (v.sourceMode) details.push({ label: 'Source', value: SOURCE_MODE_LABELS[v.sourceMode] });
   if (v.health?.speed != null) details.push({ label: 'Encode health', value: healthLabel(v.health) });
   details.push({ label: 'Viewers', value: `${v.viewerCount} in channel` });

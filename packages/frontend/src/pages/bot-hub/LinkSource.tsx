@@ -71,8 +71,12 @@ export function LinkSource({ botId, serverConfigId }: ConsoleSourceContext) {
     startVideo.mutate(
       { botId, ...request.body },
       {
-        onSuccess: (data: { alreadyRunning?: boolean }) => {
-          toastMediaStarted(data?.alreadyRunning ? 'Already streaming' : 'Video stream started');
+        onSuccess: (data: { alreadyRunning?: boolean; starting?: boolean }) => {
+          toastMediaStarted(
+            data?.alreadyRunning ? 'Already streaming'
+              : data?.starting ? 'Preparing the video: it starts by itself when ready'
+                : 'Video stream started',
+          );
         },
       },
     );

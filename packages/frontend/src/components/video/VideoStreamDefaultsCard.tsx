@@ -26,14 +26,30 @@ import { ENCODE_PROFILE_PRESETS, applyEncodeProfile, type NamedEncodeProfile } f
 import {
   AUTO_LIMIT_OPTIONS,
   ENCODER_LABELS,
+  MAX_PRESET_BITRATE_KBPS,
+  MIN_PRESET_BITRATE_KBPS,
+  PRESET_KEYS,
   ENCODER_OPTIONS,
   autoEncoderPreferenceHint,
   autoEncoderPreferenceLabel,
+  formatMbps,
   formatTimeout,
 } from '@/lib/video-streaming';
 import { cn } from '@/lib/utils';
 
 const TIMEOUT_PRESETS = ['0', '60', '300', '600', '1800'];
+const DIRECT_FALLBACK_OPTIONS = [
+  { value: 'ultrafast', label: 'Convert first, x264 ultrafast (lightest)' },
+  { value: 'superfast', label: 'Convert first, x264 superfast' },
+  { value: 'veryfast', label: 'Convert first, x264 veryfast (best quality)' },
+  { value: 'live', label: 'Re-encode while it plays (no wait)' },
+];
+const DIRECT_PACING_OPTIONS = [
+  { value: '0', label: 'Off (send frames as they come)' },
+  { value: '4', label: 'Light (4× the video\'s bitrate)' },
+  { value: '2.5', label: 'Normal (2.5×)' },
+  { value: '1.5', label: 'Strong (1.5×)' },
+];
 const NAMED_PROFILES = Object.keys(ENCODE_PROFILE_PRESETS) as NamedEncodeProfile[];
 
 const FIELD_LABELS: Record<keyof VideoStreamSettings, string> = {
@@ -45,6 +61,9 @@ const FIELD_LABELS: Record<keyof VideoStreamSettings, string> = {
   maxBitrateKbps: 'bitrate limit',
   encodeProfile: 'encode profile',
   cpuUsed: 'encode speed',
+  directPacing: 'direct stream pacing',
+  directFallback: 'direct stream fallback',
+  presetBitrates: 'bitrate per resolution',
 };
 
 interface VideoStreamDefaultsCardProps {
@@ -95,6 +114,14 @@ export function VideoStreamDefaultsCard({ server }: VideoStreamDefaultsCardProps
   if (!draft) return null;
 
   const dirty = !!settings && JSON.stringify(settings) !== JSON.stringify(draft);
+  // Absent when talking to a backend that predates this setting: the section is then hidden.
+  const presetBitrates = draft.presetBitrates;
+  const invalidPresets = !presetBitrates ? [] : PRESET_KEYS.filter((k) => {
+    const n = presetBitrates[k];
+    return !Number.isInteger(n) || n < MIN_PRESET_BITRATE_KBPS || n > MAX_PRESET_BITRATE_KBPS;
+  });
+  const setPresetBitrate = (key: VideoStreamPresetKey, kbps: number) =>
+    setDraft((d) => (d && d.presetBitrates ? { ...d, presetBitrates: { ...d.presetBitrates, [key]: kbps } } : d));
   const set = <K extends keyof VideoStreamSettings>(key: K, value: VideoStreamSettings[K]) =>
     setDraft((d) => (d ? { ...d, [key]: value } : d));
 
@@ -225,6 +252,81 @@ export function VideoStreamDefaultsCard({ server }: VideoStreamDefaultsCardProps
           </div>
         </div>
 
+        <div className="space-y-1">
+          <Label htmlFor="direct-fallback" className="text-sm">Direct streams: when the picture cannot be copied</Label>
+          <select
+            id="direct-fallback"
+            className="h-10 w-full rounded-md border bg-background px-2 text-sm sm:max-w-md"
+            value={draft.directFallback}
+            onChange={(e) => set('directFallback', e.target.value as VideoStreamSettings['directFallback'])}
+          >
+            {DIRECT_FALLBACK_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+          <p className="text-xs text-muted-foreground">
+            Only VP9, or H.264 without B-frames, can be sent as it is. Anything else is first converted once to H.264 without B-frames (a 40-minute video takes a few minutes, and the stream starts by itself when done), then sent as it is. A live source, or one longer than Max video duration, is re-encoded while it plays instead.
+          </p>
+        </div>
+
+        <div className="space-y-1">
+          <Label htmlFor="direct-pacing" className="text-sm">Direct streams: smooth keyframes</Label>
+          <select
+            id="direct-pacing"
+            className="h-10 w-full rounded-md border bg-background px-2 text-sm sm:max-w-xs"
+            value={String(draft.directPacing)}
+            onChange={(e) => set('directPacing', Number(e.target.value))}
+          >
+            {DIRECT_PACING_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            {!DIRECT_PACING_OPTIONS.some((o) => o.value === String(draft.directPacing)) && (
+              <option value={String(draft.directPacing)}>{draft.directPacing}× the video&apos;s bitrate</option>
+            )}
+          </select>
+          <p className="text-xs text-muted-foreground">
+            A video sent without re-encoding has big keyframes that leave as one burst of hundreds of packets, and some get lost: the picture freezes until the next keyframe. This spreads each frame over a fraction of a second (a keyframe can arrive up to 0.6 s later; audio follows). Lower multiples smooth more.
+          </p>
+        </div>
+
+        {presetBitrates && (
+        <div className="space-y-2">
+          <Label>Bitrate per resolution</Label>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+            {PRESET_KEYS.map((key) => {
+              const bad = invalidPresets.includes(key);
+              return (
+                <div key={key} className="space-y-1">
+                  <Label htmlFor={`preset-bitrate-${key}`} className="text-xs font-normal text-muted-foreground">
+                    {key} (kbps)
+                  </Label>
+                  <Input
+                    id={`preset-bitrate-${key}`}
+                    type="number"
+                    min={MIN_PRESET_BITRATE_KBPS}
+                    max={MAX_PRESET_BITRATE_KBPS}
+                    step={100}
+                    aria-invalid={bad}
+                    className={bad ? 'border-destructive' : undefined}
+                    value={Number.isFinite(presetBitrates[key]) ? presetBitrates[key] : ''}
+                    onChange={(e) => setPresetBitrate(key, Math.floor(Number(e.target.value)))}
+                  />
+                  {!bad && <p className="text-[11px] text-muted-foreground">{formatMbps(presetBitrates[key])}</p>}
+                </div>
+              );
+            })}
+          </div>
+          {invalidPresets.length > 0 && (
+            <p role="alert" className="text-xs text-destructive">
+              {invalidPresets.join(', ')}: enter a whole number from {MIN_PRESET_BITRATE_KBPS} to {MAX_PRESET_BITRATE_KBPS} kbps to save.
+            </p>
+          )}
+          <p className="text-xs text-muted-foreground">
+            The video bitrate a stream uses at each resolution ({MIN_PRESET_BITRATE_KBPS}–{MAX_PRESET_BITRATE_KBPS} kbps; TeamSpeak drops a stream above 10 Mbit/s).
+            The bitrate limit under Advanced still caps it
+            {draft.maxBitrateKbps > 0
+              ? `, now ${formatMbps(draft.maxBitrateKbps)}: a resolution set above it streams at the limit.`
+              : ' (currently no limit).'}
+          </p>
+        </div>
+        )}
+
         {draft.defaultEncoder === 'auto' && !advancedOpen && (
           <p className="text-xs text-muted-foreground">
             Default encoder is {autoEncoderPreferenceLabel(draft.preferHardware)}.
@@ -319,7 +421,7 @@ export function VideoStreamDefaultsCard({ server }: VideoStreamDefaultsCardProps
         </div>
 
         <div className="flex gap-2">
-          <Button size="sm" onClick={save} disabled={!dirty || update.isPending}>
+          <Button size="sm" onClick={save} disabled={!dirty || update.isPending || invalidPresets.length > 0}>
             {update.isPending ? 'Saving…' : 'Save defaults'}
           </Button>
           {dirty && (

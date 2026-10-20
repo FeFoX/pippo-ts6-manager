@@ -33,8 +33,19 @@ export const settingsApi = {
 
   getLimits: () => api.get('/settings/limits').then((r) => r.data),
 
-  updateLimits: (data: { maxVideoDuration?: number; maxPlaylistImport?: number; youtubeDirectStream?: boolean }) =>
-    api.put('/settings/limits', data).then((r) => r.data),
+  updateLimits: (data: {
+    maxVideoDuration?: number;
+    maxPlaylistImport?: number;
+    youtubeDirectStream?: boolean;
+    seekCooldownSeconds?: number;
+  }) => api.put('/settings/limits', data).then((r) => r.data),
+
+  /** Server groups allowed to use the bot's chat commands; empty = everybody. */
+  getBotAccess: (): Promise<{ controlGroups: string[] }> =>
+    api.get('/settings/bot-access').then((r) => r.data),
+
+  updateBotAccess: (controlGroups: string[]): Promise<{ controlGroups: string[] }> =>
+    api.put('/settings/bot-access', { controlGroups }).then((r) => r.data),
 
   getVideoStreaming: (): Promise<VideoStreamSettings> =>
     api.get('/settings/video-streaming').then((r) => r.data),

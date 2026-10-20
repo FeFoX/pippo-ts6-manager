@@ -142,7 +142,11 @@ export function usePausePlayback() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (botId: number) => musicBotsApi.pause(botId),
-    onSuccess: (_, botId) => qc.invalidateQueries({ queryKey: ['music-bot-state', botId] }),
+    onSuccess: (_, botId) => {
+      qc.invalidateQueries({ queryKey: ['music-bot-state', botId] });
+      // A video pauses with the same call; its state comes from the media overview.
+      qc.invalidateQueries({ queryKey: ['bot-media'] });
+    },
   });
 }
 
@@ -150,7 +154,10 @@ export function useResumePlayback() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (botId: number) => musicBotsApi.resume(botId),
-    onSuccess: (_, botId) => qc.invalidateQueries({ queryKey: ['music-bot-state', botId] }),
+    onSuccess: (_, botId) => {
+      qc.invalidateQueries({ queryKey: ['music-bot-state', botId] });
+      qc.invalidateQueries({ queryKey: ['bot-media'] });
+    },
   });
 }
 
@@ -288,6 +295,7 @@ export function useStartVideoStream() {
     mutationFn: ({ botId, ...request }: { botId: number } & StartVideoStreamRequest) =>
       musicBotsApi.startStream(botId, request),
     onSuccess: (_, { botId }) => {
+      qc.invalidateQueries({ queryKey: ['bot-media'] });
       qc.invalidateQueries({ queryKey: ['video-stream-status', botId] });
       qc.invalidateQueries({ queryKey: ['music-bot-state', botId] });
     },

@@ -6,6 +6,8 @@ import { authApi } from '@/api/auth.api';
 import { serversApi } from '@/api/servers.api';
 import { settingsApi } from '@/api/settings.api';
 import { useAuthStore } from '@/stores/auth.store';
+import { useServerStore } from '@/stores/server.store';
+import { useServerGroups } from '@/hooks/use-groups';
 import {
   ACCENTS, BASE_THEMES, BACKGROUNDS, BACKGROUND_MOTIONS, BACKGROUND_INTENSITIES, useUiStore,
   type Accent, type BaseTheme, type Background, type BackgroundMotion, type BackgroundIntensity,
@@ -872,6 +874,8 @@ function UsersTab() {
         </DialogContent>
       </Dialog>
 
+      <BotAccessCard />
+
       {/* Reset Password Dialog */}
       <Dialog open={resetPwUserId !== null} onOpenChange={(v) => { if (!v) { setResetPwUserId(null); setResetPwValue(''); } }}>
         <DialogContent className="max-w-sm">
@@ -905,6 +909,111 @@ function UsersTab() {
         destructive
       />
     </div>
+  );
+}
+
+function BotAccessCard() {
+  const qc = useQueryClient();
+  const { selectedConfigId, selectedSid } = useServerStore();
+  const { data: access, isLoading } = useQuery({
+    queryKey: ['settings-bot-access'],
+    queryFn: settingsApi.getBotAccess,
+  });
+  const { data: groupData } = useServerGroups();
+  const [groups, setGroups] = useState<string[]>([]);
+  const [draft, setDraft] = useState('');
+
+  useEffect(() => {
+    if (access) setGroups(access.controlGroups ?? []);
+  }, [access]);
+
+  // Regular groups of the server selected in the sidebar, offered as suggestions.
+  const suggestions = useMemo(() => {
+    const list: any[] = Array.isArray(groupData) ? groupData : Array.isArray((groupData as any)?.body) ? (groupData as any).body : [];
+    return list
+      .filter((g) => String(g.type ?? '1') === '1' && typeof g.name === 'string' && g.name.trim() !== '')
+      .map((g) => g.name as string)
+      .filter((name) => !groups.some((g) => g.toLowerCase() === name.toLowerCase()));
+  }, [groupData, groups]);
+
+  const add = (raw: string) => {
+    const name = raw.trim();
+    if (!name) return;
+    setGroups((prev) => (prev.some((g) => g.toLowerCase() === name.toLowerCase()) ? prev : [...prev, name]));
+    setDraft('');
+  };
+
+  const dirty = JSON.stringify(groups) !== JSON.stringify(access?.controlGroups ?? []);
+
+  const save = useMutation({
+    mutationFn: () => settingsApi.updateBotAccess(groups),
+    onSuccess: (saved) => {
+      toast.success(saved.controlGroups.length ? 'Bot access saved' : 'Bot access saved: everybody can use the bot');
+      qc.invalidateQueries({ queryKey: ['settings-bot-access'] });
+    },
+    onError: (err) => toast.error(apiErrorMessage(err, 'Failed to save bot access')),
+  });
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm font-medium">Bot access</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <p className="text-xs text-muted-foreground">
+          Choose which TeamSpeak server groups may use the music bot's chat commands (!play, !stop, !seek,
+          !help and the rest). Leave the list empty to let everybody use it. A member's groups are checked
+          at every command, so a change here or a group taken away in TeamSpeak applies at once. If
+          TeamSpeak cannot be asked, or a listed group does not exist, nobody gets in. Custom chat
+          commands, viewing a video stream and this web panel are not affected.
+        </p>
+        {isLoading ? (
+          <p className="text-xs text-muted-foreground">Loading...</p>
+        ) : (
+          <>
+            <div>
+              <Label className="text-xs">Groups allowed to use the bot</Label>
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {groups.length === 0 && (
+                  <span className="text-xs text-muted-foreground">No group set: everybody can use the bot.</span>
+                )}
+                {groups.map((g) => (
+                  <Badge key={g} variant="secondary" className="gap-1">
+                    {g}
+                    <button
+                      type="button"
+                      aria-label={`Remove ${g}`}
+                      className="rounded-sm opacity-70 hover:opacity-100"
+                      onClick={() => setGroups((prev) => prev.filter((x) => x !== g))}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </Badge>
+                ))}
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <Input
+                list="bot-access-groups"
+                value={draft}
+                placeholder={selectedConfigId && selectedSid ? 'Group name or id' : 'Group name or id (select a server to get suggestions)'}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(draft); } }}
+              />
+              <datalist id="bot-access-groups">
+                {suggestions.map((name) => <option key={name} value={name} />)}
+              </datalist>
+              <Button type="button" size="sm" variant="outline" onClick={() => add(draft)} disabled={!draft.trim()}>
+                <Plus className="h-3.5 w-3.5 mr-1" /> Add
+              </Button>
+            </div>
+            <Button size="sm" onClick={() => save.mutate()} disabled={!dirty || save.isPending}>
+              {save.isPending ? 'Saving...' : 'Save bot access'}
+            </Button>
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1062,12 +1171,14 @@ function LimitsCard() {
   const [maxVideoDuration, setMaxVideoDuration] = useState('');
   const [maxPlaylistImport, setMaxPlaylistImport] = useState('');
   const [youtubeDirectStream, setYoutubeDirectStream] = useState(false);
+  const [seekCooldown, setSeekCooldown] = useState('');
 
   useEffect(() => {
     if (limits) {
       setMaxVideoDuration(String(limits.maxVideoDuration ?? 900));
       setMaxPlaylistImport(String(limits.maxPlaylistImport ?? 250));
       setYoutubeDirectStream(limits.youtubeDirectStream === true);
+      setSeekCooldown(String(limits.seekCooldownSeconds ?? 120));
     }
   }, [limits]);
 
@@ -1076,6 +1187,7 @@ function LimitsCard() {
       maxVideoDuration: parseInt(maxVideoDuration, 10),
       maxPlaylistImport: parseInt(maxPlaylistImport, 10),
       youtubeDirectStream,
+      seekCooldownSeconds: parseInt(seekCooldown, 10),
     }),
     onSuccess: () => {
       toast.success('Limits saved');
@@ -1134,6 +1246,23 @@ function LimitsCard() {
                 value={maxPlaylistImport}
                 onChange={(e) => setMaxPlaylistImport(e.target.value)}
               />
+            </div>
+            <div>
+              <Label htmlFor="seek-cooldown" className="text-xs">Seek cooldown for remote sources (seconds, 0 = no limit)</Label>
+              <Input
+                id="seek-cooldown"
+                type="number"
+                min={0}
+                max={86400}
+                value={seekCooldown}
+                onChange={(e) => setSeekCooldown(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Minimum wait between two seeks on a YouTube track or video, a link or a radio URL. A seek
+                reopens the remote resource, so this keeps repeated seeks from hammering the site. It counts
+                per bot, whoever asks. Files already on the server are never limited. A refused chat
+                !seek tells the user how long to wait.
+              </p>
             </div>
             <Button
               size="sm"

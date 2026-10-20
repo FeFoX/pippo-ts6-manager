@@ -3,7 +3,7 @@ import { Label } from '@/components/ui/label';
 import { ChevronDown } from 'lucide-react';
 import {
   ENCODER_OPTIONS, NO_VIEWER_TIMEOUT_OPTIONS, QUALITY_OPTIONS, SOURCE_MODE_OPTIONS,
-  autoEncoderPreferenceHint, autoEncoderPreferenceLabel,
+  autoEncoderPreferenceHint, autoEncoderPreferenceLabel, qualityOptionLabel,
 } from '@/lib/video-streaming';
 import { noViewerTimeoutLabel, videoOptionsSummary, type VideoStartOptions } from '@/lib/video-options';
 
@@ -38,13 +38,28 @@ export function VideoOptions({ value, onChange, defaults }: {
       </summary>
       <div className="space-y-3 border-t p-3">
         <p className="text-xs text-muted-foreground">For this start only. Use defaults to inherit the bot's quality and this server's streaming settings.</p>
+        <div className="space-y-1">
+          <Label htmlFor="vo-direct">Streaming mode</Label>
+          <select id="vo-direct" className={field} value={value.direct ? 'direct' : 'reencode'}
+            onChange={(e) => onChange({ ...value, direct: e.target.value === 'direct' })}>
+            <option value="reencode">Re-encode (default)</option>
+            <option value="direct">Direct: no re-encoding</option>
+          </select>
+          <p className="text-xs text-muted-foreground">
+            {value.direct
+              ? 'The video is sent as it is: almost no CPU, but more bandwidth per viewer and a new viewer may wait a few seconds for the next keyframe. It works on a downloaded VP9 file, or an H.264 file without B-frames (YouTube videos are asked for VP9 first); anything else is re-encoded and the Now playing card says why. Quality then only limits the download size.'
+              : 'The video is re-encoded to the quality and encoder below.'}
+          </p>
+        </div>
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-1">
             <Label htmlFor="vo-quality">Quality</Label>
             <select id="vo-quality" className={field} value={value.quality}
               onChange={(e) => onChange({ ...value, quality: e.target.value as VideoStartOptions['quality'] })}>
               <option value="">Use bot default</option>
-              {QUALITY_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              {QUALITY_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{qualityOptionLabel(o, defaults?.presetBitrates)}</option>
+              ))}
             </select>
           </div>
           <div className="space-y-1">

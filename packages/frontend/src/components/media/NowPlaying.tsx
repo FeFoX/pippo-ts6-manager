@@ -226,6 +226,7 @@ function VolumeControl({ bot, volume, onDrag, onCommit }: {
  */
 function FullNowPlaying({ bot, now, footer }: NowPlayingProps): JSX.Element {
   const pausePlayback = usePausePlayback();
+  const pauseVideo = pausePlayback;
   const resumePlayback = useResumePlayback();
   const skipTrack = useSkipTrack();
   const setVolume = useSetVolume();
@@ -244,7 +245,12 @@ function FullNowPlaying({ bot, now, footer }: NowPlayingProps): JSX.Element {
   const stopError = tone === 'music' ? stopMusic.error : tone === 'live' ? stopVideo.error : null;
 
   const badge = TONE_BADGE[tone];
+  const videoPaused = tone === 'live' && !!bot.video?.paused;
+  // Live broadcasts and loops have nowhere to resume from, so only a finite video is paused.
+  const canPauseVideo = tone === 'live' && bot.session?.state === 'active'
+    && !!bot.video && bot.video.sourceMode !== 'live';
   const badgeLabel = bot.session?.state === 'starting' ? 'Starting'
+    : videoPaused ? 'Paused'
     : tone === 'music' && isPaused ? 'Paused'
       : radio ? 'Radio'
         : badge.label;
@@ -353,6 +359,43 @@ function FullNowPlaying({ bot, now, footer }: NowPlayingProps): JSX.Element {
                 <span className="line-clamp-3">{bot.video.health.warning}</span>
               </p>
             )}
+            {bot.session?.state === 'starting' && (
+              <div className="space-y-2 rounded-md border bg-muted/30 p-3" role="status" aria-live="polite">
+                <p className="text-sm font-medium">
+                  {bot.preparing ? 'Converting the video first' : 'Getting the video ready'}
+                  {bot.preparing?.percent != null && ` · ${Math.floor(bot.preparing.percent)}%`}
+                </p>
+                {bot.preparing && (
+                  <>
+                    <div className="h-1.5 rounded-full bg-muted" role="progressbar" aria-label="Conversion progress"
+                      aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.floor(bot.preparing.percent ?? 0)}>
+                      <div className="h-1.5 rounded-full bg-primary transition-all"
+                        style={{ width: `${Math.min(100, bot.preparing.percent ?? 0)}%` }} />
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {bot.preparing.speed != null ? `${bot.preparing.speed.toFixed(1)}× real time` : 'Measuring speed…'}
+                      {bot.preparing.etaSec != null && ` · about ${Math.max(1, Math.round(bot.preparing.etaSec / 60))} min left`}
+                      {' · it starts by itself when ready'}
+                    </p>
+                  </>
+                )}
+                <Button variant="outline" className="h-11 w-full"
+                  disabled={stopVideo.isPending} onClick={() => stopVideo.mutate(bot.botId)}>
+                  <Square className="mr-1.5 h-4 w-4" aria-hidden="true" /> Cancel
+                </Button>
+              </div>
+            )}
+            {bot.video?.directFallback && (
+              <p className="flex items-start gap-1.5 text-xs text-warning">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span className="line-clamp-3">{bot.video.directFallback}</span>
+              </p>
+            )}
+            {pauseVideo.error || resumePlayback.error ? (
+              <p role="alert" className="text-xs text-destructive">
+                {apiErrorMessage(pauseVideo.error ?? resumePlayback.error, 'Could not pause or resume')}
+              </p>
+            ) : null}
             {bot.video?.encoder?.fallbackReason && (
               <p className="flex items-start gap-1.5 text-xs text-warning">
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
@@ -361,10 +404,23 @@ function FullNowPlaying({ bot, now, footer }: NowPlayingProps): JSX.Element {
             )}
             {volumeControl}
             {bot.session?.state === 'active' && (
-              <Button variant="outline" className="h-11 w-full border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
-                disabled={stopVideo.isPending} onClick={() => stopVideo.mutate(bot.botId)}>
-                <Square className="mr-1.5 h-4 w-4" aria-hidden="true" /> Stop stream
-              </Button>
+              <div className={cn('grid gap-2', canPauseVideo ? 'grid-cols-2' : 'grid-cols-1')}>
+                {canPauseVideo && (videoPaused ? (
+                  <Button variant="outline" className="h-11 min-w-0" aria-label={`Resume ${bot.botName}`}
+                    disabled={playbackPending} onClick={() => resumePlayback.mutate(bot.botId)}>
+                    <Play className="mr-1.5 h-4 w-4" aria-hidden="true" /> Resume
+                  </Button>
+                ) : (
+                  <Button variant="outline" className="h-11 min-w-0" aria-label={`Pause ${bot.botName}`}
+                    disabled={playbackPending} onClick={() => pauseVideo.mutate(bot.botId)}>
+                    <Pause className="mr-1.5 h-4 w-4" aria-hidden="true" /> Pause
+                  </Button>
+                ))}
+                <Button variant="outline" className="h-11 min-w-0 border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  disabled={stopVideo.isPending} onClick={() => stopVideo.mutate(bot.botId)}>
+                  <Square className="mr-1.5 h-4 w-4" aria-hidden="true" /> Stop stream
+                </Button>
+              </div>
             )}
           </div>
         )}

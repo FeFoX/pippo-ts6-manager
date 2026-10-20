@@ -12,12 +12,12 @@ export const ENCODE_PROFILE_PRESETS: Record<
   { autoMaxPreset: VideoStreamPresetKey; maxBitrateKbps: number; cpuUsed: number; label: string; hint: string }
 > = {
   performance: {
-    autoMaxPreset: '720p', maxBitrateKbps: 2500, cpuUsed: 6,
-    label: 'Performance', hint: '720p · 2.5 Mbps · faster encode',
+    autoMaxPreset: '720p', maxBitrateKbps: 4000, cpuUsed: 6,
+    label: 'Performance', hint: '720p · 4 Mbps · faster encode',
   },
   balanced: {
-    autoMaxPreset: '1080p', maxBitrateKbps: 4500, cpuUsed: 4,
-    label: 'Balanced', hint: '1080p · 4.5 Mbps · default encode',
+    autoMaxPreset: '1080p', maxBitrateKbps: 7000, cpuUsed: 4,
+    label: 'Balanced', hint: '1080p · 7 Mbps · default encode',
   },
   quality: {
     autoMaxPreset: '1440p', maxBitrateKbps: 0, cpuUsed: 2,

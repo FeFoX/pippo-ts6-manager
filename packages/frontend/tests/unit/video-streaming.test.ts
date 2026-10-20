@@ -4,11 +4,14 @@ import {
   ENCODER_OPTIONS,
   autoEncoderPreferenceHint,
   autoEncoderPreferenceLabel,
+  QUALITY_OPTIONS,
   encoderLabel,
   formatClock,
+  formatMbps,
   formatTimeout,
   lastStopLabel,
   qualityLabel,
+  qualityOptionLabel,
 } from '../../src/lib/video-streaming';
 
 describe('video streaming labels', () => {
@@ -86,5 +89,24 @@ describe('video streaming labels', () => {
     );
     assert.equal(lastStopLabel({ reason: 'manual', at: now, detail: null }, now), 'Stopped manually · just now');
     assert.equal(lastStopLabel(null, now), null);
+  });
+});
+
+describe('bitrate per resolution labels', () => {
+  const bitrates = { '480p': 1000, '720p': 4000, '1080p': 7000, '1440p': 8000, '2160p': 9500 };
+  const option = (value: string) => QUALITY_OPTIONS.find((o) => o.value === value)!;
+
+  it('formats kbps as Mbps', () => {
+    assert.equal(formatMbps(4000), '4 Mbps');
+    assert.equal(formatMbps(7000), '7 Mbps');
+    assert.equal(formatMbps(4500), '4.5 Mbps');
+    assert.equal(formatMbps(9500), '9.5 Mbps');
+  });
+
+  it('shows the configured bitrate next to a fixed resolution only', () => {
+    assert.equal(qualityOptionLabel(option('720p'), bitrates), '720p · 4 Mbps');
+    assert.equal(qualityOptionLabel(option('1080p'), bitrates), '1080p · 7 Mbps');
+    assert.equal(qualityOptionLabel(option('auto'), bitrates), 'Auto');
+    assert.equal(qualityOptionLabel(option('1080p'), undefined), '1080p');
   });
 });

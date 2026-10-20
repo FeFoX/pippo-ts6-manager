@@ -18,12 +18,33 @@ import type {
 
 export const QUALITY_OPTIONS: ReadonlyArray<{ value: VideoQualityRequest; label: string; hint: string }> = [
   { value: 'auto', label: 'Auto', hint: 'Match the source, never upscale' },
-  { value: '480p', label: '480p', hint: '854×480 · 1 Mbps' },
-  { value: '720p', label: '720p', hint: '1280×720 · 2.5 Mbps' },
-  { value: '1080p', label: '1080p', hint: '1920×1080 · 4.5 Mbps' },
-  { value: '1440p', label: '1440p', hint: '2560×1440 · 8 Mbps' },
-  { value: '2160p', label: '2160p', hint: '3840×2160 · 14 Mbps' },
+  { value: '480p', label: '480p', hint: '854×480' },
+  { value: '720p', label: '720p', hint: '1280×720' },
+  { value: '1080p', label: '1080p', hint: '1920×1080' },
+  { value: '1440p', label: '1440p', hint: '2560×1440' },
+  { value: '2160p', label: '2160p', hint: '3840×2160' },
 ];
+
+/** Every resolution with a configurable bitrate, smallest first. */
+export const PRESET_KEYS: ReadonlyArray<VideoStreamPresetKey> = ['480p', '720p', '1080p', '1440p', '2160p'];
+
+/** Lowest and highest bitrate (kbps) the server accepts for a resolution. */
+export const MIN_PRESET_BITRATE_KBPS = 100;
+export const MAX_PRESET_BITRATE_KBPS = 9500;
+
+/** "4 Mbps", "7 Mbps", "4.5 Mbps". */
+export function formatMbps(kbps: number): string {
+  return `${Math.round(kbps / 100) / 10} Mbps`;
+}
+
+/** A quality choice's menu text, with the configured bitrate of a fixed resolution when known. */
+export function qualityOptionLabel(
+  option: { value: VideoQualityRequest; label: string },
+  presetBitrates?: Partial<Record<VideoStreamPresetKey, number>>,
+): string {
+  const kbps = option.value === 'auto' ? undefined : presetBitrates?.[option.value];
+  return kbps ? `${option.label} · ${formatMbps(kbps)}` : option.label;
+}
 
 export const AUTO_LIMIT_OPTIONS: ReadonlyArray<VideoStreamPresetKey> = ['720p', '1080p', '1440p', '2160p'];
 

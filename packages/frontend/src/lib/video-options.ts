@@ -18,19 +18,22 @@ export interface VideoStartOptions {
   /** Timeout seconds as a string; "0" disables the no-viewer stop. */
   noViewerTimeout: string;
   sourceMode: VideoSourceModeRequest;
+  /** Send the video without re-encoding it (H.264 files only; anything else is re-encoded). */
+  direct: boolean;
 }
 
 /** Empty choices leave defaults to the backend at stream start. */
 export function videoStartDefaults(sourceMode: VideoSourceModeRequest = 'auto'): VideoStartOptions {
-  return { quality: '', encoder: '', noViewerTimeout: '', sourceMode };
+  return { quality: '', encoder: '', noViewerTimeout: '', sourceMode, direct: false };
 }
 
 export const DEFAULT_VIDEO_START_OPTIONS: VideoStartOptions = videoStartDefaults();
 
 export function videoStartRequest(
   options: VideoStartOptions,
-): Pick<StartVideoStreamRequest, 'preset' | 'encoder' | 'noViewerTimeoutSec' | 'sourceMode'> {
+): Pick<StartVideoStreamRequest, 'preset' | 'encoder' | 'noViewerTimeoutSec' | 'sourceMode' | 'direct'> {
   return {
+    ...(options.direct ? { direct: true } : {}),
     ...(options.quality !== '' ? { preset: options.quality } : {}),
     ...(options.encoder !== '' ? { encoder: options.encoder } : {}),
     ...(options.noViewerTimeout !== '' ? { noViewerTimeoutSec: Number(options.noViewerTimeout) } : {}),
@@ -48,7 +51,7 @@ export function noViewerTimeoutLabel(value: string): string {
 export function videoOptionsSummary(value: VideoStartOptions): string {
   const quality = QUALITY_OPTIONS.find((o) => o.value === value.quality)?.label ?? 'Default quality';
   const encoder = ENCODER_OPTIONS.find((o) => o.value === value.encoder)?.label ?? 'Default encoder';
-  const parts = [quality, value.encoder === 'auto' ? 'Auto encoder' : encoder];
+  const parts = [quality, value.direct ? 'Direct, no re-encoding' : value.encoder === 'auto' ? 'Auto encoder' : encoder];
   if (value.noViewerTimeout !== '') {
     parts.push(value.noViewerTimeout === '0' ? 'no auto-stop' : `stops after ${noViewerTimeoutLabel(value.noViewerTimeout)}`);
   } else {
