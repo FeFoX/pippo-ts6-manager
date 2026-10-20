@@ -158,7 +158,7 @@ func TestFFmpegHTTPConnections(t *testing.T) {
 				connections, kept = map[string]int{}, 0
 				segments = map[string]bool{}
 				mu.Unlock()
-				if _, err := probeRemoteSource(context.Background(), origins[0].URL+"/get.php", testPolicy(allowedTestIP)); err != nil {
+				if _, err := probeRemoteSource(context.Background(), origins[0].URL+"/get.php", testPolicy(allowedTestIP), false); err != nil {
 					t.Fatal(err)
 				}
 				mu.Lock()

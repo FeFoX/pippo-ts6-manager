@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -591,6 +593,18 @@ type Peer struct {
 const maxPendingICE = 64
 
 type Sidecar struct {
+	// rtcpNacks and rtcpKeyframeRequests count what viewers ask for (all viewers, whole run).
+	// videoPacer paces the video of a direct stream; nil when off or when the video is re-encoded.
+	videoPacer           atomic.Pointer[videoPacer]
+	// convert is the latest conversion job (see convert.go); one runs at a time.
+	convertMu sync.Mutex
+	convert   *convertJob
+	// vp9Rewrite is on while a copied VP9 video is sent: its packets get a proper payload
+	// descriptor (see vp9_descriptor.go). vp9Desc keeps its counters across sources.
+	vp9Rewrite atomic.Bool
+	vp9Desc    vp9Descriptor
+	rtcpNacks            uint64
+	rtcpKeyframeRequests uint64
 	peers     map[string]*Peer
 	peersLock sync.RWMutex
 	creating  map[string]*createInFlight
@@ -815,9 +829,17 @@ func (s *Sidecar) processVideoRTP() {
 	for q := range s.videoQueue {
 		s.waitToSend("video", q)
 		pkt := q.pkt
+		if p := s.videoPacer.Load(); p != nil {
+			if d := p.delay(len(pkt.Payload)+12, time.Now()); d > 500*time.Microsecond {
+				time.Sleep(d)
+			}
+		}
 		codec := s.currentCodec()
 		if codec == codecH264 {
 			s.h264Params.observe(pkt.Payload)
+		}
+		if codec == codecVP9 && s.vp9Rewrite.Load() {
+			pkt.Payload = s.vp9Desc.rewrite(pkt.Payload, pkt.Marker)
 		}
 
 		s.peersLock.RLock()
@@ -1033,14 +1055,20 @@ func (s *Sidecar) CreatePeerFor(id string, codec string, browser bool) (sdp stri
 		return "", err
 	}
 
-	if _, err = pc.AddTrack(videoTrack); err != nil {
+	videoSender, err := pc.AddTrack(videoTrack)
+	if err != nil {
 		pc.Close()
 		return "", err
 	}
-	if _, err = pc.AddTrack(audioTrack); err != nil {
+	audioSender, err := pc.AddTrack(audioTrack)
+	if err != nil {
 		pc.Close()
 		return "", err
 	}
+	// Pion's interceptors (NACK retransmission among them) only see the feedback of a
+	// viewer if something reads it.
+	go s.readFeedback(videoSender, id, "video")
+	go s.readFeedback(audioSender, id, "audio")
 
 	peer := &Peer{
 		ID:         id,
@@ -1308,6 +1336,29 @@ func (s *Sidecar) ClosePeer(id string) {
 	s.peersLock.Unlock()
 }
 
+// readFeedback reads the RTCP a viewer sends for one track until the track closes. Reading
+// is what lets the NACK responder see retransmission requests; the loop also counts them.
+func (s *Sidecar) readFeedback(sender *webrtc.RTPSender, id, kind string) {
+	for {
+		pkts, _, err := sender.ReadRTCP()
+		if err != nil {
+			return
+		}
+		for _, p := range pkts {
+			switch p.(type) {
+			case *rtcp.TransportLayerNack:
+				if n := atomic.AddUint64(&s.rtcpNacks, 1); n == 1 || n%200 == 0 {
+					log.Printf("[Peer %s] %s retransmission requests so far: %d", id, kind, n)
+				}
+			case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+				if n := atomic.AddUint64(&s.rtcpKeyframeRequests, 1); n == 1 || n%20 == 0 {
+					log.Printf("[Peer %s] %s keyframe requests so far: %d", id, kind, n)
+				}
+			}
+		}
+	}
+}
+
 // SourceRequest is one POST /source call.
 type SourceRequest struct {
 	Source string
@@ -1329,6 +1380,17 @@ type SourceRequest struct {
 	AllowedHosts []string
 	// CpuUsed overrides VIDEO_CPU_USED / VIDEO_VP9_CPU_USED when > 0.
 	CpuUsed int
+	// StartSeconds starts a VOD or file source at this offset (a seek). Zero
+	// starts at the beginning; a live source has no timeline and ignores it.
+	StartSeconds float64
+	// Passthrough sends the source's own video to viewers without re-encoding
+	// it (-c:v copy). The encoder names the codec the source really is: h264
+	// (the caller has checked 4:2:0 and no B-frames) or vp9 (profile 0, 4:2:0).
+	// The audio is still encoded to Opus.
+	Passthrough bool
+	// PacingFactor spreads the packets of a direct stream over time at this multiple of the
+	// video's own bitrate (see pacer.go). 0 sends them as ffmpeg writes them.
+	PacingFactor float64
 }
 
 // EncoderSession reports which encoder is actually running, so a hardware
@@ -1418,6 +1480,15 @@ func hwVerifyWindow() time.Duration {
 // and the IP and UDP headers; 1200 is the size WebRTC senders use.
 const rtpPacketSize = 1200
 
+// clampStartSeconds keeps a requested seek offset usable: negative, NaN and
+// infinite values mean "from the start".
+func clampStartSeconds(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+		return 0
+	}
+	return v
+}
+
 // buildFFmpegArgs assembles the full ffmpeg command line for req and spec.
 func (s *Sidecar) buildFFmpegArgs(req SourceRequest, spec EncoderSpec, lowPower bool) []string {
 	w := req.Width
@@ -1469,6 +1540,12 @@ func (s *Sidecar) buildFFmpegArgs(req SourceRequest, spec EncoderSpec, lowPower 
 				args = append(args, "-stream_loop", "-1")
 			}
 
+			// A seek starts each input at the same offset, the video and, for a
+			// split source, the audio too. Live sources cannot be seeked.
+			if req.StartSeconds > 0 && mode != modeLive {
+				args = append(args, "-ss", strconv.FormatFloat(req.StartSeconds, 'f', 3, 64))
+			}
+
 			// Live IPTV often has non-monotonic DTS. Without igndts, ffmpeg drops
 			// those audio frames and the stream cuts in and out.
 			fflags := "+genpts+discardcorrupt"
@@ -1491,19 +1568,33 @@ func (s *Sidecar) buildFFmpegArgs(req SourceRequest, spec EncoderSpec, lowPower 
 	}
 	audioDelayMs := envIntOrDefault("AUDIO_DELAY_MS", 0)
 
-	if source != "" {
-		vf := fmt.Sprintf(
-			"fps=%d,scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,%s",
-			fps, w, h, w, h, uploadFilter(spec),
-		)
-		args = append(args,
-			"-map", "0:v:0",
-			"-vf", vf,
-		)
-	} else if spec.Hardware {
-		args = append(args, "-vf", uploadFilter(spec))
+	if source != "" && req.Passthrough {
+		// Direct stream: the source's video goes to RTP as it is.
+		args = append(args, "-map", "0:v:0", "-c:v", "copy")
+		if spec.Codec == codecVP9 {
+			// ffmpeg still labels VP9 RTP packetization experimental.
+			args = append(args, "-strict", "experimental")
+		} else {
+			// h264_mp4toannexb turns the MP4 length-prefixed NAL units into Annex B
+			// and puts SPS/PPS before every keyframe, so a viewer who joins late
+			// can start decoding.
+			args = append(args, "-bsf:v", "h264_mp4toannexb")
+		}
+	} else {
+		if source != "" {
+			vf := fmt.Sprintf(
+				"fps=%d,scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,%s",
+				fps, w, h, w, h, uploadFilter(spec),
+			)
+			args = append(args,
+				"-map", "0:v:0",
+				"-vf", vf,
+			)
+		} else if spec.Hardware {
+			args = append(args, "-vf", uploadFilter(spec))
+		}
+		args = append(args, encoderArgs(spec, vBitrate, lowPower, req.CpuUsed)...)
 	}
-	args = append(args, encoderArgs(spec, vBitrate, lowPower, req.CpuUsed)...)
 	args = append(args,
 		"-payload_type", "96",
 		"-ssrc", "11111111",
@@ -1615,11 +1706,28 @@ func (s *Sidecar) StartFFmpeg(req SourceRequest) (EncoderSession, error) {
 	if !ok {
 		return EncoderSession{}, fmt.Errorf("unknown encoder %q", req.Encoder)
 	}
+	if req.Passthrough {
+		// Viewers negotiate the codec of the source; nothing is encoded, so a
+		// hardware encoder (and its fallback) has no part in it. VP8 is not
+		// offered: no site serves it as a video-only stream worth copying.
+		if requested.Codec != codecH264 && requested.Codec != codecVP9 {
+			return EncoderSession{}, fmt.Errorf("a direct stream needs an H.264 or VP9 encoder, not %q", req.Encoder)
+		}
+		requested = softwareEncoderFor(requested.Codec)
+	}
 
 	s.StopFFmpegLocked()
 	s.resetSyncTiming()
 	s.drainRTPQueues()
 	s.resetPeerStreamState()
+	// Only a copied video has frame bursts worth smoothing; a re-encode is already evenly paced.
+	if req.Passthrough {
+		s.videoPacer.Store(newVideoPacer(req.PacingFactor))
+	} else {
+		s.videoPacer.Store(nil)
+	}
+	s.vp9Desc.reset()
+	s.vp9Rewrite.Store(req.Passthrough && requested.Codec == codecVP9)
 
 	// One proxy per source, kept across the hardware-fallback relaunches below.
 	if isRemoteSource(req.Source) && egressEnabled() {
@@ -1758,6 +1866,9 @@ func (s *Sidecar) GetStats() map[string]interface{} {
 		"codec":     s.currentCodec(),
 		"encoder":   s.encoderSession(),
 		"health":    s.streamHealth(),
+		// What viewers asked for: lost packets again (NACK) and new keyframes (PLI/FIR).
+		"retransmissionRequests": atomic.LoadUint64(&s.rtcpNacks),
+		"keyframeRequests":       atomic.LoadUint64(&s.rtcpKeyframeRequests),
 	}
 }
 
@@ -1925,6 +2036,13 @@ func main() {
 			AllowedHosts []string `json:"allowedHosts"`
 			// CpuUsed overrides VIDEO_CPU_USED for software VP8/VP9 when > 0.
 			CpuUsed int `json:"cpuUsed"`
+			// StartSeconds starts a VOD or file source at this offset (a seek).
+			StartSeconds float64 `json:"startSeconds"`
+			// Passthrough streams the source's own H.264 or VP9 without re-encoding it
+			// (the encoder field names which).
+			Passthrough bool `json:"passthrough"`
+			// Pacing is the PacingFactor of a direct stream; 0 = off.
+			Pacing float64 `json:"pacing"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), 400)
@@ -1957,7 +2075,7 @@ func main() {
 			return
 		}
 		loop := req.Loop == nil || *req.Loop
-		log.Printf("[API] Setting source (%dx%d @ %dfps vol=%d loop=%v encoder=%s)", req.Width, req.Height, req.Framerate, vol, loop, encoderID)
+		log.Printf("[API] Setting source (%dx%d @ %dfps vol=%d loop=%v encoder=%s passthrough=%v)", req.Width, req.Height, req.Framerate, vol, loop, encoderID, req.Passthrough)
 		session, err := sidecar.StartFFmpeg(SourceRequest{
 			Source:       req.Source,
 			AudioSource:  req.AudioSource,
@@ -1971,6 +2089,9 @@ func main() {
 			Mode:         req.Mode,
 			AllowedHosts: req.AllowedHosts,
 			CpuUsed:      req.CpuUsed,
+			StartSeconds: clampStartSeconds(req.StartSeconds),
+			Passthrough:  req.Passthrough,
+			PacingFactor: req.Pacing,
 		})
 		if err != nil {
 			http.Error(w, err.Error(), 500)
@@ -1980,12 +2101,58 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "encoder": session})
 	}))
 
+	// POST /convert starts converting a video into H.264 without B-frames (see convert.go).
+	mux.HandleFunc("POST /convert", requireSidecarAuth(func(w http.ResponseWriter, r *http.Request) {
+		var req ConvertRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		st, err := sidecar.StartConvert(req)
+		if err != nil {
+			code := 400
+			if errors.Is(err, errConvertBusy) {
+				code = 409
+			}
+			http.Error(w, err.Error(), code)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(st)
+	}))
+	mux.HandleFunc("GET /convert", requireSidecarAuth(func(w http.ResponseWriter, r *http.Request) {
+		st, ok := sidecar.ConvertStatusFor(r.URL.Query().Get("id"))
+		if !ok {
+			http.Error(w, "unknown conversion", 404)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(st)
+	}))
+	mux.HandleFunc("POST /convert/cancel", requireSidecarAuth(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID string `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		if !sidecar.CancelConvert(req.ID) {
+			http.Error(w, "unknown conversion", 404)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+
 	// POST /probe reads a remote source's video size and duration for Auto
 	// quality, through the same egress policy as streaming it.
 	mux.HandleFunc("POST /probe", requireSidecarAuth(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Source       string   `json:"source"`
 			AllowedHosts []string `json:"allowedHosts"`
+			// Detail adds the codec, profile, pixel format and frame ordering of the first
+			// packets, to decide whether the picture can be copied (see probeDirectArgs).
+			Detail bool `json:"detail"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), 400)
@@ -1995,7 +2162,7 @@ func main() {
 			http.Error(w, "only http(s) sources are probed here", 400)
 			return
 		}
-		out, err := probeRemoteSource(r.Context(), req.Source, &egressPolicy{allow: parseHostAllowlist(req.AllowedHosts)})
+		out, err := probeRemoteSource(r.Context(), req.Source, &egressPolicy{allow: parseHostAllowlist(req.AllowedHosts)}, req.Detail)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return

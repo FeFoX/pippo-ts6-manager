@@ -77,7 +77,7 @@ const probeTimeout = 10 * time.Second
 
 // probeRemoteSource runs ffprobe on source through a temporary egress proxy
 // (unless SIDECAR_EGRESS_PROXY=off) and returns ffprobe's JSON.
-func probeRemoteSource(ctx context.Context, source string, policy *egressPolicy) ([]byte, error) {
+func probeRemoteSource(ctx context.Context, source string, policy *egressPolicy, detail bool) ([]byte, error) {
 	if !isRemoteSource(source) {
 		return nil, errors.New("not a remote source")
 	}
@@ -99,10 +99,16 @@ func probeRemoteSource(ctx context.Context, source string, policy *egressPolicy)
 	args = append(args,
 		"-rw_timeout", "8000000", // microseconds: bounds each network read
 		"-select_streams", "v:0",
-		"-show_entries", "stream=width,height:format=duration",
-		"-of", "json",
-		source,
 	)
+	if detail {
+		args = append(args, probeDirectArgs()...)
+	} else {
+		args = append(args,
+			"-show_entries", "stream=width,height:format=duration",
+			"-of", "json",
+		)
+	}
+	args = append(args, source)
 	cmd := exec.CommandContext(ctx, getFfprobePath(), args...)
 	cmd.Env = env
 	var stdout bytes.Buffer
@@ -410,5 +416,17 @@ func copyFlushing(w http.ResponseWriter, body io.Reader) {
 		if err != nil {
 			return
 		}
+	}
+}
+
+// probeDirectArgs asks for what decides whether a picture can be sent as it is: the codec,
+// profile and pixel format, how many frames the decoder must hold back (B-frames), and the
+// display and decode times of the first packets (they differ by a changing amount when frames
+// are reordered). The length comes along for the progress of a conversion.
+func probeDirectArgs() []string {
+	return []string{
+		"-read_intervals", "%+#150",
+		"-show_entries", "stream=codec_name,profile,pix_fmt,has_b_frames,width,height:packet=pts,dts:format=duration",
+		"-of", "json=c=1",
 	}
 }

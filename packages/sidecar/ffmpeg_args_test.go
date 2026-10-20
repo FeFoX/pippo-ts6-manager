@@ -124,3 +124,66 @@ func TestExtraFFmpegArgsOverrideAndReject(t *testing.T) {
 		t.Fatalf("a bad extra value is ignored and the default remains: %s", broken)
 	}
 }
+
+func TestBuildFFmpegArgsPassthroughCopiesVideo(t *testing.T) {
+	t.Setenv("FFMPEG_EXTRA_INPUT_ARGS", "")
+	got := ffmpegArgLine(SourceRequest{
+		Source: "/data/music/clip.mp4", Mode: modeFile, Volume: 100,
+		Width: 1280, Height: 720, Framerate: 30, Bitrate: "1500k", Passthrough: true,
+	})
+	for _, want := range []string{"-map 0:v:0 -c:v copy -bsf:v h264_mp4toannexb", "-f rtp", "-c:a libopus"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("direct stream must contain %q: %s", want, got)
+		}
+	}
+	// Nothing may touch the picture: no filter graph, no encoder, no rate control.
+	for _, bad := range []string{"-vf", "scale=", "libx264", "libvpx", "-b:v", "-maxrate", "-bufsize", "-preset"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("direct stream must not contain %q: %s", bad, got)
+		}
+	}
+}
+
+func TestBuildFFmpegArgsReencodeStillFiltersAndEncodes(t *testing.T) {
+	t.Setenv("FFMPEG_EXTRA_INPUT_ARGS", "")
+	got := ffmpegArgLine(SourceRequest{
+		Source: "/data/music/clip.mp4", Mode: modeFile, Volume: 100,
+		Width: 1280, Height: 720, Framerate: 30, Bitrate: "1500k",
+	})
+	for _, want := range []string{"-vf", "scale=1280:720", "-b:v 1500k"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("re-encode must contain %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "-c:v copy") {
+		t.Fatalf("re-encode must not copy: %s", got)
+	}
+}
+
+func TestStartFFmpegPassthroughNeedsH264(t *testing.T) {
+	s := NewSidecar()
+	_, err := s.StartFFmpeg(SourceRequest{Source: "/data/music/clip.mp4", Encoder: "vp8", Passthrough: true})
+	if err == nil || !strings.Contains(err.Error(), "H.264 or VP9") {
+		t.Fatalf("a VP8 direct stream must be refused, got %v", err)
+	}
+}
+
+func TestBuildFFmpegArgsPassthroughVP9(t *testing.T) {
+	t.Setenv("FFMPEG_EXTRA_INPUT_ARGS", "")
+	s := NewSidecar()
+	spec, _ := lookupEncoder("vp9")
+	got := strings.Join(s.buildFFmpegArgs(SourceRequest{
+		Source: "/data/music/clip.mp4", Mode: modeFile, Volume: 100, Passthrough: true,
+		Width: 1280, Height: 720, Framerate: 30, Bitrate: "1500k",
+	}, spec, false), " ")
+	for _, want := range []string{"-map 0:v:0 -c:v copy -strict experimental", "-f rtp", "-c:a libopus"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("direct VP9 must contain %q: %s", want, got)
+		}
+	}
+	for _, bad := range []string{"-bsf:v", "h264_mp4toannexb", "-vf", "libvpx", "-b:v"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("direct VP9 must not contain %q: %s", bad, got)
+		}
+	}
+}

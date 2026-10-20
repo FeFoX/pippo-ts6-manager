@@ -115,15 +115,21 @@ func validCodec(codec string) bool {
 	return codec == codecVP8 || codec == codecVP9 || codec == codecH264
 }
 
+// videoFeedback is the RTCP feedback offered with every video codec. NACK lets a viewer
+// ask for a lost packet again, PLI for a new keyframe. Without NACK a lost packet freezes
+// the picture until the next keyframe: half a second for a re-encode (a keyframe every
+// VIDEO_GOP frames), but several seconds for a video sent as it is.
+var videoFeedback = []webrtc.RTCPFeedback{{Type: "nack"}, {Type: "nack", Parameter: "pli"}}
+
 // codecCapability is what CreatePeer registers and offers for a codec family.
 func codecCapability(codec string) webrtc.RTPCodecCapability {
 	switch codec {
 	case codecVP9:
-		return webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP9, ClockRate: 90000, SDPFmtpLine: "profile-id=0"}
+		return webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP9, ClockRate: 90000, SDPFmtpLine: "profile-id=0", RTCPFeedback: videoFeedback}
 	case codecH264:
-		return webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: h264ConstrainedHighFmtp}
+		return webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: h264ConstrainedHighFmtp, RTCPFeedback: videoFeedback}
 	default:
-		return webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000}
+		return webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000, RTCPFeedback: videoFeedback}
 	}
 }
 

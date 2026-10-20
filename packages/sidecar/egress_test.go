@@ -372,7 +372,7 @@ func TestFFprobeThroughEgress(t *testing.T) {
 	originTLS := startServerOn(t, allowedTestIP, true, files)
 
 	probe := func(source string, permitted ...net.IP) error {
-		_, err := probeRemoteSource(context.Background(), source, testPolicy(permitted...))
+		_, err := probeRemoteSource(context.Background(), source, testPolicy(permitted...), false)
 		return err
 	}
 
