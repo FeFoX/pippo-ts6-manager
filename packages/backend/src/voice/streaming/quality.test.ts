@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  defaultPresetBitrates,
   effectiveBitrate,
   normalizeQualityRequest,
   parseBitrateKbps,
+  presetBitrate,
   resolveQuality,
   selectAutoPreset,
 } from './quality.js';
@@ -94,5 +96,24 @@ describe('bitrates', () => {
     assert.equal(normalizeQualityRequest('2160p', '720p'), '2160p');
     assert.equal(normalizeQualityRequest('4k', '720p'), '720p');
     assert.equal(normalizeQualityRequest(undefined, '720p'), '720p');
+  });
+});
+
+describe('bitrate per resolution', () => {
+  it('built-in bitrates are 4000k for 720p and 7000k for 1080p', () => {
+    assert.deepEqual(defaultPresetBitrates(), { '480p': 1000, '720p': 4000, '1080p': 7000, '1440p': 8000, '2160p': 9500 });
+  });
+
+  it('uses the configured bitrate of the resolution, else the built-in one', () => {
+    assert.equal(presetBitrate({ presetBitrates: { ...defaultPresetBitrates(), '1080p': 6000 } }, '1080p'), '6000k');
+    assert.equal(presetBitrate(undefined, '720p'), '4000k');
+    assert.equal(presetBitrate({ presetBitrates: {} as never }, '1080p'), '7000k');
+  });
+
+  it('the bitrate limit still caps a resolution above it', () => {
+    assert.equal(effectiveBitrate(null, '7000k', 4500), '4500k');
+    assert.equal(effectiveBitrate(null, '7000k', 7000), '7000k');
+    assert.equal(effectiveBitrate(null, '7000k', 0), '7000k');
+    assert.equal(effectiveBitrate(null, '4000k', 4000), '4000k');
   });
 });

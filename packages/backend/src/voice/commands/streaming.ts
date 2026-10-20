@@ -7,15 +7,40 @@ import { classifyStreamHost } from '../streaming/video-download.js';
 import type { CommandContext } from './context.js';
 
 // ─── Video Streaming Commands ─────────────────────────────
+/** `!streamdirect`: like `!stream`, but the video goes to viewers without being re-encoded. */
+export async function handleStreamDirect(
+  context: CommandContext,
+  bot: VoiceBot,
+  userClid: number,
+  args: string,
+): Promise<void> {
+  return handleStream(context, bot, userClid, args, true);
+}
+
+/** What the viewers get once a stream runs: said once, so nobody has to open the web page to know. */
+function describeMode(bot: VoiceBot, direct: boolean): string {
+  if (!direct) return '';
+  const status = bot.videoStreamStatus;
+  if (status.direct) return ' (direct: the video is copied, not re-encoded)';
+  return status.directFallback ? ` — ${status.directFallback}` : '';
+}
+
 /** Validate stream arguments and start or change a video source with existing preset rules. */
 export async function handleStream(
   context: CommandContext,
   bot: VoiceBot,
   userClid: number,
   args: string,
+  direct = false,
 ): Promise<void> {
   if (!args) {
-    context.reply(bot, userClid, 'Usage: !stream <url> [preset]  — Presets: auto (default for YouTube and Twitch), 480p, 720p, 1080p, 1440p, 2160p');
+    context.reply(
+      bot,
+      userClid,
+      direct
+        ? 'Usage: !streamdirect <url> [preset]  — sends the video without re-encoding it (VP9 or H.264 without B-frames, otherwise it is re-encoded). Presets limit the downloaded size: auto, 480p, 720p, 1080p, 1440p, 2160p'
+        : 'Usage: !stream <url> [preset]  — Presets: auto (default for YouTube and Twitch), 480p, 720p, 1080p, 1440p, 2160p',
+    );
     return;
   }
 
@@ -46,10 +71,15 @@ export async function handleStream(
   }
 
   if (bot.videoStreaming) {
+    // The mode (direct or re-encoded) is chosen when a stream starts; a source change keeps it.
+    if (direct && !bot.videoDirectRequested) {
+      context.reply(bot, userClid, 'A stream is already running without direct mode. Use !stopstream, then !streamdirect <url>.');
+      return;
+    }
     // Change source if already streaming
     try {
       await bot.setVideoSource(url);
-      context.reply(bot, userClid, `Stream source changed to: ${url}`);
+      context.reply(bot, userClid, `Stream source changed to: ${url}${describeMode(bot, direct)}`);
     } catch (err: any) {
       context.reply(bot, userClid, `Error: ${err.message}`);
     }
@@ -58,8 +88,14 @@ export async function handleStream(
 
   context.reply(bot, userClid, 'Starting video stream...');
   try {
-    await context.voiceBotManager.startVideoStream(bot, url, { preset, ...context.chatVideoSwitch(bot) });
-    context.reply(bot, userClid, `Video stream started: ${url}`);
+    await context.voiceBotManager.startVideoStream(bot, url, {
+      preset,
+      ...(direct ? { direct: true } : {}),
+      // A direct stream may convert the video first; the person who asked is told what is going on.
+      onNotice: (message: string) => context.reply(bot, userClid, message),
+      ...context.chatVideoSwitch(bot),
+    });
+    context.reply(bot, userClid, `Video stream started: ${url}${describeMode(bot, direct)}`);
   } catch (err: any) {
     context.reply(bot, userClid, `Failed to start stream: ${context.streamStartError(err)}`);
   }
@@ -80,6 +116,12 @@ export async function handleStopStream(
   bot: VoiceBot,
   userClid: number,
 ): Promise<void> {
+  if (bot.videoStarting) {
+    // Still downloading or converting: stopping cancels the start.
+    await bot.stopVideoStream('manual', 'Stopped by chat command');
+    context.reply(bot, userClid, 'Cancelled: the video stream will not start.');
+    return;
+  }
   if (!bot.videoStreaming) {
     context.reply(bot, userClid, 'No active video stream.');
     return;

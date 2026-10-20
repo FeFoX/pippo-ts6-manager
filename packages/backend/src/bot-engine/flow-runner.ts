@@ -2,6 +2,7 @@ import type { PrismaClient } from '../../generated/prisma/index.js';
 import type { ConnectionPool } from '../ts-client/connection-pool.js';
 import type { WebQueryClient } from '../ts-client/webquery-client.js';
 import type { VoiceBotManager } from '../voice/voice-bot-manager.js';
+import { SeekRateLimitedError } from '../voice/voice-bot.js';
 import { ExecutionContext } from './context.js';
 import type { WebSocketServer } from 'ws';
 import { broadcastScoped } from '../ws/ws-session.js';
@@ -791,7 +792,14 @@ export class FlowRunner {
     const position = parseInt(await ctx.resolveTemplate(data.position));
     if (!botId) throw new Error('Voice Seek: botId is required');
     const bot = mgr.getBot(botId);
-    if (bot) bot.seek(position || 0);
+    if (!bot) return;
+    try {
+      await bot.seek(position || 0);
+    } catch (err) {
+      // Too soon after the last seek on a remote source: the flow goes on without it.
+      if (err instanceof SeekRateLimitedError) console.warn(`[Flow] Voice Seek skipped: ${err.message}`);
+      else throw err;
+    }
   }
 
   private async executeVoiceTts(data: any, ctx: ExecutionContext): Promise<void> {

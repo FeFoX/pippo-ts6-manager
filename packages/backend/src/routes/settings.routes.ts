@@ -16,6 +16,13 @@ import {
   MAX_VIDEO_DURATION_KEY,
   MAX_PLAYLIST_IMPORT_KEY,
   YOUTUBE_DIRECT_STREAM_KEY,
+  SEEK_COOLDOWN_KEY,
+  MAX_SEEK_COOLDOWN_SEC,
+  BOT_CONTROL_GROUPS_KEY,
+  parseSeekCooldown,
+  parseBoundedInt,
+  parseControlGroupsUpdate,
+  loadBotControlGroups,
   parseVideoDuration,
   parseImportCap,
   loadVideoStreamingSettings,
@@ -162,13 +169,14 @@ settingsRoutes.get('/limits', requireAdmin, async (req: Request, res: Response, 
   try {
     const prisma = req.app.locals.prisma;
     const rows = await prisma.appSetting.findMany({
-      where: { key: { in: [MAX_VIDEO_DURATION_KEY, MAX_PLAYLIST_IMPORT_KEY, YOUTUBE_DIRECT_STREAM_KEY] } },
+      where: { key: { in: [MAX_VIDEO_DURATION_KEY, MAX_PLAYLIST_IMPORT_KEY, YOUTUBE_DIRECT_STREAM_KEY, SEEK_COOLDOWN_KEY] } },
     });
     const map = new Map(rows.map((r: { key: string; value: string }) => [r.key, r.value]));
     res.json({
       maxVideoDuration: parseVideoDuration(map.get(MAX_VIDEO_DURATION_KEY) as string | undefined),
       maxPlaylistImport: parseImportCap(map.get(MAX_PLAYLIST_IMPORT_KEY) as string | undefined),
       youtubeDirectStream: map.get(YOUTUBE_DIRECT_STREAM_KEY) === 'true',
+      seekCooldownSeconds: parseSeekCooldown(map.get(SEEK_COOLDOWN_KEY) as string | undefined),
     });
   } catch (err) { next(err); }
 });
@@ -177,10 +185,14 @@ settingsRoutes.get('/limits', requireAdmin, async (req: Request, res: Response, 
 settingsRoutes.put('/limits', requireAdmin, async (req: Request, res: Response, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { maxVideoDuration, maxPlaylistImport, youtubeDirectStream } = req.body;
+    const { maxVideoDuration, maxPlaylistImport, youtubeDirectStream, seekCooldownSeconds } = req.body;
 
-    if (maxVideoDuration == null && maxPlaylistImport == null && youtubeDirectStream == null) {
-      throw new AppError(400, 'Provide maxVideoDuration, maxPlaylistImport and/or youtubeDirectStream');
+    if (maxVideoDuration == null && maxPlaylistImport == null && youtubeDirectStream == null && seekCooldownSeconds == null) {
+      throw new AppError(400, 'Provide maxVideoDuration, maxPlaylistImport, youtubeDirectStream and/or seekCooldownSeconds');
+    }
+    const seekCooldown = seekCooldownSeconds == null ? null : parseBoundedInt(seekCooldownSeconds, MAX_SEEK_COOLDOWN_SEC);
+    if (seekCooldownSeconds != null && seekCooldown == null) {
+      throw new AppError(400, `seekCooldownSeconds must be a whole number of seconds from 0 to ${MAX_SEEK_COOLDOWN_SEC} (0 = no limit)`);
     }
     if (youtubeDirectStream != null && typeof youtubeDirectStream !== 'boolean') {
       throw new AppError(400, 'youtubeDirectStream must be true or false');
@@ -222,10 +234,53 @@ settingsRoutes.put('/limits', requireAdmin, async (req: Request, res: Response, 
             update: { value },
           });
         }
+
+        if (seekCooldown != null) {
+          await tx.appSetting.upsert({
+            where: { key: SEEK_COOLDOWN_KEY },
+            create: { key: SEEK_COOLDOWN_KEY, value: String(seekCooldown) },
+            update: { value: String(seekCooldown) },
+          });
+        }
       },
     );
 
     res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// GET /api/settings/bot-access — server groups allowed to use the bot's chat commands.
+settingsRoutes.get('/bot-access', requireAdmin, async (req: Request, res: Response, next) => {
+  try {
+    res.json({ controlGroups: await loadBotControlGroups(req.app.locals.prisma) });
+  } catch (err) { next(err); }
+});
+
+// PUT /api/settings/bot-access — replace the list. Empty means everybody can use the bot.
+settingsRoutes.put('/bot-access', requireAdmin, async (req: Request, res: Response, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const parsed = parseControlGroupsUpdate(req.body?.controlGroups);
+    if (!parsed.ok) throw new AppError(400, parsed.error);
+
+    await recordLocalSuccess(
+      prisma,
+      {
+        actor: actorFromRequest(req.user),
+        action: 'settings.bot_access_update',
+        target: { type: 'settings', id: 'bot-access' },
+      },
+      async (tx) => {
+        const value = JSON.stringify(parsed.groups);
+        await tx.appSetting.upsert({
+          where: { key: BOT_CONTROL_GROUPS_KEY },
+          create: { key: BOT_CONTROL_GROUPS_KEY, value },
+          update: { value },
+        });
+      },
+    );
+
+    res.json({ controlGroups: parsed.groups });
   } catch (err) { next(err); }
 });
 
@@ -371,7 +426,8 @@ settingsRoutes.put('/video-streaming/servers/:serverConfigId', requireAdmin, asy
     const { global } = await loadServerVideoStreamingSettings(prisma, id);
     const submitted = parseServerOverrides(body);
     const overrides = Object.fromEntries(
-      Object.entries(submitted).filter(([k, v]) => (global as unknown as Record<string, unknown>)[k] !== v),
+      Object.entries(submitted).filter(([k, v]) =>
+        JSON.stringify((global as unknown as Record<string, unknown>)[k]) !== JSON.stringify(v)),
     );
     const key = videoServerOverridesKey(id);
 

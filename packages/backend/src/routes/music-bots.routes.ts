@@ -6,7 +6,7 @@ import { avatarImageType, saveBotAvatar, readBotAvatar, removeBotAvatarFile, MAX
 import { requireRole } from '../middleware/rbac.js';
 import { AppError } from '../middleware/error-handler.js';
 import type { VoiceBotManager } from '../voice/voice-bot-manager.js';
-import type { VoiceBot } from '../voice/voice-bot.js';
+import { SeekRateLimitedError, type VoiceBot } from '../voice/voice-bot.js';
 import { serializeCommandChannelIds, parseCommandChannelIds } from '../voice/music-command-channels.js';
 import { playerWidgetToken } from './widget-public.routes.js';
 import { parseStreamStartOptions } from '../voice/streaming/start-options.js';
@@ -611,7 +611,14 @@ musicBotRoutes.post('/:id/pause', async (req: Request, res: Response, next) => {
     const manager: VoiceBotManager = req.app.locals.voiceBotManager;
     const bot = manager.getBot(parseInt(req.params.id as string));
     if (!bot) throw new AppError(404, 'Music bot not found');
-    bot.pause();
+    if (bot.videoStreaming) {
+      if (!bot.canPauseVideo && !bot.videoPaused) {
+        throw new AppError(409, 'This video cannot be paused', 'Live streams and looping videos have no place to resume from.');
+      }
+      await bot.pauseVideo();
+    } else {
+      bot.pause();
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -622,7 +629,17 @@ musicBotRoutes.post('/:id/resume', async (req: Request, res: Response, next) => 
     const manager: VoiceBotManager = req.app.locals.voiceBotManager;
     const bot = manager.getBot(parseInt(req.params.id as string));
     if (!bot) throw new AppError(404, 'Music bot not found');
-    bot.resume();
+    if (bot.videoStreaming) {
+      try {
+        await bot.resumeVideo();
+      } catch (err) {
+        // A video without a local copy is opened again on its site, which the seek cooldown limits.
+        if (err instanceof SeekRateLimitedError) throw new AppError(429, err.message);
+        throw err;
+      }
+    } else {
+      bot.resume();
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -681,7 +698,12 @@ musicBotRoutes.post('/:id/seek', async (req: Request, res: Response, next) => {
     const bot = manager.getBot(parseInt(req.params.id as string));
     if (!bot) throw new AppError(404, 'Music bot not found');
     const { seconds } = req.body;
-    bot.seek(parseFloat(seconds) || 0);
+    try {
+      await bot.seek(parseFloat(seconds) || 0);
+    } catch (err) {
+      if (err instanceof SeekRateLimitedError) throw new AppError(429, err.message);
+      throw err;
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -933,6 +955,9 @@ function assertVideoSource(source: unknown): string {
   return trimmed;
 }
 
+/** How long a video start may take before the request is answered with "still starting". */
+const START_ANSWER_WAIT_MS = 20_000;
+
 // POST /:id/stream/start — Start video stream
 musicBotRoutes.post('/:id/stream/start', async (req: Request, res: Response, next) => {
   try {
@@ -944,15 +969,33 @@ musicBotRoutes.post('/:id/stream/start', async (req: Request, res: Response, nex
     if (!parsed.ok) throw new AppError(400, parsed.error);
     // Conflicts answer 409 before an audit row exists; only real starts are audited.
     manager.assertVideoCanStart(bot, parsed.options.replaceSessionIds);
-    const outcome = await runMediaAudited(
+    const prisma = req.app.locals.prisma;
+    const saveVolume = async () => {
+      if (parsed.options.volume != null) await saveBotVolume(prisma, bot.currentConfig.id, bot.currentConfig.volume);
+    };
+    const work = runMediaAudited(
       req, bot, 'media.video.start',
       () => manager.startVideoStream(bot, safeSource, parsed.options),
       parsed.options.replaceSessionIds,
     );
-    if (parsed.options.volume != null) {
-      const prisma = req.app.locals.prisma;
-      await saveBotVolume(prisma, bot.currentConfig.id, bot.currentConfig.volume);
+    // Preparing a direct stream can mean converting the whole video, which takes minutes: longer
+    // than a browser, the web server, a CDN or reverse proxy will wait for one answer. Answer once the start
+    // is clearly under way; the page follows it through the bot's status (Starting, then Now playing).
+    const stillStarting = Symbol('still starting');
+    const first = await Promise.race([
+      work,
+      new Promise<symbol>((resolve) => setTimeout(() => resolve(stillStarting), START_ANSWER_WAIT_MS)),
+    ]);
+    if (first === stillStarting) {
+      void work.then(saveVolume).catch((err: any) => {
+        console.warn(`[MusicBot ${bot.currentConfig.id}] Video start failed after the answer was sent: ${err?.message ?? err}`);
+        bot.recordStartFailure(err?.message ?? String(err));
+      });
+      res.status(202).json({ success: true, starting: true, status: bot.videoStreamStatus });
+      return;
     }
+    const outcome = first;
+    await saveVolume();
     res.json({
       success: true,
       alreadyRunning: outcome && typeof outcome === 'object' && 'alreadyRunning' in outcome

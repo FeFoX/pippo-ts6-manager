@@ -3,13 +3,17 @@ import { test } from 'node:test';
 import { MusicCommandHandler } from './music-command-handler.js';
 import { PlayQueue } from './playlist/queue.js';
 import { BUILTIN_COMMAND_HELP, isReservedChatCommandName } from './chat-commands.js';
+import { SeekRateLimitedError } from './voice-bot.js';
+import { ControlAccess, setControlAccessForTests } from './commands/authorization.js';
 
 function fixture(status = 'connected') {
   const replies: string[] = [];
   const played: any[] = [];
   const seeks: number[] = [];
   const playlists = [{ id: 3, name: 'Rock' }, { id: 4, name: 'Rock live' }];
-  const prisma = { playlist: {
+  const prisma = {
+    appSetting: { findUnique: async () => null }, // no bot-access setting stored: everybody may use the bot
+    playlist: {
     findMany: async ({ where }: any) => {
       assert.deepEqual(where.OR, [{ serverConfigId: 9 }, { serverConfigId: null }]);
       return playlists;
@@ -264,4 +268,35 @@ test('concurrent commands from the same invoker preserve each request channel', 
   await pending;
   assert.deepEqual(channels.map(([, channel]) => channel), [5, 6, 5, 5]);
   assert.equal(f.handler.activeReplyChannel.size, 0);
+});
+
+test('a seek refused by the remote-source rate limit says how long to wait', async () => {
+  const f = fixture('playing');
+  f.bot.seek = async () => { throw new SeekRateLimitedError(87, 120); };
+  await f.command('!seek 90');
+  assert.match(f.replies.at(-1)!, /once every 2 minutes.*87 s/);
+});
+
+test('with a control group configured only its members can use the bot', async () => {
+  const members: Record<number, number[]> = { 2: [7, 999] };
+  const access = new ControlAccess(async () => ['Music Bot Controllers'], {
+    clientGroups: async (_c, _s, clid) => members[clid] ?? [7],
+    serverGroups: async () => [{ id: 999, name: 'Music Bot Controllers' }, { id: 7, name: 'Newcomer' }],
+  });
+  setControlAccessForTests(access);
+  try {
+    const member = fixture();
+    await member.command('!seek 30');
+    assert.deepEqual(member.seeks, [30], 'a member is served as before');
+
+    members[2] = [7];
+    const outsider = fixture();
+    await outsider.command('!seek 30');
+    await outsider.command('!help');
+    assert.deepEqual(outsider.seeks, [], 'the command did not run');
+    assert.equal(outsider.replies.length, 1, 'told once, not for every command');
+    assert.match(outsider.replies[0], /Music Bot Controllers/);
+  } finally {
+    setControlAccessForTests(null);
+  }
 });

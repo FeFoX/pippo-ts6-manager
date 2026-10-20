@@ -51,6 +51,7 @@ export const ADMIN_AUDIT_ACTIONS = [
   'settings.yt_cookies_changed',
   'settings.yt_cookies_removed',
   'settings.limits_update',
+  'settings.bot_access_update',
   'settings.video_streaming_update',
   'settings.iptv_network_update',
   'music_bot.avatar_update',

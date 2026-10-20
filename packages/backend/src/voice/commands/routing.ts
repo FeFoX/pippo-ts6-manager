@@ -6,6 +6,7 @@ import type { CommandContext } from './context.js';
 import { botOccupiesChannel, isBotSummonable } from './channel-ownership.js';
 import { chooseCommandBot, parseBotTarget, type ChannelBot } from './targeting.js';
 import { channelCommandKey, claimChannelCommand } from './dedupe.js';
+import { controlAccessFor } from './authorization.js';
 const CMD_PREFIX = '!';
 const MUSIC_COMMANDS = new Set<string>(BUILTIN_CHAT_COMMANDS);
 
@@ -225,6 +226,16 @@ export async function onCrossChannelTextMessage(
   if (msg.startsWith(CMD_PREFIX)) {
     const parts = msg.substring(CMD_PREFIX.length).split(/\s+/);
     const command = (parts[0] || '').toLowerCase();
+    if (command === 'here' || command === 'come' || command === 'help') {
+      // These are answered here, not by onTextMessage, so the control group applies here too.
+      const invoker = parseInt(data.invokerid || '0', 10);
+      // Without a sender id the lookup fails, which counts as refused when a group is set.
+      const decision = await controlAccessFor(context).check(configId, sid, invoker);
+      if (!decision.allowed) {
+        console.log(`[MusicCmd] Cross-channel !${command} refused for clid=${invoker || '?'} (not in the control group)`);
+        return;
+      }
+    }
     if (command === 'here' || command === 'come') {
       // Prefer the in-channel voice path when a music bot is already here —
       // otherwise SSH + voice both announce/join for the same chat line.
@@ -371,6 +382,19 @@ export async function onTextMessage(
   // Built-in commands
   if (MUSIC_COMMANDS.has(command)) {
     console.log(`[MusicCmd] Bot ${botId}: !${command} ${args} (from clid=${userClid})`);
+    // Only members of the groups set under Settings > Bot access may use the bot.
+    const access = controlAccessFor(context);
+    const cfg = context.botChannelConfig.get(botId);
+    const configId = cfg?.serverConfigId ?? bot.currentConfig.serverConfigId;
+    const sid = cfg?.virtualServerId ?? context.virtualServerIdForBot(botId);
+    const decision = await access.check(configId, sid, userClid);
+    if (!decision.allowed) {
+      console.log(`[MusicCmd] Bot ${botId}: !${command} refused for clid=${userClid} (not in the control group)`);
+      if (access.shouldNotifyDenied(configId, userClid)) {
+        await context.reply(bot, userClid, access.deniedMessage(decision.groups));
+      }
+      return;
+    }
     try {
       switch (command) {
         case 'help':
@@ -406,7 +430,7 @@ export async function onTextMessage(
           context.handleStop(bot, userClid);
           break;
         case 'pause':
-          context.handlePause(bot, userClid);
+          await context.handlePause(bot, userClid);
           break;
         case 'skip':
         case 'next':
@@ -432,6 +456,9 @@ export async function onTextMessage(
           break;
         case 'stream':
           await context.handleStream(bot, userClid, args);
+          break;
+        case 'streamdirect':
+          await context.handleStreamDirect(bot, userClid, args);
           break;
         case 'stopstream':
           await context.handleStopStream(bot, userClid);

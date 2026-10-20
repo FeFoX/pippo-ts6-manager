@@ -67,6 +67,11 @@ export function parseStreamStartOptions(body: Record<string, unknown> | null | u
     options.sourceMode = b.sourceMode as 'auto' | 'live' | 'vod';
   }
 
+  if (b.direct != null && b.direct !== '') {
+    if (typeof b.direct !== 'boolean') return { ok: false, error: 'direct must be true or false' };
+    options.direct = b.direct;
+  }
+
   const replace = parseReplaceSessionIds(b);
   if (replace.length > 0) options.replaceSessionIds = replace;
 

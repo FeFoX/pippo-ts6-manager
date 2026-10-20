@@ -10,7 +10,7 @@ describe('encode profiles', () => {
   it('maps performance/balanced/quality', () => {
     assert.deepEqual(applyEncodeProfile('performance'), {
       autoMaxPreset: '720p',
-      maxBitrateKbps: 2500,
+      maxBitrateKbps: 4000,
       cpuUsed: 6,
       encodeProfile: 'performance',
     });
@@ -23,11 +23,11 @@ describe('encode profiles', () => {
 
   it('infers named profiles and custom when settings diverge', () => {
     assert.equal(
-      inferEncodeProfile({ autoMaxPreset: '720p', maxBitrateKbps: 2500, cpuUsed: 6 }),
+      inferEncodeProfile({ autoMaxPreset: '720p', maxBitrateKbps: 4000, cpuUsed: 6 }),
       'performance',
     );
     assert.equal(
-      inferEncodeProfile({ autoMaxPreset: '1080p', maxBitrateKbps: 4500, cpuUsed: 4 }),
+      inferEncodeProfile({ autoMaxPreset: '1080p', maxBitrateKbps: 7000, cpuUsed: 4 }),
       'balanced',
     );
     assert.equal(

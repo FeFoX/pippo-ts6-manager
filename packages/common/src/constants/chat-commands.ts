@@ -27,6 +27,7 @@ export const BUILTIN_CHAT_COMMANDS = [
   'seek',
   'remove',
   'stream',
+  'streamdirect',
   'stopstream',
   'viewers',
   'channels',

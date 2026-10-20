@@ -122,6 +122,7 @@ export class MusicCommandHandler {
       handleVolume: (...args) => handler.handleVolume(...args),
       handleNowPlaying: (...args) => handler.handleNowPlaying(...args),
       handleStream: (...args) => handler.handleStream(...args),
+      handleStreamDirect: (...args) => handler.handleStreamDirect(...args),
       streamStartError: (...args) => handler.streamStartError(...args),
       chatMusicSwitch: (...args) => handler.chatMusicSwitch(...args),
       chatVideoSwitch: (...args) => handler.chatVideoSwitch(...args),
@@ -416,7 +417,7 @@ export class MusicCommandHandler {
     return playback.handleStop(this.context, bot, userClid);
   }
 
-  private handlePause(bot: VoiceBot, userClid: number): void {
+  private handlePause(bot: VoiceBot, userClid: number): Promise<void> {
     return playback.handlePause(this.context, bot, userClid);
   }
 
@@ -442,6 +443,10 @@ export class MusicCommandHandler {
 
   private handleStream(bot: VoiceBot, userClid: number, args: string): Promise<void> {
     return streaming.handleStream(this.context, bot, userClid, args);
+  }
+
+  private handleStreamDirect(bot: VoiceBot, userClid: number, args: string): Promise<void> {
+    return streaming.handleStreamDirect(this.context, bot, userClid, args);
   }
 
   private streamStartError(err: any): string {

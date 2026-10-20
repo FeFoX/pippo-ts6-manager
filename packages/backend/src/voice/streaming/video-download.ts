@@ -41,11 +41,21 @@ function rejectYtDlpOptionUrl(url: string): void {
  */
 export const YOUTUBE_VIDEO_FORMAT_SORT = 'res,fps,vcodec:vp9';
 
-export function youtubeVideoFormatArgs(maxHeight: number): string[] {
-  const filter =
+/**
+ * A direct stream sends the file's own video to viewers, which can be H.264 or VP9. YouTube's
+ * H.264 has B-frames (a copy of it would play out of order), its VP9 does not, so VP9 (vp09) is
+ * asked for first, then H.264 (avc1, which may still turn out to be copyable), then the usual
+ * choice. A video that cannot be copied is re-encoded and the user is told why.
+ */
+export function youtubeVideoFormatArgs(maxHeight: number, forDirect = false): string[] {
+  const generic =
     `bv*[height<=${maxHeight}][dynamic_range=SDR]+ba` +
     `/bv*[height<=${maxHeight}]+ba/b[height<=${maxHeight}]/bv*+ba/b`;
-  return ['-f', filter, '-S', YOUTUBE_VIDEO_FORMAT_SORT];
+  if (!forDirect) return ['-f', generic, '-S', YOUTUBE_VIDEO_FORMAT_SORT];
+  const copyable = ['vp09', 'avc1']
+    .map((codec) => `bv*[vcodec^=${codec}][height<=${maxHeight}][dynamic_range=SDR]+ba`)
+    .join('/');
+  return ['-f', `${copyable}/${generic}`, '-S', YOUTUBE_VIDEO_FORMAT_SORT];
 }
 
 /**
@@ -407,8 +417,8 @@ export function parseYoutubeResolve(data: Record<string, unknown>): DownloadedSt
  * because YouTube refuses these URLs from some networks; the download path
  * exists for that. "Max video duration" is not applied: nothing is stored.
  */
-async function resolveYoutubeStreamUrl(url: string, maxHeight: number): Promise<DownloadedStreamVideo> {
-  const data = await resolveWithYtDlp(url, youtubeVideoFormatArgs(maxHeight), 'YouTube');
+async function resolveYoutubeStreamUrl(url: string, maxHeight: number, forDirect = false): Promise<DownloadedStreamVideo> {
+  const data = await resolveWithYtDlp(url, youtubeVideoFormatArgs(maxHeight, forDirect), 'YouTube');
   const resolved = parseYoutubeResolve(data);
   // Second hop, as for Twitch: the media URLs are checked again (no LAN
   // allowlist; YouTube's CDN is public).
@@ -488,7 +498,7 @@ export async function downloadVideoForStream(
   url: string,
   maxHeight: number = 720,
   maxDurationSec: number = 900,
-  options: { localHosts?: string[]; youtubeDirect?: boolean } = {},
+  options: { localHosts?: string[]; youtubeDirect?: boolean; forDirect?: boolean } = {},
 ): Promise<DownloadedStreamVideo> {
   rejectYtDlpOptionUrl(url);
 
@@ -519,7 +529,7 @@ export async function downloadVideoForStream(
   }
 
   if (options.youtubeDirect) {
-    return resolveYoutubeStreamUrl(url, maxHeight);
+    return resolveYoutubeStreamUrl(url, maxHeight, options.forDirect);
   }
 
   const musicRoot = ensureMusicDir();
@@ -530,7 +540,7 @@ export async function downloadVideoForStream(
   await new Promise<void>((resolve, reject) => {
     const args = [
       ...getCookieArgs(),
-      ...youtubeVideoFormatArgs(maxHeight),
+      ...youtubeVideoFormatArgs(maxHeight, options.forDirect),
       '--merge-output-format', 'mp4',
       '--no-playlist',
       '--no-progress',

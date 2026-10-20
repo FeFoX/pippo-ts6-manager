@@ -56,7 +56,7 @@ describe('chat commands with two bots in one channel', async () => {
       listBots: () => [...bots.keys()].map((id) => ({ id })),
       getBot: (id: number) => bots.get(id),
     };
-    const handler = new MusicCommandHandler({} as any, manager as any) as any;
+    const handler = new MusicCommandHandler({ appSetting: { findUnique: async () => null } } as any, manager as any) as any;
     for (const id of bots.keys()) handler.botChannelConfig.set(id, { serverConfigId: 9, virtualServerId: 1, defaultChannel: null, commandChannelIds: [] });
     const skips: number[] = [];
     const volumes: Array<[number, string]> = [];

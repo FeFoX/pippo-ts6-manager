@@ -3,7 +3,8 @@
  * fills, capped by the Auto limit) and the admin bitrate clamp.
  */
 
-import type { VideoQualityRequest, VideoStreamPresetKey, VideoStreamQualityInfo } from '@ts6/common';
+import { VIDEO_STREAM_PRESET_KEYS } from '@ts6/common';
+import type { VideoQualityRequest, VideoStreamPresetKey, VideoStreamQualityInfo, VideoStreamSettings } from '@ts6/common';
 import { DEFAULT_PRESET, PRESET_ORDER, STREAM_PRESETS, isPresetKey } from './types.js';
 
 /**
@@ -127,4 +128,23 @@ export function effectiveBitrate(
   const kbps = parseBitrateKbps(requested) ?? parseBitrateKbps(presetBitrate) ?? 2500;
   const limit = maxKbps > 0 ? Math.min(maxKbps, TS_STREAM_MAX_KBPS) : TS_STREAM_MAX_KBPS;
   return `${Math.min(kbps, limit)}k`;
+}
+
+/** Lowest bitrate an admin can set for a resolution (kbps). */
+export const MIN_PRESET_BITRATE_KBPS = 100;
+
+/** Built-in bitrate of each resolution in kbps, used until an admin sets their own. */
+export function defaultPresetBitrates(): Record<VideoStreamPresetKey, number> {
+  const out = {} as Record<VideoStreamPresetKey, number>;
+  for (const key of VIDEO_STREAM_PRESET_KEYS) out[key] = parseBitrateKbps(STREAM_PRESETS[key].bitrate) ?? 2500;
+  return out;
+}
+
+/** A resolution's configured bitrate as an ffmpeg string ("7000k"); the built-in value when unset. */
+export function presetBitrate(
+  settings: Pick<VideoStreamSettings, 'presetBitrates'> | null | undefined,
+  key: VideoStreamPresetKey,
+): string {
+  const kbps = settings?.presetBitrates?.[key];
+  return typeof kbps === 'number' && kbps > 0 ? `${kbps}k` : STREAM_PRESETS[key].bitrate;
 }

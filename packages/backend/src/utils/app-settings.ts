@@ -1,7 +1,9 @@
 import { parseLocalHostAllowlist } from './url-validator.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import type { VideoEncodeProfile, VideoStreamPresetKey, VideoStreamSettings } from '@ts6/common';
+import type { VideoDirectFallback, VideoEncodeProfile, VideoStreamPresetKey, VideoStreamSettings } from '@ts6/common';
+import { VIDEO_STREAM_PRESET_KEYS } from '@ts6/common';
 import { DEFAULT_AUTO_MAX_PRESET, isPresetKey } from '../voice/streaming/types.js';
+import { MIN_PRESET_BITRATE_KBPS, TS_STREAM_MAX_KBPS, defaultPresetBitrates } from '../voice/streaming/quality.js';
 import { isEncoderId, normalizeEncoderRequest } from '../voice/streaming/encoders.js';
 import {
   DEFAULT_ENCODE_PROFILE,
@@ -42,6 +44,59 @@ export async function loadYoutubeDirectStream(prisma: PrismaClient): Promise<boo
   return row?.value === 'true';
 }
 
+// === Bot access and seek cooldown ===
+
+/** Server groups whose members may use the bot's chat commands (JSON array of names or ids). */
+export const BOT_CONTROL_GROUPS_KEY = 'bot_control_groups';
+/** Seconds between two seeks on a remote source. */
+export const SEEK_COOLDOWN_KEY = 'seek_cooldown_seconds';
+
+export const DEFAULT_SEEK_COOLDOWN_SEC = 120;
+export const MAX_SEEK_COOLDOWN_SEC = 86_400;
+const MAX_CONTROL_GROUPS = 20;
+const MAX_CONTROL_GROUP_NAME_LENGTH = 100;
+
+/** Seconds between remote seeks; 0 turns the limit off. Anything unreadable gives the default. */
+export function parseSeekCooldown(raw: string | null | undefined, fallback = DEFAULT_SEEK_COOLDOWN_SEC): number {
+  return parseBoundedInt(raw, MAX_SEEK_COOLDOWN_SEC) ?? fallback;
+}
+
+export async function loadSeekCooldownSec(prisma: PrismaClient): Promise<number> {
+  const row = await prisma.appSetting.findUnique({ where: { key: SEEK_COOLDOWN_KEY } });
+  return parseSeekCooldown(row?.value);
+}
+
+/** The stored list; a damaged value reads as "none". */
+export function parseControlGroups(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((g): g is string => typeof g === 'string' && g.trim() !== '').map((g) => g.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Validate an update from the panel: an array of group names or ids, without blanks or duplicates. */
+export function parseControlGroupsUpdate(input: unknown): { ok: true; groups: string[] } | { ok: false; error: string } {
+  if (!Array.isArray(input)) return { ok: false, error: 'controlGroups must be an array of server group names or ids' };
+  const groups: string[] = [];
+  for (const entry of input) {
+    if (typeof entry !== 'string') return { ok: false, error: 'controlGroups must contain only text' };
+    const name = entry.trim();
+    if (!name) continue;
+    if (name.length > MAX_CONTROL_GROUP_NAME_LENGTH) return { ok: false, error: 'A server group name is too long' };
+    if (!groups.some((g) => g.toLowerCase() === name.toLowerCase())) groups.push(name);
+  }
+  if (groups.length > MAX_CONTROL_GROUPS) return { ok: false, error: `At most ${MAX_CONTROL_GROUPS} groups` };
+  return { ok: true, groups };
+}
+
+export async function loadBotControlGroups(prisma: PrismaClient): Promise<string[]> {
+  const row = await prisma.appSetting.findUnique({ where: { key: BOT_CONTROL_GROUPS_KEY } });
+  return parseControlGroups(row?.value);
+}
+
 export async function loadMaxPlaylistImport(prisma: PrismaClient): Promise<number> {
   const row = await prisma.appSetting.findUnique({ where: { key: MAX_PLAYLIST_IMPORT_KEY } });
   return parseImportCap(row?.value);
@@ -57,6 +112,84 @@ export const VIDEO_PREFER_HARDWARE_KEY = 'video_prefer_hardware';
 export const VIDEO_MAX_BITRATE_KEY = 'video_max_bitrate_kbps';
 export const VIDEO_ENCODE_PROFILE_KEY = 'video_encode_profile';
 export const VIDEO_CPU_USED_KEY = 'video_cpu_used';
+export const VIDEO_DIRECT_PACING_KEY = 'video_direct_pacing';
+export const VIDEO_DIRECT_FALLBACK_KEY = 'video_direct_fallback';
+/** JSON object with a bitrate in kbps for each resolution, e.g. {"720p":4000,"1080p":7000,...}. */
+export const VIDEO_PRESET_BITRATES_KEY = 'video_preset_bitrates';
+
+type PresetBitrates = Record<VideoStreamPresetKey, number>;
+
+function validPresetBitrate(value: unknown): number | null {
+  const n = typeof value === 'number' ? value : typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value) : NaN;
+  return Number.isInteger(n) && n >= MIN_PRESET_BITRATE_KBPS && n <= TS_STREAM_MAX_KBPS ? n : null;
+}
+
+function parseJsonObject(raw: unknown): Record<string, unknown> | null {
+  let obj: unknown = raw;
+  if (typeof raw === 'string') {
+    try { obj = JSON.parse(raw); } catch { return null; }
+  }
+  return obj && typeof obj === 'object' && !Array.isArray(obj) ? (obj as Record<string, unknown>) : null;
+}
+
+/** The valid entries of a stored bitrate map; invalid or unknown entries are dropped. */
+export function parsePresetBitratesLenient(raw: unknown): Partial<PresetBitrates> {
+  const obj = parseJsonObject(raw);
+  const out: Partial<PresetBitrates> = {};
+  if (!obj) return out;
+  for (const key of VIDEO_STREAM_PRESET_KEYS) {
+    const n = validPresetBitrate(obj[key]);
+    if (n != null) out[key] = n;
+  }
+  return out;
+}
+
+/** A submitted bitrate map must give every resolution a whole number of kbps within the allowed range. */
+export function parsePresetBitratesStrict(raw: unknown): { ok: true; value: PresetBitrates } | { ok: false; error: string } {
+  const obj = parseJsonObject(raw);
+  const range = `${MIN_PRESET_BITRATE_KBPS}–${TS_STREAM_MAX_KBPS} kbps`;
+  if (!obj) return { ok: false, error: `presetBitrates must give a bitrate (${range}) for ${VIDEO_STREAM_PRESET_KEYS.join(', ')}` };
+  const value = {} as PresetBitrates;
+  for (const key of VIDEO_STREAM_PRESET_KEYS) {
+    const n = validPresetBitrate(obj[key]);
+    if (n == null) return { ok: false, error: `presetBitrates.${key} must be a whole number of ${range}` };
+    value[key] = n;
+  }
+  return { ok: true, value };
+}
+
+/** Global settings with one server's overrides on top; a bitrate map is merged per resolution. */
+export function mergeVideoSettings(global: VideoStreamSettings, overrides: Partial<VideoStreamSettings>): VideoStreamSettings {
+  return {
+    ...global,
+    ...overrides,
+    presetBitrates: { ...global.presetBitrates, ...overrides.presetBitrates },
+  };
+}
+
+export const DIRECT_FALLBACKS: readonly VideoDirectFallback[] = ['live', 'ultrafast', 'superfast', 'veryfast'];
+/** Convert first, with x264 ultrafast, unless the admin chooses otherwise. */
+export const DEFAULT_DIRECT_FALLBACK: VideoDirectFallback = 'ultrafast';
+
+export function parseDirectFallback(value: unknown): VideoDirectFallback | null {
+  return typeof value === 'string' && (DIRECT_FALLBACKS as readonly string[]).includes(value)
+    ? (value as VideoDirectFallback)
+    : null;
+}
+
+/** Direct-stream packet pacing: 2.5 times the video's own bitrate unless the admin changes it. */
+export const DEFAULT_DIRECT_PACING = 2.5;
+export const MAX_DIRECT_PACING = 10;
+
+/** 0 (off) or a multiple from 1 to 10, one decimal; anything else is not a pacing value. */
+export function parseDirectPacing(value: unknown): number | null {
+  if (value === undefined || value === null || value === '') return null;
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return null;
+  if (n === 0) return 0;
+  if (n < 1 || n > MAX_DIRECT_PACING) return null;
+  return Math.round(n * 10) / 10;
+}
 
 export const VIDEO_STREAMING_SETTING_KEYS = [
   VIDEO_NO_VIEWER_TIMEOUT_KEY,
@@ -67,6 +200,9 @@ export const VIDEO_STREAMING_SETTING_KEYS = [
   VIDEO_MAX_BITRATE_KEY,
   VIDEO_ENCODE_PROFILE_KEY,
   VIDEO_CPU_USED_KEY,
+  VIDEO_DIRECT_PACING_KEY,
+  VIDEO_DIRECT_FALLBACK_KEY,
+  VIDEO_PRESET_BITRATES_KEY,
 ] as const;
 
 /** Longest accepted no-viewer timeout (24 h). */
@@ -124,6 +260,9 @@ export function videoStreamingDefaults(env: NodeJS.ProcessEnv = process.env): Vi
     maxBitrateKbps,
     encodeProfile,
     cpuUsed: Math.max(MIN_CPU_USED, cpuUsed),
+    directPacing: DEFAULT_DIRECT_PACING,
+    directFallback: DEFAULT_DIRECT_FALLBACK,
+    presetBitrates: defaultPresetBitrates(),
   };
 }
 
@@ -155,6 +294,9 @@ export function parseVideoStreamingSettings(
     maxBitrateKbps,
     encodeProfile,
     cpuUsed,
+    directPacing: parseDirectPacing(stored.get(VIDEO_DIRECT_PACING_KEY)) ?? defaults.directPacing,
+    directFallback: parseDirectFallback(stored.get(VIDEO_DIRECT_FALLBACK_KEY)) ?? defaults.directFallback,
+    presetBitrates: { ...defaults.presetBitrates, ...parsePresetBitratesLenient(stored.get(VIDEO_PRESET_BITRATES_KEY)) },
   };
 }
 
@@ -175,7 +317,7 @@ export function parseServerOverrides(raw: unknown): Partial<VideoStreamSettings>
   const accepted: Record<string, unknown> = {};
   for (const field of [
     'noViewerTimeoutSec', 'announceAutoStops', 'autoMaxPreset', 'defaultEncoder', 'preferHardware',
-    'maxBitrateKbps', 'encodeProfile', 'cpuUsed',
+    'maxBitrateKbps', 'encodeProfile', 'cpuUsed', 'directPacing', 'directFallback', 'presetBitrates',
   ] as const) {
     const value = (obj as Record<string, unknown>)[field];
     if (value === undefined) continue;
@@ -196,6 +338,9 @@ export function parseServerOverrides(raw: unknown): Partial<VideoStreamSettings>
     else if (row.key === VIDEO_MAX_BITRATE_KEY) out.maxBitrateKbps = Number(row.value);
     else if (row.key === VIDEO_ENCODE_PROFILE_KEY) out.encodeProfile = row.value as VideoEncodeProfile;
     else if (row.key === VIDEO_CPU_USED_KEY) out.cpuUsed = Number(row.value);
+    else if (row.key === VIDEO_DIRECT_PACING_KEY) out.directPacing = Number(row.value);
+    else if (row.key === VIDEO_DIRECT_FALLBACK_KEY) out.directFallback = row.value as VideoDirectFallback;
+    else if (row.key === VIDEO_PRESET_BITRATES_KEY) out.presetBitrates = JSON.parse(row.value) as PresetBitrates;
   }
   return out;
 }
@@ -210,7 +355,7 @@ export async function loadVideoStreamingSettings(
   const map = new Map(rows.map((r) => [r.key, r.value]));
   const global = parseVideoStreamingSettings(map);
   if (serverConfigId == null) return global;
-  return { ...global, ...parseServerOverrides(map.get(videoServerOverridesKey(serverConfigId))) };
+  return mergeVideoSettings(global, parseServerOverrides(map.get(videoServerOverridesKey(serverConfigId))));
 }
 
 /** Global defaults, one server's overrides, and the merged result. */
@@ -221,7 +366,7 @@ export async function loadServerVideoStreamingSettings(prisma: PrismaClient, ser
   const map = new Map(rows.map((r) => [r.key, r.value]));
   const global = parseVideoStreamingSettings(map);
   const overrides = parseServerOverrides(map.get(videoServerOverridesKey(serverConfigId)));
-  return { global, overrides, effective: { ...global, ...overrides } };
+  return { global, overrides, effective: mergeVideoSettings(global, overrides) };
 }
 
 export type VideoStreamingUpdate =
@@ -284,6 +429,24 @@ export function parseVideoStreamingUpdate(body: Record<string, unknown> | null |
     if (n == null) return { ok: false, error: `cpuUsed must be ${MIN_CPU_USED}–${MAX_CPU_USED}` };
     rows.push({ key: VIDEO_CPU_USED_KEY, value: String(n) });
     if (b.encodeProfile === undefined) rows.push({ key: VIDEO_ENCODE_PROFILE_KEY, value: 'custom' });
+  }
+
+  if (b.directPacing !== undefined) {
+    const n = parseDirectPacing(b.directPacing);
+    if (n == null) return { ok: false, error: `directPacing must be 0 (off) or a number from 1 to ${MAX_DIRECT_PACING}` };
+    rows.push({ key: VIDEO_DIRECT_PACING_KEY, value: String(n) });
+  }
+
+  if (b.directFallback !== undefined) {
+    const v = parseDirectFallback(b.directFallback);
+    if (v == null) return { ok: false, error: `directFallback must be ${DIRECT_FALLBACKS.join(', ')}` };
+    rows.push({ key: VIDEO_DIRECT_FALLBACK_KEY, value: v });
+  }
+
+  if (b.presetBitrates !== undefined) {
+    const parsed = parsePresetBitratesStrict(b.presetBitrates);
+    if (!parsed.ok) return { ok: false, error: parsed.error };
+    rows.push({ key: VIDEO_PRESET_BITRATES_KEY, value: JSON.stringify(parsed.value) });
   }
 
   if (rows.length === 0) return { ok: false, error: 'No video streaming settings supplied' };

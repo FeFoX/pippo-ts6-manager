@@ -25,6 +25,7 @@ function makeBot(id: number, channelId = 5) {
 
 function makeHandler(customs: Array<{ name: string; response: string; enabled: boolean; description?: string | null }>) {
   const prisma = {
+    appSetting: { findUnique: async () => null }, // no bot-access setting stored: everybody may use the bot
     musicBot: {
       findUnique: async ({ where }: { where: { id: number } }) => ({
         id: where.id,

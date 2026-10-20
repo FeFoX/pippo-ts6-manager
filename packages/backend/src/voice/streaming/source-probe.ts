@@ -108,3 +108,119 @@ export async function probeSourceResolution(
   if (!source || source.startsWith('-')) return null;
   return parseProbeResolution(await run(sourceProbeArgs(source), timeoutMs));
 }
+
+/** Whether a local file's video can go to viewers without re-encoding, and if not, why. */
+export interface DirectCheck {
+  ok: boolean;
+  /** Why the video must be re-encoded; null when ok. */
+  reason: string | null;
+  /** The codec that goes to viewers as it is; null when the video cannot be copied. */
+  codec: 'h264' | 'vp9' | null;
+  /** Length in seconds when the probe reported one (a live source has none). */
+  durationSec?: number;
+}
+
+/** How many packets are read to look for frame reordering. */
+const DIRECT_PROBE_PACKETS = 150;
+
+export function directProbeArgs(path: string): string[] {
+  return [
+    '-v', 'error',
+    '-select_streams', 'v:0',
+    '-show_entries', 'stream=codec_name,profile,pix_fmt,has_b_frames:packet=pts,dts:format=duration',
+    '-read_intervals', `%+#${DIRECT_PROBE_PACKETS}`,
+    '-of', 'json',
+    path,
+  ];
+}
+
+/** Profiles a TeamSpeak viewer can decode; 10-bit and 4:2:2 profiles are not among them. */
+const DIRECT_PROFILES = new Set(['baseline', 'constrained baseline', 'main', 'high', 'constrained high']);
+
+const NO_COPY = (reason: string): DirectCheck => ({ ok: false, reason, codec: null });
+
+/**
+ * Two codecs go to viewers as they are.
+ *
+ * H.264 (8-bit 4:2:0) only without B-frames: viewers decode packets in the order they arrive,
+ * and a B-frame stream sends frames out of display order, so the order of timestamps would
+ * break, and the picture with it.
+ *
+ * VP9 (profile 0, 8-bit 4:2:0) always: its hidden frames travel in the same packet as the
+ * frame that follows them, so every packet is already in display order.
+ */
+export function parseDirectCheck(stdout: string | null): DirectCheck {
+  const check = judgeDirect(stdout);
+  const duration = durationOf(stdout);
+  return duration != null ? { ...check, durationSec: duration } : check;
+}
+
+/** The reason a probe gave no verdict, as opposed to a verdict that the picture cannot be copied. */
+export const NOT_INSPECTED = 'the video could not be inspected';
+
+function durationOf(stdout: string | null): number | null {
+  if (!stdout) return null;
+  try {
+    const n = Number((JSON.parse(stdout) as { format?: { duration?: string } }).format?.duration);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+function judgeDirect(stdout: string | null): DirectCheck {
+  if (!stdout) return NO_COPY(NOT_INSPECTED);
+  let data: { streams?: Array<Record<string, unknown>>; packets?: Array<Record<string, unknown>> };
+  try {
+    data = JSON.parse(stdout);
+  } catch {
+    return NO_COPY(NOT_INSPECTED);
+  }
+  const stream = data.streams?.[0];
+  if (!stream) return NO_COPY('the file has no video');
+  const codec = String(stream.codec_name ?? '');
+  if (codec !== 'h264' && codec !== 'vp9') {
+    return NO_COPY(`the video is ${codec ? codec.toUpperCase() : 'not H.264 or VP9'}, and viewers only accept H.264 or VP9`);
+  }
+  if (String(stream.pix_fmt ?? '') !== 'yuv420p') {
+    return NO_COPY(`the video is ${String(stream.pix_fmt ?? 'not 8-bit 4:2:0')}, and viewers only accept yuv420p`);
+  }
+  if (codec === 'vp9') {
+    // The viewers are offered "profile-id=0"; profiles 1 to 3 are 4:4:4 or deeper than 8 bits.
+    const vp9Profile = String(stream.profile ?? '').toLowerCase();
+    if (vp9Profile !== '' && vp9Profile !== 'profile 0') {
+      return NO_COPY(`the VP9 profile (${String(stream.profile)}) is not one viewers decode`);
+    }
+    return { ok: true, reason: null, codec: 'vp9' };
+  }
+  const profile = String(stream.profile ?? '').toLowerCase();
+  if (!DIRECT_PROFILES.has(profile)) {
+    return NO_COPY(`the H.264 profile (${String(stream.profile ?? 'unknown')}) is not one viewers decode`);
+  }
+  const reorder = Number(stream.has_b_frames);
+  if (Number.isFinite(reorder) && reorder > 0) {
+    return NO_COPY('the video uses B-frames, which viewers cannot play when copied');
+  }
+  // The header can say "no B-frames" while the packets still reorder: compare each
+  // packet's display time with its decode time; they differ by a constant if there are none.
+  const gaps = new Set<number>();
+  for (const p of data.packets ?? []) {
+    const pts = Number(p.pts);
+    const dts = Number(p.dts);
+    if (Number.isFinite(pts) && Number.isFinite(dts)) gaps.add(pts - dts);
+  }
+  if (gaps.size > 1) {
+    return NO_COPY('the video uses B-frames, which viewers cannot play when copied');
+  }
+  return { ok: true, reason: null, codec: 'h264' };
+}
+
+/** One bounded ffprobe of a local file; a failure counts as "cannot copy". */
+export async function checkDirectEligible(
+  path: string,
+  run: ProbeRunner = runFfprobe,
+  timeoutMs: number = SOURCE_PROBE_TIMEOUT_MS,
+): Promise<DirectCheck> {
+  if (!path || path.startsWith('-')) return NO_COPY(NOT_INSPECTED);
+  return parseDirectCheck(await run(directProbeArgs(path), timeoutMs));
+}

@@ -33,6 +33,36 @@ export interface SidecarSourceOptions {
   cpuUsed?: number;
   /** Second remote input carrying the audio, when `source` is video only (YouTube direct). */
   audioSource?: string;
+  /** Start a VOD or file source at this offset in seconds (a seek); live sources ignore it. */
+  startSeconds?: number;
+  /** Send the source's own H.264 without re-encoding it (the caller has checked it can be copied). */
+  passthrough?: boolean;
+  /** Direct streams: pace the video's packets at this multiple of its bitrate (0 = off). */
+  pacing?: number;
+}
+
+export interface SidecarConvertOptions {
+  /** A file in the music folder, or an http(s) address. */
+  source: string;
+  /** The file to write in the music folder: `.stream-<digits>.mp4`. */
+  output: string;
+  width: number;
+  height: number;
+  bitrate: string;
+  preset: 'ultrafast' | 'superfast' | 'veryfast';
+  /** Keyframe interval in frames. */
+  gop: number;
+  durationSec?: number;
+  allowedHosts?: string[];
+}
+
+export interface SidecarConvertStatus {
+  id: string;
+  state: 'running' | 'done' | 'failed' | 'cancelled';
+  /** 0-100, or -1 when the length is unknown. */
+  percent: number;
+  speed: number;
+  error?: string;
 }
 
 /** Encode health from GET /stats (sidecar 1.9+; absent on older sidecars). */
@@ -112,10 +142,7 @@ export class SidecarClient {
   /** Start/restart ffmpeg for `source`. Resolves with the encoder actually running. */
   async setSource(source: string, options: SidecarSourceOptions = {}): Promise<SidecarEncoderSession | null> {
     // Shared files can have different absolute paths on the backend and sidecar hosts.
-    const portableSource = source && !/^https?:\/\//.test(source)
-      ? `music://${path.basename(resolvePathUnderMusicDir(source))}`
-      : source;
-    const res = await this.call('POST', '/source', { source: portableSource, ...options });
+    const res = await this.call('POST', '/source', { source: this.portable(source), ...options });
     return res?.encoder ?? null;
   }
 
@@ -123,9 +150,33 @@ export class SidecarClient {
    * ffprobe JSON for a remote source, fetched by the sidecar through the same
    * egress checks as streaming it. Null when the probe fails.
    */
-  async probe(source: string, allowedHosts: string[], timeoutMs: number): Promise<string | null> {
-    const res = await this.call('POST', '/probe', { source, allowedHosts }, timeoutMs, true);
+  async probe(source: string, allowedHosts: string[], timeoutMs: number, detail = false): Promise<string | null> {
+    const res = await this.call('POST', '/probe', { source, allowedHosts, ...(detail ? { detail: true } : {}) }, timeoutMs, true);
     return typeof res === 'string' && res ? res : null;
+  }
+
+  /** Start converting `source` into a file the stream can copy (see the sidecar's convert.go). */
+  async convertStart(options: SidecarConvertOptions): Promise<SidecarConvertStatus> {
+    return this.call('POST', '/convert', {
+      ...options,
+      source: this.portable(options.source),
+      output: `music://${path.basename(options.output)}`,
+    }, 15_000);
+  }
+
+  async convertStatus(id: string): Promise<SidecarConvertStatus> {
+    return this.call('GET', `/convert?id=${encodeURIComponent(id)}`, undefined, 10_000);
+  }
+
+  async convertCancel(id: string): Promise<void> {
+    await this.call('POST', '/convert/cancel', { id }, 10_000);
+  }
+
+  /** Files shared with the sidecar are named by their file name, since the folder may differ between hosts. */
+  private portable(source: string): string {
+    return source && !/^https?:\/\//.test(source)
+      ? `music://${path.basename(resolvePathUnderMusicDir(source))}`
+      : source;
   }
 
   /**

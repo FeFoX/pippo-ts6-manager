@@ -12,7 +12,7 @@ import type { QueueItem } from './playlist/queue.js';
 import type { MusicCommandHandler } from './music-command-handler.js';
 import { decrypt, encrypt } from '../utils/crypto.js';
 import { sweepStreamTempFiles } from './streaming/video-download.js';
-import { loadMaxVideoDuration, loadVideoStreamingSettings, loadYoutubeDirectStream } from '../utils/app-settings.js';
+import { loadMaxVideoDuration, loadVideoStreamingSettings, loadYoutubeDirectStream, loadSeekCooldownSec } from '../utils/app-settings.js';
 import { serializeCommandChannelIds } from './music-command-channels.js';
 import { reconnectAttemptBusy, type ReconnectAttemptState } from './reconnect-state.js';
 import { parseAutoStopEmptySeconds } from './streaming/lifecycle.js';
@@ -124,6 +124,8 @@ export class VoiceBotManager extends EventEmitter {
         ?? (() => loadVideoStreamingSettings(this.prisma, config.serverConfigId)),
       loadYoutubeDirectStream: config.loadYoutubeDirectStream
         ?? (() => loadYoutubeDirectStream(this.prisma)),
+      loadSeekCooldownSec: config.loadSeekCooldownSec
+        ?? (() => loadSeekCooldownSec(this.prisma)),
     });
 
     bot.on('statusChange', (status: VoiceBotStatus) => {

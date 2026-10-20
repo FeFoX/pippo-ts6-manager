@@ -5,12 +5,16 @@ import {
   VIDEO_ANNOUNCE_AUTO_STOPS_KEY,
   VIDEO_CPU_USED_KEY,
   VIDEO_DEFAULT_ENCODER_KEY,
+  VIDEO_DIRECT_FALLBACK_KEY,
+  VIDEO_DIRECT_PACING_KEY,
   VIDEO_ENCODE_PROFILE_KEY,
   VIDEO_MAX_BITRATE_KEY,
   VIDEO_NO_VIEWER_TIMEOUT_KEY,
   VIDEO_PREFER_HARDWARE_KEY,
+  VIDEO_PRESET_BITRATES_KEY,
   loadServerVideoStreamingSettings,
   loadVideoStreamingSettings,
+  mergeVideoSettings,
   parseServerOverrides,
   parseVideoStreamingSettings,
   parseVideoStreamingUpdate,
@@ -18,17 +22,22 @@ import {
   videoStreamingDefaults,
 } from './app-settings.js';
 
+const DEFAULT_PRESET_BITRATES = { '480p': 1000, '720p': 4000, '1080p': 7000, '1440p': 8000, '2160p': 9500 };
+
 describe('video streaming settings', () => {
-  it('defaults to Balanced profile (1080p, 4500k, cpu-used 4) and 5 min no-viewer stop', () => {
+  it('defaults to Balanced profile (1080p, 7000k, cpu-used 4) and 5 min no-viewer stop', () => {
     assert.deepEqual(videoStreamingDefaults({}), {
       noViewerTimeoutSec: 300,
       announceAutoStops: true,
       autoMaxPreset: '1080p',
       defaultEncoder: 'auto',
       preferHardware: false,
-      maxBitrateKbps: 4500,
+      maxBitrateKbps: 7000,
       encodeProfile: 'balanced',
       cpuUsed: 4,
+      directPacing: 2.5,
+      directFallback: 'ultrafast',
+      presetBitrates: DEFAULT_PRESET_BITRATES,
     });
   });
 
@@ -52,6 +61,9 @@ describe('video streaming settings', () => {
         maxBitrateKbps: 12000,
         encodeProfile: 'custom',
         cpuUsed: 6,
+        directPacing: 2.5,
+        directFallback: 'ultrafast',
+        presetBitrates: DEFAULT_PRESET_BITRATES,
       },
     );
     const bad = videoStreamingDefaults({ VIDEO_NO_VIEWER_TIMEOUT_SECONDS: '-1', VIDEO_AUTO_MAX_PRESET: '8k', VIDEO_ENCODER: 'nvenc' });
@@ -84,6 +96,9 @@ describe('video streaming settings', () => {
       maxBitrateKbps: 0,
       encodeProfile: 'quality',
       cpuUsed: 2,
+      directPacing: 2.5,
+      directFallback: 'ultrafast',
+      presetBitrates: DEFAULT_PRESET_BITRATES,
     });
   });
 
@@ -116,7 +131,7 @@ describe('video streaming settings', () => {
       {
         [VIDEO_ENCODE_PROFILE_KEY]: 'performance',
         [VIDEO_AUTO_MAX_PRESET_KEY]: '720p',
-        [VIDEO_MAX_BITRATE_KEY]: '2500',
+        [VIDEO_MAX_BITRATE_KEY]: '4000',
         [VIDEO_CPU_USED_KEY]: '6',
       },
     );
@@ -183,9 +198,9 @@ describe('per-server video defaults', () => {
   it('preserves a named encodeProfile when the override matches that profile', () => {
     assert.deepEqual(
       parseServerOverrides(
-        '{"encodeProfile":"performance","autoMaxPreset":"720p","maxBitrateKbps":2500,"cpuUsed":6}',
+        '{"encodeProfile":"performance","autoMaxPreset":"720p","maxBitrateKbps":4000,"cpuUsed":6}',
       ),
-      { encodeProfile: 'performance', autoMaxPreset: '720p', maxBitrateKbps: 2500, cpuUsed: 6 },
+      { encodeProfile: 'performance', autoMaxPreset: '720p', maxBitrateKbps: 4000, cpuUsed: 6 },
     );
   });
 
@@ -206,5 +221,133 @@ describe('per-server video defaults', () => {
     assert.equal(detail.overrides.preferHardware, true);
     assert.equal(detail.global.noViewerTimeoutSec, 600);
     assert.equal(detail.effective.autoMaxPreset, '2160p');
+  });
+});
+
+describe('direct stream pacing setting', () => {
+  it('is 2.5 times the bitrate until the admin changes it, and 0 turns it off', () => {
+    assert.equal(parseVideoStreamingSettings(new Map()).directPacing, 2.5);
+    assert.equal(parseVideoStreamingSettings(new Map([[VIDEO_DIRECT_PACING_KEY, '0']])).directPacing, 0);
+    assert.equal(parseVideoStreamingSettings(new Map([[VIDEO_DIRECT_PACING_KEY, '1.5']])).directPacing, 1.5);
+  });
+
+  it('ignores stored values that are not a pacing multiple', () => {
+    for (const bad of ['0.5', '11', 'fast', '-1', '']) {
+      assert.equal(parseVideoStreamingSettings(new Map([[VIDEO_DIRECT_PACING_KEY, bad]])).directPacing, 2.5, bad);
+    }
+  });
+
+  it('is saved from the settings page and refuses nonsense', () => {
+    const ok = parseVideoStreamingUpdate({ directPacing: 4 });
+    assert.deepEqual(ok, { ok: true, rows: [{ key: VIDEO_DIRECT_PACING_KEY, value: '4' }] });
+    assert.equal(parseVideoStreamingUpdate({ directPacing: 0 }).ok, true);
+    for (const bad of [0.5, 11, 'x', null, -2]) {
+      assert.equal(parseVideoStreamingUpdate({ directPacing: bad }).ok, false, String(bad));
+    }
+  });
+
+  it('can be set for one server only', () => {
+    assert.deepEqual(parseServerOverrides({ directPacing: 1.5 }), { directPacing: 1.5 });
+    assert.deepEqual(parseServerOverrides({ directPacing: 99 }), {});
+  });
+});
+
+describe('direct stream fallback setting', () => {
+  it('converts first with x264 ultrafast until the admin chooses otherwise', () => {
+    assert.equal(parseVideoStreamingSettings(new Map()).directFallback, 'ultrafast');
+    for (const v of ['live', 'ultrafast', 'superfast', 'veryfast']) {
+      assert.equal(parseVideoStreamingSettings(new Map([[VIDEO_DIRECT_FALLBACK_KEY, v]])).directFallback, v);
+    }
+  });
+
+  it('ignores a stored value that is not one of the choices', () => {
+    for (const bad of ['slow', 'placebo', '', 'ULTRAFAST']) {
+      assert.equal(parseVideoStreamingSettings(new Map([[VIDEO_DIRECT_FALLBACK_KEY, bad]])).directFallback, 'ultrafast', bad);
+    }
+  });
+
+  it('is saved from the settings page and refuses anything else', () => {
+    assert.deepEqual(parseVideoStreamingUpdate({ directFallback: 'live' }), {
+      ok: true, rows: [{ key: VIDEO_DIRECT_FALLBACK_KEY, value: 'live' }],
+    });
+    for (const bad of ['slow', 1, null, true]) {
+      assert.equal(parseVideoStreamingUpdate({ directFallback: bad }).ok, false, String(bad));
+    }
+  });
+
+  it('can be set for one server only', () => {
+    assert.deepEqual(parseServerOverrides({ directFallback: 'superfast' }), { directFallback: 'superfast' });
+    assert.deepEqual(parseServerOverrides({ directFallback: 'slow' }), {});
+  });
+  describe('bitrate per resolution', () => {
+    function prismaWith(rows: Record<string, string>) {
+      return {
+        appSetting: {
+          findMany: async ({ where }: any) => Object.entries(rows)
+            .filter(([key]) => where.key.in.includes(key))
+            .map(([key, value]) => ({ key, value })),
+        },
+      } as any;
+    }
+
+    it('stored values replace the built-in bitrate of that resolution only', () => {
+      const settings = parseVideoStreamingSettings(
+        new Map([[VIDEO_PRESET_BITRATES_KEY, '{"720p":3500,"1080p":6000}']]),
+      );
+      assert.deepEqual(settings.presetBitrates, { ...DEFAULT_PRESET_BITRATES, '720p': 3500, '1080p': 6000 });
+    });
+
+    it('ignores stored values that are invalid, unknown or out of range', () => {
+      const settings = parseVideoStreamingSettings(
+        new Map([[VIDEO_PRESET_BITRATES_KEY, '{"720p":50,"1080p":12000,"1440p":"abc","4k":9000,"480p":1200}']]),
+      );
+      assert.deepEqual(settings.presetBitrates, { ...DEFAULT_PRESET_BITRATES, '480p': 1200 });
+      assert.deepEqual(
+        parseVideoStreamingSettings(new Map([[VIDEO_PRESET_BITRATES_KEY, 'not json']])).presetBitrates,
+        DEFAULT_PRESET_BITRATES,
+      );
+    });
+
+    it('accepts a full map on update and stores it as JSON', () => {
+      const map = { '480p': 900, '720p': 4000, '1080p': 7000, '1440p': 8500, '2160p': 9500 };
+      const ok = parseVideoStreamingUpdate({ presetBitrates: map });
+      assert.ok(ok.ok);
+      assert.deepEqual(ok.rows, [{ key: VIDEO_PRESET_BITRATES_KEY, value: JSON.stringify(map) }]);
+      assert.ok(!ok.rows.some((r) => r.key === VIDEO_ENCODE_PROFILE_KEY), 'does not turn the profile to custom');
+    });
+
+    it('rejects a partial map, non-numbers and values outside 100-9500 kbps', () => {
+      const full = { ...DEFAULT_PRESET_BITRATES };
+      assert.equal(parseVideoStreamingUpdate({ presetBitrates: { '720p': 4000 } }).ok, false);
+      assert.equal(parseVideoStreamingUpdate({ presetBitrates: 'nope' }).ok, false);
+      assert.equal(parseVideoStreamingUpdate({ presetBitrates: [4000] }).ok, false);
+      for (const bad of [99, 9501, 7000.5, -1, 'x', null]) {
+        const r = parseVideoStreamingUpdate({ presetBitrates: { ...full, '1080p': bad } });
+        assert.equal(r.ok, false, `1080p=${String(bad)}`);
+        assert.match((r as { error: string }).error, /1080p/);
+      }
+      assert.equal(parseVideoStreamingUpdate({ presetBitrates: { ...full, '1080p': 100 } }).ok, true);
+      assert.equal(parseVideoStreamingUpdate({ presetBitrates: { ...full, '1080p': 9500 } }).ok, true);
+    });
+
+    it('a server override changes only the resolutions it sets', async () => {
+      const prisma = prismaWith({
+        [VIDEO_PRESET_BITRATES_KEY]: '{"720p":3800}',
+        [videoServerOverridesKey(2)]: JSON.stringify({ presetBitrates: { ...DEFAULT_PRESET_BITRATES, '1080p': 6500 } }),
+      });
+      const s2 = await loadVideoStreamingSettings(prisma, 2);
+      assert.equal(s2.presetBitrates['1080p'], 6500);
+      assert.equal(s2.presetBitrates['2160p'], 9500);
+      const s3 = await loadVideoStreamingSettings(prisma, 3);
+      assert.equal(s3.presetBitrates['720p'], 3800, 'other servers use the global map');
+      assert.equal(s3.presetBitrates['1080p'], 7000);
+    });
+
+    it('merges a partial override map over the global one', () => {
+      const global = videoStreamingDefaults({});
+      const merged = mergeVideoSettings(global, { presetBitrates: { '720p': 3000 } as typeof global.presetBitrates });
+      assert.deepEqual(merged.presetBitrates, { ...DEFAULT_PRESET_BITRATES, '720p': 3000 });
+      assert.equal(mergeVideoSettings(global, {}).presetBitrates['1080p'], 7000);
+    });
   });
 });

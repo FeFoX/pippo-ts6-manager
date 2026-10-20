@@ -276,6 +276,8 @@ export interface BotMediaOverview {
     position: number | null;
     duration: number | null;
   } | null;
+  /** Set while a direct stream converts its video before starting (no video object exists yet). */
+  preparing?: VideoPreparation | null;
   /** Video details while streaming (no source URL — see `session.label`). */
   video: Omit<VideoStreamStatus, 'source' | 'viewers' | 'sidecar'> | null;
   lastMusicStop: MediaStopInfo | null;
@@ -365,6 +367,14 @@ export interface VideoStreamStatus {
     stopAt: number | null;
   };
   lastStop: MediaStopInfo | null;
+  /** The video is paused: the picture is frozen and the encode stopped until resume. */
+  paused: boolean;
+  /** true = the video is copied without re-encoding; false = it is re-encoded; null = not decided or not streaming. */
+  direct: boolean | null;
+  /** Why a direct stream was requested but the video is being re-encoded; null otherwise. */
+  directFallback: string | null;
+  /** Set while the video is converted before it starts; null otherwise. */
+  preparing: VideoPreparation | null;
 }
 
 /** Simple encode cost/quality preset; `custom` when Advanced knobs diverge. */
@@ -383,10 +393,19 @@ export interface VideoStreamSettings {
   preferHardware: boolean;
   /** Clamp for any stream bitrate in kbps; 0 = no clamp. */
   maxBitrateKbps: number;
+  /** Target video bitrate in kbps for each resolution (before the clamp is applied). */
+  presetBitrates: Record<VideoStreamPresetKey, number>;
   /** Performance / Balanced / Quality — or custom when Advanced differs. */
   encodeProfile: VideoEncodeProfile;
   /** libvpx `-cpu-used` (higher = faster). Hardware encoders ignore this. */
   cpuUsed: number;
+  /**
+   * Direct streams only: spread the packets of each frame over time at this multiple of the
+   * video's own bitrate, so a keyframe does not leave as one burst. 0 = off, otherwise 1 to 10.
+   */
+  directPacing: number;
+  /** Direct streams: what to do with a picture that cannot be copied. `live` re-encodes it while it plays. */
+  directFallback: VideoDirectFallback;
 }
 
 export interface VideoEncoderCapability {
@@ -429,6 +448,20 @@ export interface VideoViewerInfo {
   iceState: string;
 }
 
+/** What a direct stream does when it cannot copy the picture: re-encode while playing, or convert first. */
+export type VideoDirectFallback = 'live' | 'ultrafast' | 'superfast' | 'veryfast';
+
+/** A direct stream that is being made copyable before it starts (the picture is converted first). */
+export interface VideoPreparation {
+  stage: 'converting';
+  /** 0-100, or null when the length is not known. */
+  percent: number | null;
+  /** Conversion speed as a multiple of real time; null until measured. */
+  speed: number | null;
+  /** Seconds left at the current speed; null when unknown. */
+  etaSec: number | null;
+}
+
 export interface StartVideoStreamRequest {
   source: string;
   preset?: VideoQualityRequest;
@@ -442,6 +475,8 @@ export interface StartVideoStreamRequest {
   replaceSessionIds?: string[];
   /** Source behaviour; `auto` detects live vs VOD when the source is probed. */
   sourceMode?: VideoSourceModeRequest;
+  /** Send the source's H.264 to viewers without re-encoding it (falls back to re-encoding when it cannot be copied). */
+  direct?: boolean;
 }
 
 export interface SetVideoSourceRequest {

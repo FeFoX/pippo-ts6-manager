@@ -69,6 +69,7 @@ function fixture(bots: ReturnType<typeof makeBot>[]) {
     virtualServerId: 1,
   }));
   const prisma = {
+    appSetting: { findUnique: async () => null }, // no bot-access setting stored: everybody may use the bot
     musicBot: {
       findMany: async () => dbRows,
       findUnique: async ({ where }: any) =>

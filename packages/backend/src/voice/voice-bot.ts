@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import path from 'path';
 import { applyBotAvatar } from './bot-avatar.js';
 import { fitAvatarForTeamSpeak } from './bot-avatar-fit.js';
 import { readBotAvatar, type BotAvatarMode } from '../utils/bot-avatar-storage.js';
@@ -16,7 +17,9 @@ import type {
   MediaStopInfo,
   MediaStopReason,
   VideoEncoderCapabilities,
+  VideoEncoderId,
   VideoEncoderRequest,
+  VideoPreparation,
   VideoQualityRequest,
   VideoStreamEncoderInfo,
   VideoStreamPresetKey,
@@ -30,7 +33,7 @@ import { SidecarClient, type SidecarEncoderSession } from './streaming/sidecar-c
 import { SidecarProcess, type SidecarConfig } from './streaming/sidecar-process.js';
 import { STREAM_PRESETS, DEFAULT_PRESET, type VideoViewerInfo, type VideoStreamStatus } from './streaming/types.js';
 import { downloadVideoForStream, safeUnlinkStreamTemp, resolvePathUnderMusicDir } from './streaming/video-download.js';
-import { effectiveBitrate, normalizeQualityRequest, resolveQuality } from './streaming/quality.js';
+import { effectiveBitrate, normalizeQualityRequest, presetBitrate, resolveQuality } from './streaming/quality.js';
 import {
   ENCODER_CODEC,
   encoderDisplayName,
@@ -39,7 +42,15 @@ import {
   normalizeEncoderRequest,
   selectEncoder,
 } from './streaming/encoders.js';
-import { probeSource, type SourceProbe } from './streaming/source-probe.js';
+import {
+  NOT_INSPECTED,
+  SOURCE_PROBE_TIMEOUT_MS,
+  checkDirectEligible,
+  parseDirectCheck,
+  probeSource,
+  type DirectCheck,
+  type SourceProbe,
+} from './streaming/source-probe.js';
 import {
   belowRealtimeWarning,
   autoStopNotice,
@@ -51,7 +62,7 @@ import {
   resolveSourceMode,
   type AutoStopMedia,
 } from './streaming/lifecycle.js';
-import { videoStreamingDefaults } from '../utils/app-settings.js';
+import { videoStreamingDefaults, DEFAULT_SEEK_COOLDOWN_SEC } from '../utils/app-settings.js';
 import { AppError } from '../middleware/error-handler.js';
 import { MediaSessionConflictError, newMediaSessionId, safeSourceLabel } from './media-session.js';
 
@@ -62,6 +73,14 @@ export type VoiceBotStatus = 'stopped' | 'starting' | 'connected' | 'playing' | 
 export interface PlaybackProgress {
   position: number;  // seconds
   duration: number;  // seconds
+}
+
+/** Thrown when a remote source is seeked again before the cooldown has passed. */
+export class SeekRateLimitedError extends Error {
+  constructor(readonly retryAfterSec: number, readonly cooldownSec: number) {
+    super(`Seeking a remote source is limited to once every ${cooldownSec} seconds; try again in ${retryAfterSec} s`);
+    this.name = 'SeekRateLimitedError';
+  }
 }
 
 export interface VoiceBotConfig {
@@ -85,6 +104,10 @@ export interface VoiceBotConfig {
   streamPreset?: string;
   autoStopEmptySeconds?: number;
   maxVideoDurationSec?: number;
+  /** Fixed seconds between remote seeks for this bot; tests use it. Normally the panel's setting applies. */
+  seekCooldownSec?: number;
+  /** Reads the "Seek cooldown" setting of the web panel at the moment of each remote seek. */
+  loadSeekCooldownSec?: () => Promise<number>;
   videoStreamVolume?: number;
   /** Loads admin video-streaming defaults when a stream starts (falls back to env defaults). */
   loadVideoSettings?: () => Promise<VideoStreamSettings>;
@@ -115,7 +138,34 @@ export interface VideoStreamStartOptions {
    * request body or a URL a user typed.
    */
   localHosts?: string[];
+  /**
+   * Send the video to viewers without re-encoding it. Needs an H.264 file with no B-frames,
+   * which a YouTube download is asked to be; anything else is re-encoded and the reason is
+   * reported in the stream status.
+   */
+  direct?: boolean;
+  /**
+   * Called with a plain-language line when something takes a while or changes the plan, such as
+   * "converting the video first". Chat commands pass a reply so the person who asked is told.
+   */
+  onNotice?: (message: string) => void;
 }
+
+/** What `resolveStreamSource` hands back: where to read the video from and what is known about it. */
+interface ResolvedStreamSource {
+  path: string;
+  /** Second remote input with the audio (YouTube direct, above 720p). */
+  audioPath?: string;
+  loop: boolean;
+  live?: boolean;
+  durationSec: number | null;
+  resolution?: { width: number; height: number };
+}
+
+/** How often a running conversion is asked how far it is. */
+const CONVERT_POLL_MS = 2_000;
+/** A conversion whose status cannot be read this many times in a row is given up. */
+const CONVERT_POLL_FAILURES = 5;
 
 /** How often a running stream's encode health is sampled from the sidecar. */
 const VIDEO_HEALTH_INTERVAL_MS = 10_000;
@@ -240,11 +290,43 @@ export class VoiceBot extends EventEmitter {
   private _musicStartedAt: number | null = null;
   private _lastMusicStop: MediaStopInfo | null = null;
   private _videoStartedAt: number | null = null;
+  /** Where in the source the running encode started (a seek), and when it (re)started. */
+  private _videoOffsetSec = 0;
+  private _videoOffsetAt: number | null = null;
+  /** Length learned from ffprobe when the source did not report one (a bare remote URL). */
+  private _videoProbedDurationSec: number | null = null;
+  /** Serializes seeks so two quick `!seek` commands do not interleave. */
+  private _videoSeekChain: Promise<void> = Promise.resolve();
+  /** When a seek on a remote source was last allowed (0 = never). */
+  private _lastRemoteSeekAt = 0;
   private _viewers: Map<number, VideoViewerInfo> = new Map();
   private _videoTempFile: string | null = null;
   private _videoEndTimer: ReturnType<typeof setTimeout> | null = null;
   private _videoDurationSec: number | null = null;
   private _videoStreamVolume: number = 100;
+  /** A direct (no re-encoding) stream was asked for. */
+  private _videoDirectRequested = false;
+  /** What the running stream does: true copies the video, false re-encodes, null is not decided yet. */
+  private _videoDirect: boolean | null = null;
+  /** The codec being copied while `_videoDirect` is true. */
+  private _videoDirectCodec: 'h264' | 'vp9' | null = null;
+  /**
+   * The codec the viewers of this stream negotiated, known once ffmpeg has started. Viewers keep
+   * it for the whole stream, so a later source must send the same codec (or be re-encoded to it).
+   */
+  private _videoActiveCodec: 'vp8' | 'vp9' | 'h264' | null = null;
+  /** The file `_videoDirect` was decided for, so seeks of the same file do not probe it again. */
+  private _videoDirectPath: string | null = null;
+  private _videoDirectFallback: string | null = null;
+  /** Set while a direct stream converts its video before it starts. */
+  private _videoPrep: (VideoPreparation & { jobId: string | null }) | null = null;
+  /** Why the conversion did not happen (too long, failed), for the line that explains the re-encode. */
+  private _videoPrepNote: string | null = null;
+  private _videoPrepCancelled = false;
+  private _videoNotice: ((message: string) => void) | null = null;
+  /** The video is paused: ffmpeg is stopped, the viewers keep the last picture. */
+  private _videoPaused = false;
+  private _videoPausedAtSec = 0;
   /** Volume last handed to the sidecar. Null until a source is accepted. */
   private _appliedVideoVolume: number | null = null;
   private _volumePushWanted: number | null = null;
@@ -331,6 +413,10 @@ export class VoiceBot extends EventEmitter {
   }
 
   get playbackProgress(): PlaybackProgress | null {
+    const videoPosition = this.videoPositionSec;
+    if (videoPosition != null) {
+      return { position: videoPosition, duration: this.knownVideoDurationSec ?? 0 };
+    }
     if (!this._nowPlaying) return null;
     if (this._isStreaming) {
       return {
@@ -591,6 +677,7 @@ export class VoiceBot extends EventEmitter {
     if (!this._videoStarting || this._videoStreaming) return;
     if (this._videoStartAbortError) return;
     this._videoStartAbortError = err;
+    this.cancelPreparation();
     this.clearVideoEndTimer();
     this._videoDurationSec = null;
     this._videoSource = null;
@@ -640,7 +727,7 @@ export class VoiceBot extends EventEmitter {
       source,
       maxHeight,
       maxDur,
-      { localHosts: this._videoLocalHosts, youtubeDirect },
+      { localHosts: this._videoLocalHosts, youtubeDirect, forDirect: this._videoDirectRequested },
     );
     const isDownloadedTemp = filePath.includes('.stream-') && filePath.endsWith('.mp4');
 
@@ -649,6 +736,7 @@ export class VoiceBot extends EventEmitter {
     // 2s slack and stopping a short VOD before playback starts).
     this.clearVideoEndTimer();
     this._videoDurationSec = null;
+    this._videoProbedDurationSec = null;
     if (isDownloadedTemp) {
       this.cleanupVideoTempFile();
       this._videoTempFile = filePath;
@@ -1293,12 +1381,206 @@ export class VoiceBot extends EventEmitter {
   }
 
   get canSeek(): boolean {
+    if (this._videoStreaming) return this.canSeekVideo;
     return (this._status === 'playing' || this._status === 'paused') && this._fileStreamActive && !!this._nowPlaying;
   }
 
+  /** Seconds into the video the encode is at; null when no video is streaming. */
+  get videoPositionSec(): number | null {
+    if (this._videoStreaming && this._videoPaused) return this._videoPausedAtSec;
+    if (!this._videoStreaming || this._videoOffsetAt == null) return null;
+    const position = this._videoOffsetSec + (Date.now() - this._videoOffsetAt) / 1000;
+    const duration = this.knownVideoDurationSec;
+    return duration != null ? Math.min(position, duration) : position;
+  }
+
+  /** The video length when something reported it: the extractor or download, else a probe. */
+  get knownVideoDurationSec(): number | null {
+    const known = this._videoDurationSec ?? this._videoProbedDurationSec;
+    return known != null && known > 0 ? known : null;
+  }
+
+  /**
+   * A video that is playing can be seeked unless it is live or looping. Its length
+   * need not be known: a bare remote URL has none until it is probed.
+   */
+  get canSeekVideo(): boolean {
+    return this._videoStreaming && !this._videoStopping && this._videoSourceChangesPending === 0
+      && !!this.sidecarHttp && !!this._videoSource
+      && !this._videoLoop && this._videoSourceMode !== 'live';
+  }
+
+  /**
+   * One seek on a remote source per cooldown, counted for the whole bot. A seek reopens the
+   * remote resource, so repeating it quickly would hammer that site. Local files are exempt.
+   */
+  private async claimRemoteSeek(): Promise<void> {
+    // Read first, then compare and set with no await in between, so two seeks cannot both pass.
+    const cooldownMs = (await this.seekCooldownSec()) * 1000;
+    if (cooldownMs <= 0) return;
+    const now = Date.now();
+    const waitMs = this._lastRemoteSeekAt + cooldownMs - now;
+    if (this._lastRemoteSeekAt > 0 && waitMs > 0) {
+      throw new SeekRateLimitedError(Math.ceil(waitMs / 1000), Math.round(cooldownMs / 1000));
+    }
+    this._lastRemoteSeekAt = now;
+  }
+
+  private async seekCooldownSec(): Promise<number> {
+    if (this.config.seekCooldownSec != null) return this.config.seekCooldownSec;
+    try {
+      return (await this.config.loadSeekCooldownSec?.()) ?? DEFAULT_SEEK_COOLDOWN_SEC;
+    } catch {
+      return DEFAULT_SEEK_COOLDOWN_SEC;
+    }
+  }
+
+  /** A video that is playing can be paused unless it is live or looping: they have no place to come back to. */
+  get canPauseVideo(): boolean {
+    return this._videoStreaming && !this._videoStopping && !this._videoPaused
+      && this._videoSourceChangesPending === 0 && !!this.sidecarHttp && !!this._videoSource
+      && !this._videoLoop && this._videoSourceMode !== 'live';
+  }
+
+  get videoPaused(): boolean {
+    return this._videoStreaming && this._videoPaused;
+  }
+
+  /** The running stream was started as a direct (no re-encoding) stream. */
+  /** A start is under way (downloading, converting) and the stream is not up yet. */
+  get videoStarting(): boolean {
+    return this._videoStarting && !this._videoStreaming;
+  }
+
+  /** How far the conversion of a direct stream is, while it runs. */
+  get videoPreparation(): VideoPreparation | null {
+    const p = this._videoPrep;
+    return p ? { stage: p.stage, percent: p.percent, speed: p.speed, etaSec: p.etaSec } : null;
+  }
+
+  get videoDirectRequested(): boolean {
+    return this._videoStreaming && this._videoDirectRequested;
+  }
+
+  /**
+   * Pause the video: remember where it is and stop ffmpeg. The viewers stay connected and
+   * keep the last picture. Stopping the encode (rather than freezing it) matters: a frozen
+   * ffmpeg would catch up in a burst when it woke, and the picture would race ahead.
+   */
+  pauseVideo(): Promise<void> {
+    const run = this._videoSeekChain.then(() => this.pauseVideoNow());
+    this._videoSeekChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async pauseVideoNow(): Promise<void> {
+    if (this._videoStreaming && this._videoPaused) return;
+    if (!this.canPauseVideo || !this.sidecarHttp) {
+      throw new Error('This video cannot be paused');
+    }
+    const position = this.videoPositionSec ?? 0;
+    this._videoPausedAtSec = position;
+    this._videoPaused = true;
+    this.clearVideoEndTimer();
+    try {
+      await this.sidecarHttp.stopSource();
+    } catch (err) {
+      this._videoPaused = false;
+      if (!this._videoLoop && this._videoDurationSec != null) {
+        this.scheduleVideoEndStop(this._videoDurationSec - position);
+      }
+      throw err;
+    }
+    console.log(`[VoiceBot ${this.config.id}] Video paused at ${Math.round(position)}s`);
+    this.emit('statusChange', this._status);
+  }
+
+  /**
+   * Continue a paused video from where it stopped. A video without a local copy is opened
+   * again on its remote site, so that counts as a seek for the seek cooldown.
+   */
+  resumeVideo(): Promise<void> {
+    const run = this._videoSeekChain.then(() => this.resumeVideoNow());
+    this._videoSeekChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async resumeVideoNow(): Promise<void> {
+    if (!this._videoStreaming || !this._videoPaused) return;
+    await this.seekVideoNow(this._videoPausedAtSec);
+    // sendSourceToSidecar cleared the flag when ffmpeg started again.
+    console.log(`[VoiceBot ${this.config.id}] Video resumed`);
+    this.emit('statusChange', this._status);
+  }
+
+  /** Restart the encode at `seconds` into the running video. Seeks run one at a time. */
+  seekVideo(seconds: number): Promise<void> {
+    const run = this._videoSeekChain.then(() => this.seekVideoNow(seconds));
+    this._videoSeekChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async seekVideoNow(seconds: number): Promise<void> {
+    if (!this.canSeekVideo || this._videoSource == null) {
+      throw new Error('This video cannot be seeked');
+    }
+    const source = this._videoSource;
+    const quality = this._videoQuality ?? resolveQuality(this._videoPreset, this._videoSettings.autoMaxPreset, null);
+
+    // Same source as the running one: the downloaded temp file, or a fresh direct URL.
+    let sourcePath: string;
+    let audioPath: string | undefined;
+    let loop = false;
+    let tempPath: string | null = null;
+    if (this._videoTempFile) {
+      try {
+        tempPath = resolvePathUnderMusicDir(this._videoTempFile);
+      } catch {
+        tempPath = null;
+      }
+    }
+    if (tempPath) {
+      sourcePath = tempPath;
+    } else {
+      // No local copy: this seek goes back to the remote site.
+      await this.claimRemoteSeek();
+      const resolved = await this.resolveStreamSource(source, STREAM_PRESETS[quality.actual].height);
+      sourcePath = resolved.path;
+      audioPath = resolved.audioPath;
+      loop = resolved.loop;
+    }
+    // A stop or source change that began while resolving owns the sidecar now.
+    if (!this.canSeekVideo || this._videoSource !== source) return;
+
+    const mode: VideoSourceMode = /^https?:\/\//i.test(sourcePath) ? (this._videoSourceMode ?? 'vod') : 'file';
+
+    // A bare remote URL carries no length. Ask ffprobe once so the target can be kept inside the video.
+    if (this.knownVideoDurationSec == null) {
+      const probed = await this.probeStreamSource(sourcePath, mode === 'file').catch(() => null);
+      if (probed?.durationSec != null && probed.durationSec > 0) this._videoProbedDurationSec = probed.durationSec;
+      if (!this.canSeekVideo || this._videoSource !== source) return;
+    }
+    const duration = this.knownVideoDurationSec;
+    // Stay clear of the very end so the encode still has something to play.
+    const target = Math.max(0, Math.min(seconds, duration != null ? Math.max(0, duration - 2) : Infinity));
+
+    await this.sendSourceToSidecar(sourcePath, loop && mode === 'file', quality, mode, audioPath, target);
+    // Only a stream that already had an end-stop clock keeps one, now for what is left.
+    if (!loop && this._videoDurationSec != null) this.scheduleVideoEndStop(this._videoDurationSec - target);
+  }
+
   async seek(seconds: number): Promise<void> {
+    if (this._videoStreaming) {
+      await this.seekVideo(seconds);
+      return;
+    }
     if (this._status !== 'playing' && this._status !== 'paused') return;
     if (!this._fileStreamActive || !this._nowPlaying) return;
+    if (isRemoteInput(this.fileInput)) {
+      await this.claimRemoteSeek();
+      // The setting is read asynchronously; a stop in the meantime ends the seek.
+      if ((this._status !== 'playing' && this._status !== 'paused') || !this._fileStreamActive || !this._nowPlaying) return;
+    }
 
     const duration = this._nowPlaying.duration ?? Infinity;
     const target = Math.max(0, Math.min(seconds, duration));
@@ -1388,7 +1670,7 @@ export class VoiceBot extends EventEmitter {
   /** True while a volume change may restart the running encode. */
   private canPushVideoVolume(): boolean {
     return this._videoStreaming && !this._videoStopping && this._videoSourceChangesPending === 0
-      && !!this.sidecarHttp && !!this._videoSource;
+      && !this._videoPaused && !!this.sidecarHttp && !!this._videoSource;
   }
 
   private scheduleVideoVolumePush(): Promise<void> {
@@ -1456,11 +1738,15 @@ export class VoiceBot extends EventEmitter {
     // after the stop, or on the old source.
     if (!this.canPushVideoVolume()) return;
     const mode: VideoSourceMode = /^https?:\/\//i.test(sourcePath) ? (this._videoSourceMode ?? 'vod') : 'file';
-    await this.sendSourceToSidecar(sourcePath, loop && mode === 'file', quality, mode, audioPath);
-    // setSource restarts ffmpeg from the beginning for volume changes, so
-    // refresh the auto-stop timer from now for non-looping on-demand clips.
+    // A finite clip resumes where it was; a restart from 0 would undo a seek.
+    const knownLength = this.knownVideoDurationSec;
+    const resumeAt = !this._videoLoop && this._videoSourceMode !== 'live'
+      ? Math.min(this.videoPositionSec ?? 0, knownLength != null ? Math.max(0, knownLength - 2) : Infinity)
+      : 0;
+    await this.sendSourceToSidecar(sourcePath, loop && mode === 'file', quality, mode, audioPath, resumeAt);
+    // Re-arm the auto-stop timer for what is left of a non-looping on-demand clip.
     if (!loop && this._videoDurationSec != null) {
-      this.scheduleVideoEndStop(this._videoDurationSec);
+      this.scheduleVideoEndStop(this._videoDurationSec - resumeAt);
     }
     this.emit('videoVolumeChange', this._videoStreamVolume);
   }
@@ -1678,6 +1964,7 @@ export class VoiceBot extends EventEmitter {
         }
         : null,
       video: video.streaming ? videoSummary : null,
+      preparing: this.videoPreparation,
       lastMusicStop: this._lastMusicStop,
       lastVideoStop: this._lastVideoStop,
     };
@@ -1722,6 +2009,10 @@ export class VoiceBot extends EventEmitter {
       lastStop: this._lastVideoStop,
       sourceMode: this._videoStreaming ? this._videoSourceMode : null,
       health: this._videoStreaming ? this._videoHealth : null,
+      paused: this._videoStreaming && this._videoPaused,
+      direct: this._videoStreaming ? this._videoDirect : null,
+      directFallback: this._videoStreaming ? this._videoDirectFallback : null,
+      preparing: this.videoPreparation,
     };
   }
 
@@ -1859,6 +2150,17 @@ export class VoiceBot extends EventEmitter {
     }
   }
 
+  /**
+   * A start that had already been answered as "still starting" failed afterwards (the conversion
+   * failed, the source went away): leave the reason where the page shows it. A stop asked for by
+   * the user is not a failure.
+   */
+  recordStartFailure(detail: string): void {
+    if (this._videoStreaming || this._videoStarting) return;
+    if (/cancel|stopped by|stream stopped/i.test(detail)) return;
+    this.recordVideoStop('source_unreachable', detail.slice(0, 240));
+  }
+
   private recordVideoStop(reason: MediaStopReason, detail: string | null): void {
     this._lastVideoStop = { reason, at: Date.now(), detail };
   }
@@ -1895,6 +2197,196 @@ export class VoiceBot extends EventEmitter {
     }
   }
 
+  /** The sidecar reads a remote video for us (through its egress rules) and reports what it is made of. */
+  private async checkDirectRemote(url: string): Promise<DirectCheck> {
+    const sidecar = this.sidecarHttp;
+    if (!sidecar) return { ok: false, reason: NOT_INSPECTED, codec: null };
+    try {
+      const out = await sidecar.probe(url, this._videoLocalHosts, SOURCE_PROBE_TIMEOUT_MS + 2_000, true);
+      return parseDirectCheck(out);
+    } catch (err: any) {
+      console.warn(`[VoiceBot ${this.config.id}] Direct check of a remote video failed (${err?.name ?? 'error'})`);
+      return { ok: false, reason: NOT_INSPECTED, codec: null };
+    }
+  }
+
+  private notice(message: string): void {
+    try {
+      this._videoNotice?.(message);
+    } catch { /* a failed chat reply must not stop the stream */ }
+  }
+
+  /** Stop a running conversion because the start is being abandoned. */
+  private cancelPreparation(): void {
+    this._videoPrepCancelled = true;
+    const jobId = this._videoPrep?.jobId;
+    if (jobId && this.sidecarHttp) {
+      void this.sidecarHttp.convertCancel(jobId).catch(() => { /* already finished or gone */ });
+    }
+  }
+
+  private describeLength(seconds: number): string {
+    const m = Math.round(seconds / 60);
+    return m >= 1 ? `${m} min` : `${Math.round(seconds)} s`;
+  }
+
+  /**
+   * A direct stream copies the picture, which only some pictures allow. For one that cannot be
+   * copied (H.264 with B-frames, AV1, 10-bit, ...) and has a length, convert it once into H.264
+   * without B-frames at the chosen x264 speed, and stream the result as it is. Anything that
+   * cannot be converted (a live source, too long, a failed conversion) is returned unchanged
+   * and is re-encoded while it plays, with the reason in `_videoPrepNote`.
+   */
+  private async prepareDirectSource(
+    resolved: ResolvedStreamSource,
+    quality: VideoStreamQualityInfo,
+    mode: VideoSourceMode,
+  ): Promise<ResolvedStreamSource> {
+    const fallback = this._videoSettings.directFallback;
+    const sidecar = this.sidecarHttp;
+    if (!this._videoDirectRequested || fallback === 'live' || !sidecar) return resolved;
+    if (mode === 'live' || resolved.live || resolved.audioPath) return resolved;
+
+    const remote = /^https?:\/\//i.test(resolved.path);
+    const check = remote ? await this.checkDirectRemote(resolved.path) : await checkDirectEligible(resolved.path);
+    if (check.ok || check.reason === NOT_INSPECTED) return resolved;
+    this.throwIfStartAborted();
+
+    const duration = resolved.durationSec ?? check.durationSec ?? null;
+    if (duration == null) return resolved; // no length: a live source, which cannot be converted
+    const limit = this.config.maxVideoDurationSec ?? 900;
+    if (limit > 0 && duration > limit) {
+      this._videoPrepNote =
+        `It is ${this.describeLength(duration)} long and converting is limited to ${this.describeLength(limit)} `
+        + '(Settings → Max video duration), so it is re-encoded while it plays.';
+      this.notice(`Direct stream not possible: ${check.reason}. ${this._videoPrepNote}`);
+      return resolved;
+    }
+
+    const preset = STREAM_PRESETS[quality.actual];
+    const bitrate = effectiveBitrate(this._videoRequestedBitrate, presetBitrate(this._videoSettings, quality.actual), this._videoSettings.maxBitrateKbps);
+    const fps = this._videoRequestedFramerate && this._videoRequestedFramerate > 0 ? this._videoRequestedFramerate : preset.framerate;
+    const outputName = `.stream-${Date.now()}.mp4`;
+    this.notice(
+      `Direct stream not possible: ${check.reason}. Converting the video first (x264 ${fallback}, ${this.describeLength(duration)} long); `
+      + 'it starts by itself when the conversion is finished.',
+    );
+    const startedAt = Date.now();
+    try {
+      const job = await sidecar.convertStart({
+        source: resolved.path,
+        output: outputName,
+        width: quality.width,
+        height: quality.height,
+        bitrate,
+        preset: fallback,
+        gop: Math.min(60, Math.max(10, Math.round(fps))),
+        durationSec: duration,
+        allowedHosts: this._videoLocalHosts,
+      });
+      this._videoPrep = { stage: 'converting', percent: 0, speed: null, etaSec: null, jobId: job.id };
+      let failures = 0;
+      for (;;) {
+        await new Promise((r) => setTimeout(r, CONVERT_POLL_MS));
+        this.throwIfStartAborted();
+        let st;
+        try {
+          st = await sidecar.convertStatus(job.id);
+          failures = 0;
+        } catch (err: any) {
+          if (++failures >= CONVERT_POLL_FAILURES) throw new Error(`lost contact with the converter (${err?.message ?? err})`);
+          continue;
+        }
+        const percent = st.percent >= 0 ? st.percent : null;
+        const speed = st.speed > 0 ? st.speed : null;
+        this._videoPrep = {
+          stage: 'converting',
+          percent,
+          speed,
+          etaSec: percent != null && speed ? Math.round(((100 - percent) / 100) * duration / speed) : null,
+          jobId: job.id,
+        };
+        if (st.state === 'running') continue;
+        if (st.state === 'done') break;
+        throw new Error(st.state === 'cancelled' ? 'conversion cancelled' : (st.error || 'conversion failed'));
+      }
+      this._videoPrep = null;
+      this.throwIfStartAborted();
+      // The converted file replaces the original download: it is the one to seek, pause and copy.
+      const converted = resolvePathUnderMusicDir(outputName);
+      const original = this._videoTempFile;
+      this._videoTempFile = converted;
+      if (original && original !== converted) safeUnlinkStreamTemp(original);
+      this._videoDurationSec = duration;
+      this._videoProbedDurationSec = duration;
+      console.log(`[VoiceBot ${this.config.id}] Converted for a direct stream in ${Math.round((Date.now() - startedAt) / 1000)}s`);
+      this.notice(`Conversion finished in ${this.describeLength((Date.now() - startedAt) / 1000)}. Starting the stream.`);
+      return { path: converted, loop: false, live: false, durationSec: duration };
+    } catch (err: any) {
+      this._videoPrep = null;
+      if (this._videoStartAbortError || this._videoPrepCancelled) throw this._videoStartAbortError ?? err;
+      console.warn(`[VoiceBot ${this.config.id}] Conversion for a direct stream failed: ${err?.message ?? err}`);
+      this._videoPrepNote = `Converting it first failed (${String(err?.message ?? err).slice(0, 160)}), so it is re-encoded while it plays.`;
+      this.notice(`Direct stream: ${this._videoPrepNote}`);
+      return resolved;
+    }
+  }
+
+  private throwIfStartAborted(): void {
+    if (this._videoStartAbortError) throw this._videoStartAbortError;
+    if (this._videoPrepCancelled) throw new Error('The stream start was cancelled');
+  }
+
+  /**
+   * The codec to copy to viewers for this source, or null to re-encode it. Decided once per
+   * file: a seek or a volume change of the same file reuses the answer. Only a local file is
+   * inspected, because the check reads packets; a remote source is re-encoded.
+   */
+  private async decideDirect(sourcePath: string, audioSource?: string): Promise<'h264' | 'vp9' | null> {
+    if (!this._videoDirectRequested) {
+      this._videoDirect = false;
+      this._videoDirectCodec = null;
+      this._videoDirectFallback = null;
+      return null;
+    }
+    if (this._videoDirect !== null && this._videoDirectPath === sourcePath) return this._videoDirectCodec;
+    let codec: 'h264' | 'vp9' | null = null;
+    let reason: string | null = null;
+    if (audioSource) {
+      reason = 'the picture and the sound come as two separate downloads';
+    } else {
+      const remote = /^https?:\/\//i.test(sourcePath);
+      const check = remote ? await this.checkDirectRemote(sourcePath) : await checkDirectEligible(sourcePath);
+      codec = check.ok ? check.codec : null;
+      reason = check.reason;
+    }
+    // Viewers who already joined negotiated a codec for the whole stream; a source in another
+    // codec cannot be copied to them.
+    if (codec && this._videoActiveCodec && this._videoActiveCodec !== codec) {
+      reason = `viewers are already receiving ${this._videoActiveCodec.toUpperCase()} and this video is ${codec.toUpperCase()}`;
+      codec = null;
+    }
+    this._videoDirect = codec !== null;
+    this._videoDirectCodec = codec;
+    this._videoDirectPath = sourcePath;
+    this._videoDirectFallback = codec
+      ? null
+      : `Direct stream not possible: ${reason}. ${this._videoPrepNote ?? 'The video is re-encoded.'}`;
+    if (!codec) {
+      console.log(`[VoiceBot ${this.config.id}] Direct stream falls back to re-encoding: ${reason}`);
+    } else {
+      console.log(`[VoiceBot ${this.config.id}] Direct stream: the ${codec.toUpperCase()} video is copied, not re-encoded`);
+    }
+    return codec;
+  }
+
+  /** The encoder for a re-encode: the chosen one, kept in the codec the viewers already negotiated. */
+  private reencodeEncoderId(): VideoEncoderId {
+    const chosen = this._videoEncoder!.selected;
+    const active = this._videoActiveCodec;
+    return active && ENCODER_CODEC[chosen] !== active ? active : chosen;
+  }
+
   /** (Re)start sidecar ffmpeg for an already-resolved path at `quality`. */
   private async sendSourceToSidecar(
     sourcePath: string,
@@ -1902,15 +2394,18 @@ export class VoiceBot extends EventEmitter {
     quality: VideoStreamQualityInfo,
     mode: VideoSourceMode,
     audioSource?: string,
+    startSeconds = 0,
   ): Promise<void> {
     if (!this.sidecarHttp || !this._videoEncoder) throw new Error('No active video stream');
     const preset = STREAM_PRESETS[quality.actual];
     const framerate = this._videoRequestedFramerate && this._videoRequestedFramerate > 0
       ? this._videoRequestedFramerate
       : preset.framerate;
-    const bitrate = effectiveBitrate(this._videoRequestedBitrate, preset.bitrate, this._videoSettings.maxBitrateKbps);
+    const bitrate = effectiveBitrate(this._videoRequestedBitrate, presetBitrate(this._videoSettings, quality.actual), this._videoSettings.maxBitrateKbps);
 
     const volume = this._videoStreamVolume;
+    const directCodec = await this.decideDirect(sourcePath, audioSource);
+    const encoderId: VideoEncoderId = directCodec ?? this.reencodeEncoderId();
     const session = await this.sidecarHttp.setSource(sourcePath, {
       width: quality.width,
       height: quality.height,
@@ -1918,13 +2413,22 @@ export class VoiceBot extends EventEmitter {
       bitrate,
       volume,
       loop,
-      encoder: this._videoEncoder.selected,
+      encoder: encoderId,
       mode,
       allowedHosts: this._videoLocalHosts,
       cpuUsed: this._videoSettings.cpuUsed,
       audioSource,
+      startSeconds: startSeconds > 0 ? startSeconds : undefined,
+      passthrough: directCodec ? true : undefined,
+      pacing: directCodec ? this._videoSettings.directPacing : undefined,
     });
+    this._videoActiveCodec = ENCODER_CODEC[encoderId];
 
+    // ffmpeg runs again, so a paused video is playing from here.
+    this._videoPaused = false;
+    // The encode now runs from `startSeconds`; progress is counted from this moment.
+    this._videoOffsetSec = startSeconds;
+    this._videoOffsetAt = Date.now();
     this._videoSourceMode = mode;
     this._videoLoop = loop;
     this._videoHealth = null;
@@ -1971,8 +2475,8 @@ export class VoiceBot extends EventEmitter {
 
     const limit = this._videoSettings.autoMaxPreset;
     const maxHeight = STREAM_PRESETS[requested === 'auto' ? limit : requested].height;
-    const resolved = await this.resolveStreamSource(source, maxHeight);
-    const isLocal = !/^https?:\/\//i.test(resolved.path);
+    let resolved: ResolvedStreamSource = await this.resolveStreamSource(source, maxHeight);
+    let isLocal = !/^https?:\/\//i.test(resolved.path);
     // Only Auto probes; the same probe tells live (no duration) from VOD.
     // Fixed presets skip the probe — use extractor live/VOD hints (Twitch) so
     // live streams are not mislabeled as VOD (#203 / Claude review on #204).
@@ -1988,9 +2492,16 @@ export class VoiceBot extends EventEmitter {
       resolved.live === undefined
         ? null
         : { durationSec: resolved.live ? null : resolved.durationSec ?? 0 };
-    const mode = resolveSourceMode(this._videoSourceModeRequest, isLocal, probe ?? hint);
+    let mode = resolveSourceMode(this._videoSourceModeRequest, isLocal, probe ?? hint);
     if (quality.note) {
       console.log(`[VoiceBot ${this.config.id}] Auto quality → ${quality.actual}: ${quality.note}`);
+    }
+    // A direct stream whose picture cannot be copied is converted first; what comes back is a file.
+    const prepared = await this.prepareDirectSource(resolved, quality, mode);
+    if (prepared !== resolved) {
+      resolved = prepared;
+      isLocal = true;
+      mode = 'file';
     }
     await this.sendSourceToSidecar(resolved.path, resolved.loop && mode === 'file', quality, mode, resolved.audioPath);
 
@@ -2025,6 +2536,9 @@ export class VoiceBot extends EventEmitter {
     if (options.sourceMode != null && options.sourceMode !== this._videoSourceModeRequest) {
       return false;
     }
+    if (options.direct != null && options.direct !== this._videoDirectRequested) {
+      return false;
+    }
     if (options.framerate != null && options.framerate !== this._videoFramerate) {
       return false;
     }
@@ -2035,7 +2549,7 @@ export class VoiceBot extends EventEmitter {
       const current = this._videoRequestedBitrate ?? this._videoBitrate;
       const wanted = this._videoRequestedBitrate != null
         ? options.bitrate
-        : effectiveBitrate(options.bitrate, STREAM_PRESETS[this._videoPreset].bitrate, this._videoSettings.maxBitrateKbps);
+        : effectiveBitrate(options.bitrate, presetBitrate(this._videoSettings, this._videoPreset), this._videoSettings.maxBitrateKbps);
       if (wanted !== current) return false;
     }
     if (
@@ -2127,6 +2641,17 @@ export class VoiceBot extends EventEmitter {
       options.preset ?? this.config.streamPreset,
       DEFAULT_PRESET,
     );
+    this._videoDirectRequested = options.direct === true;
+    this._videoDirect = null;
+    this._videoDirectCodec = null;
+    this._videoActiveCodec = null;
+    this._videoDirectPath = null;
+    this._videoDirectFallback = null;
+    this._videoPrep = null;
+    this._videoPrepNote = null;
+    this._videoPrepCancelled = false;
+    this._videoNotice = options.onNotice ?? null;
+    this._videoPaused = false;
     const requestedEncoder = normalizeEncoderRequest(options.encoder, settings.defaultEncoder);
     const timeoutOverride = Number(options.noViewerTimeoutSec);
     this._noViewerTimeoutSec = options.noViewerTimeoutSec != null && Number.isFinite(timeoutOverride)
@@ -2440,6 +2965,20 @@ export class VoiceBot extends EventEmitter {
       this._videoStreaming = false;
       this._appliedVideoVolume = null;
       this._videoStartedAt = null;
+      this._videoOffsetSec = 0;
+      this._videoOffsetAt = null;
+      this._videoProbedDurationSec = null;
+      this._videoPaused = false;
+      this._videoPausedAtSec = 0;
+      this._videoPrep = null;
+      this._videoPrepNote = null;
+      this._videoNotice = null;
+      this._videoDirectRequested = false;
+      this._videoDirect = null;
+      this._videoDirectCodec = null;
+      this._videoActiveCodec = null;
+      this._videoDirectPath = null;
+      this._videoDirectFallback = null;
       this._videoSessionId = null;
       this.releaseSignaling();
       this.cleanupVideoTempFile();

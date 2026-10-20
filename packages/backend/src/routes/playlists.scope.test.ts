@@ -108,6 +108,7 @@ describe('chat playlist scope', () => {
       { id: 4, name: 'Server ten other bot', serverConfigId: 10, musicBotId: 100 },
     ];
     const prisma = {
+      appSetting: { findUnique: async () => null }, // no bot-access setting stored: everybody may use the bot
       playlist: {
         findMany: async ({ where }: any) => {
           return playlists.filter((playlist) => matchesWhere(playlist, where));

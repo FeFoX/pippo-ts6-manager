@@ -136,13 +136,14 @@ export interface CommandMethods {
   showQueue(bot: VoiceBot, userClid: number): void;
   handleQueue(botId: number, bot: VoiceBot, userClid: number, args: string): Promise<void>;
   handleStop(bot: VoiceBot, userClid: number): void;
-  handlePause(bot: VoiceBot, userClid: number): void;
+  handlePause(bot: VoiceBot, userClid: number): Promise<void>;
   handleShuffle(bot: VoiceBot, userClid: number, args: string): void;
   handleSkip(bot: VoiceBot, userClid: number): Promise<void>;
   handlePrev(bot: VoiceBot, userClid: number): Promise<void>;
   handleVolume(bot: VoiceBot, userClid: number, args: string): Promise<void>;
   handleNowPlaying(bot: VoiceBot, userClid: number): void;
   handleStream(bot: VoiceBot, userClid: number, args: string): Promise<void>;
+  handleStreamDirect(bot: VoiceBot, userClid: number, args: string): Promise<void>;
   streamStartError(err: any): string;
   chatMusicSwitch(bot: VoiceBot): { replaceSessionIds: string[] };
   chatVideoSwitch(bot: VoiceBot): { replaceSessionIds: string[] };

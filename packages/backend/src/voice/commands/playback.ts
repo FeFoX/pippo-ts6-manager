@@ -1,4 +1,4 @@
-import type { VoiceBot } from '../voice-bot.js';
+import { SeekRateLimitedError, type VoiceBot } from '../voice-bot.js';
 import type { QueueItem } from '../playlist/queue.js';
 import { formatRadioListMessage } from '../ts6-chat-format.js';
 import type { CommandContext } from './context.js';
@@ -136,7 +136,7 @@ export async function handleSeek(
     context.reply(bot, userClid, 'Usage: !seek <seconds|+seconds|-seconds>'); return;
   }
   if (!bot.canSeek) {
-    context.reply(bot, userClid, 'Current source cannot be seeked. Play a local/downloaded track first.'); return;
+    context.reply(bot, userClid, 'Current source cannot be seeked (live streams and radio cannot). Play a track or a non-live video first.'); return;
   }
   const progress = bot.playbackProgress;
   const relative = /^[+-]/.test(args);
@@ -144,8 +144,17 @@ export async function handleSeek(
     progress?.duration || bot.nowPlaying?.duration || Infinity));
   try {
     await bot.seek(target);
-  } catch {
-    context.reply(bot, userClid, 'Could not seek — playback stopped.');
+  } catch (err) {
+    if (err instanceof SeekRateLimitedError) {
+      const every = err.cooldownSec % 60 === 0
+        ? `${err.cooldownSec / 60} minute${err.cooldownSec === 60 ? '' : 's'}`
+        : `${err.cooldownSec} seconds`;
+      context.reply(bot, userClid, `Seeking a remote source is limited to once every ${every}. Try again in ${err.retryAfterSec} s.`);
+      return;
+    }
+    context.reply(bot, userClid, bot.videoStreaming
+      ? 'Could not seek the video. It keeps playing from where it was.'
+      : 'Could not seek — playback stopped.');
     return;
   }
   context.reply(bot, userClid, `Seeked to ${Math.floor(target)} seconds.`);
@@ -165,7 +174,29 @@ export function handleStop(context: CommandContext, bot: VoiceBot, userClid: num
 }
 
 /** Toggle playing or paused audio and report when there is nothing to pause. */
-export function handlePause(context: CommandContext, bot: VoiceBot, userClid: number): void {
+export async function handlePause(context: CommandContext, bot: VoiceBot, userClid: number): Promise<void> {
+  // A video stream pauses and resumes with the same command. Video wins when both exist:
+  // a bot plays music or video, never both.
+  if (bot.videoStreaming) {
+    try {
+      if (bot.videoPaused) {
+        await bot.resumeVideo();
+        context.reply(bot, userClid, 'Resumed.');
+      } else if (bot.canPauseVideo) {
+        await bot.pauseVideo();
+        context.reply(bot, userClid, 'Paused.');
+      } else {
+        context.reply(bot, userClid, 'This video cannot be paused (live streams and loops have no place to resume).');
+      }
+    } catch (err: any) {
+      if (err instanceof SeekRateLimitedError) {
+        context.reply(bot, userClid, `The video is still paused. It has to be opened again on its site: try in ${err.retryAfterSec}s.`);
+      } else {
+        context.reply(bot, userClid, `Error: ${err.message}`);
+      }
+    }
+    return;
+  }
   if (bot.status === 'paused') {
     bot.resume();
     context.reply(bot, userClid, 'Resumed.');

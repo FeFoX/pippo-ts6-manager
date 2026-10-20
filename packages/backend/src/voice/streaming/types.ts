@@ -13,8 +13,8 @@ export type { VideoStreamPreset, VideoStreamPresetKey, VideoViewerInfo, VideoStr
 
 export const STREAM_PRESETS: Record<VideoStreamPresetKey, VideoStreamPreset> = {
   '480p': { label: '480p', width: 854, height: 480, bitrate: '1000k', framerate: 24 },
-  '720p': { label: '720p', width: 1280, height: 720, bitrate: '2500k', framerate: 30 },
-  '1080p': { label: '1080p', width: 1920, height: 1080, bitrate: '4500k', framerate: 30 },
+  '720p': { label: '720p', width: 1280, height: 720, bitrate: '4000k', framerate: 30 },
+  '1080p': { label: '1080p', width: 1920, height: 1080, bitrate: '7000k', framerate: 30 },
   '1440p': { label: '1440p', width: 2560, height: 1440, bitrate: '8000k', framerate: 30 },
   '2160p': { label: '2160p', width: 3840, height: 2160, bitrate: '9500k', framerate: 30 },
 };
