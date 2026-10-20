@@ -101,7 +101,7 @@ When a bot is connected to a configured command channel, users in that channel c
 - **`!add <url>`** — Alias for adding to the queue
 - **`!playlist [name-or-id]` / `!pl <name-or-id>`** — List or append a saved playlist
 - **`!repeat [off|track|queue]`** — Show or set repeat mode
-- **`!seek <seconds|+seconds|-seconds>`** — Seek within local/downloaded media
+- **`!seek <seconds|+seconds|-seconds>`** — Seek within a track or a non-live video (YouTube included). Live streams and radio cannot be seeked
 - **`!remove <text>`** — Remove one unambiguous upcoming match
 - **`!shuffle [on|off]`** — Toggle or set shuffle
 - **`!stop`** — Stop playback and clear the music queue, including a playlist still expanding in the background. **Stop media** on a Bot Hub card does the same.
@@ -163,3 +163,86 @@ The tool is installed at image build time and validated alongside FFmpeg, Node, 
 Administrators can confirm the currently bundled yt-dlp (and related media tools) with the demand-driven Runtime / media check on Settings → YouTube or Media Library → Library. That check is not part of live bot status polling.
 
 A public-video smoke test is intentionally not a release gate because media availability, rate limits, and regional restrictions are external to the project.
+
+## Restricting who can use the bot, and limiting seeks
+
+Both settings are in the web panel (admin only) and apply at once, with no restart. Nothing is read from environment variables.
+
+- **Settings → Users → Bot access**: one or more TeamSpeak server groups, chosen from the groups of the selected server or typed by name or id. When the list is not empty, only clients in one of those groups can use the built-in chat commands (`!play`, `!stop`, `!seek`, `!help` and the rest). Everybody else gets one short refusal every 30 seconds and the command is not run. The sender's groups are read from TeamSpeak at every command, so taking the group away stops access at once. If TeamSpeak cannot be asked, or a listed group does not exist, nobody is allowed. An empty list (the default) means everybody can. Custom chat commands, viewing a video stream and the web panel are not affected.
+- **Settings → YouTube → Download & Stream Limits → Seek cooldown**: how long a bot waits between two seeks on a **remote** source (a YouTube track or video, a link, a radio URL). Default `120` seconds, `0` turns it off. A seek reopens the remote resource, so this keeps repeated seeks from hammering the site. The limit counts for the whole bot, whoever asks. A seek in a file that is already on the server (a downloaded track or video) is never limited. A refused chat `!seek` tells the user how long to wait, the API answers `429`, and a flow's Voice Seek step is skipped.
+
+Both changes are written to the audit history (`settings.bot_access_update`, `settings.limits_update`).
+
+## Direct streams (no re-encoding) and pausing a video
+
+Normally the sidecar decodes every video and encodes it again for TeamSpeak, which costs a lot of CPU
+(a 1080p picture can take more than one core). A **direct stream** sends the video as it is.
+
+**Where to turn it on.** Bot console → Link tab → *Video options* → *Streaming mode* → *Direct: no re-encoding*
+(for that start only). In chat: `!streamdirect <url> [preset]`, which is `!stream` with the same switch on.
+Nothing is stored: the default stays *Re-encode*.
+
+**What it needs.** Two kinds of picture can be copied:
+
+- **VP9** (profile 0, 8-bit 4:2:0). Its hidden frames travel in the same packet as the frame that follows, so every
+  packet is already in display order. This is what YouTube serves at 720p and above, so a YouTube video is asked for in
+  VP9 first.
+- **H.264** (8-bit 4:2:0) **without B-frames**. Viewers decode packets in the order they arrive, and a B-frame stream is
+  sent out of display order. YouTube's own H.264 has B-frames, so it is only copied when a video happens to have none
+  (most screen recordings, Twitch VODs, files you encode with `-bf 0`).
+
+Only a downloaded or local file is checked (one short `ffprobe`); a remote URL (IPTV, an HLS link, YouTube direct mode)
+is always re-encoded, and so is AV1, HEVC, 10-bit or any other picture. When the file cannot be copied the stream **still
+plays, re-encoded**, and the reason is shown on the *Now playing* card and in the chat reply. Viewers keep the codec they
+negotiated for the whole stream: a later source in another codec is re-encoded to the codec already in use.
+
+**Trade-offs.** Almost no CPU. The bandwidth is the file's own bitrate (a 1080p YouTube video is often 3–5 Mbps,
+against about 1.5 Mbps re-encoded) for every viewer. A viewer who joins late waits for the next keyframe (up to a few
+seconds). After a seek or a resume the video starts at the keyframe before the requested time. The audio is still
+encoded to Opus. The mode is chosen when the stream starts: changing the source keeps it, and `!streamdirect` on a
+running re-encoded stream asks you to `!stopstream` first.
+
+**Lost packets.** A video sent as it is has a keyframe only as often as its source does (YouTube: every few seconds),
+so one lost packet used to freeze the picture until the next keyframe while the audio went on. The sidecar now offers
+NACK to viewers and reads their feedback, so a lost packet is sent again within a few milliseconds. `GET /stats` on the
+sidecar shows `retransmissionRequests` and `keyframeRequests`; if the picture still freezes and the first stays at 0,
+the viewer is not asking for resends.
+
+**VP9 packet descriptor.** ffmpeg's VP9 packetizer labels every packet with the same one-byte descriptor, which
+tells a receiver that every frame is a keyframe and carries no picture number. After a lost packet the receiver then
+decodes the following frames against a missing reference and the picture breaks up or freezes, without ever asking for a
+keyframe. For a copied VP9 the sidecar rewrites the descriptor the way libwebrtc's own sender writes it (15-bit picture
+id, "predicted" bit on every frame but a real keyframe, layer index, TL0PICIDX, and on keyframes the structure that
+says each picture depends on the one before). Measured with headless Chromium on the same video and 2% packet loss:
+10-27 s of frozen picture in 40 s before, about 2.5 s after. H.264 is not affected.
+
+**Keyframe bursts.** ffmpeg writes all the packets of a frame at the same instant, and a keyframe of a copied video
+is often ten times a normal frame: hundreds of packets at once can overflow a queue on the way (the viewer's router,
+Wi-Fi), and the lost ones freeze the picture. For direct streams the sidecar therefore spreads the packets of each
+frame over time, at a multiple of the video's own measured bitrate (Light 4×, Normal 2.5×, Strong 1.5×; a keyframe may
+arrive up to 0.6 s later, and the audio is aligned to it). Choose it in *Media Library → Streaming defaults → Direct
+streams: smooth keyframes* (also per server); *Off* sends frames as they come. It never touches a re-encoded stream.
+
+**When the picture cannot be copied.** H.264 with B-frames (most files, including recorded TV),
+AV1, HEVC and 10-bit pictures cannot be sent as they are. By default the manager then **converts the whole video once**
+into H.264 without B-frames (x264 `ultrafast`, a keyframe every second, at the quality the stream was asked for and
+never larger than the source), and **only when the conversion is finished** starts the stream, now copying the converted
+file. A source is read through the sidecar's network rules, as for streaming it. While it converts, the *Now playing*
+card shows the progress and a *Cancel* button (`!stopstream` cancels too), the chat is told when the conversion starts and
+ends, and the page answers "still starting" after 20 s instead of waiting for the end. The converted file is the one
+paused, seeked and copied afterwards (no remote reopening). Choose the speed, or turn it off, in *Streaming defaults →
+Direct streams: when the picture cannot be copied* (also per server): *x264 ultrafast / superfast / veryfast* (a slower
+preset gives a better picture for the same size) or *Re-encode while it plays* (no wait, the old behaviour).
+
+Not converted, and re-encoded while they play instead, with the reason on the card and in chat: a live source (it has no
+end), a video longer than *Max video duration* (default 15 min; raise it in Settings for long videos), a conversion that
+fails, and a source that cannot be inspected. Only one conversion runs at a time. The sidecar writes the result as
+`.stream-<digits>.mp4` in the music folder and it is deleted when the stream ends.
+
+**Pausing a video.** The *Now playing* card has *Pause* / *Resume* for a finite video, and `!pause` toggles it in
+chat, as for music. Pausing stops the encode and remembers the position; the viewers stay connected and keep the last
+picture. Resume starts again from that position (a video without a local copy is opened again on its site, so it
+counts as a seek for the seek cooldown). Live streams and looping videos cannot be paused. A seek while paused plays
+from the target; a volume change while paused is applied when it plays again. Pause/resume also work through
+`POST /api/music-bots/:id/pause` and `/resume`, which now handle video as well.
+

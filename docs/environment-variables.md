@@ -30,7 +30,7 @@ These seed the **Streaming defaults** shown to admins on the Video Stream tab. A
 | `VIDEO_AUTO_MAX_PRESET` | `1080p` | Highest preset **Auto** quality may pick (`720p`–`2160p`); Balanced profile default |
 | `VIDEO_ENCODER` | `auto` | Default encoder: `auto`, `vp8`, `vp9`, `h264`, `vp8_vaapi`, `vp9_vaapi`, `h264_vaapi`, `h264_nvenc`, `h264_amf` |
 | `VIDEO_PREFER_HARDWARE` | `false` | Let `auto` use the first hardware encoder (VAAPI / NVENC / AMF) that passes the sidecar test encode |
-| `VIDEO_MAX_BITRATE_KBPS` | `4500` | Clamp every stream bitrate (kbps); `0` = no clamp. Balanced profile default is `4500` |
+| `VIDEO_MAX_BITRATE_KBPS` | `7000` | Clamp every stream bitrate (kbps); `0` = no clamp. Balanced profile default is `7000` (Performance `4000`). The bitrate of each resolution is set in the web GUI, not by an environment variable |
 | `VIDEO_ENCODE_PROFILE` | `balanced` | `performance`, `balanced`, `quality`, or `custom` — expands into Auto max, bitrate clamp, and encode speed |
 | `VIDEO_CPU_USED` | `4` | Default libvpx `-cpu-used` when no admin profile/cpuUsed is stored (higher = faster) |
 

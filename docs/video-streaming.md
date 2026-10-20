@@ -29,7 +29,7 @@ Streaming defaults also offer **Performance / Balanced / Quality** profiles (def
 - **Auto** probes the source with `ffprobe` and uses the largest preset the source fits without upscaling, up to the **Auto limit** (default 1080p under Balanced). A 720p channel stays 720p even when the limit is 2160p. If the probe fails, Auto uses 720p (or the limit, if lower) and says so.
 - **Fixed presets** skip the probe. Prefer them for IPTV services that allow only one connection, since the probe is a second one.
 - The stream panel shows *requested → actual*, e.g. `Auto → 1080p (source 1920×1080)`.
-- Leave the bitrate empty to use the preset's bitrate. Admins can set a **bitrate limit** that clamps every stream.
+- Leave the bitrate empty to use the resolution's bitrate. Built-in values: 480p 1000 kbps, 720p 4000, 1080p 7000, 1440p 8000, 2160p 9500. Admins change them under **Streaming defaults → Bitrate per resolution** (100–9500 kbps each; also per server), and can set a **bitrate limit** that clamps every stream: a resolution set above the limit streams at the limit, so the Performance (4000) and Balanced (7000) profiles set the limit to match their resolution.
 - Every stream is capped at **9500 kbps**, whatever the preset, custom bitrate or limit says: TeamSpeak drops a stream above 10 Mbit/s, which would look like an encoder failure. 2160p therefore uses 9500 kbps.
 - Software VP8 and VP9 are held at the target bitrate (`-minrate`); without it libvpx overshoots on detailed video.
 
