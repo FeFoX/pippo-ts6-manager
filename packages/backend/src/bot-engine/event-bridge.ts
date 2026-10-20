@@ -433,6 +433,8 @@ export class EventBridge extends EventEmitter {
   }
 
   private commandListeners: Map<string, SshQueryClient> = new Map();
+  /** Keys being set up: a second concurrent caller must not open a duplicate listener. */
+  private pendingCommandListeners: Set<string> = new Set();
 
   private makeCmdKey(configId: number, sid: number, channelId: number): string {
     return `${configId}:${sid}:cmd:${channelId}`;
@@ -440,8 +442,16 @@ export class EventBridge extends EventEmitter {
 
   async connectCommandListener(configId: number, sid: number, channelId: number): Promise<void> {
     const key = this.makeCmdKey(configId, sid, channelId);
-    if (this.commandListeners.has(key)) return;
+    if (this.commandListeners.has(key) || this.pendingCommandListeners.has(key)) return;
+    this.pendingCommandListeners.add(key);
+    try {
+      await this.openCommandListener(configId, sid, channelId, key);
+    } finally {
+      this.pendingCommandListeners.delete(key);
+    }
+  }
 
+  private async openCommandListener(configId: number, sid: number, channelId: number, key: string, attempt = 1): Promise<void> {
     const serverConfig = await this.prisma.tsServerConfig.findUnique({ where: { id: configId } });
     if (!serverConfig?.sshUsername || !serverConfig.sshPassword || !serverConfig.sshPort) {
       console.warn(
@@ -483,7 +493,14 @@ export class EventBridge extends EventEmitter {
     this.commandListeners.set(key, client);
     try { await client.connect(); } catch (err: any) {
       console.error(`[EventBridge] CMD listener initial connect failed for ${key}: ${err.message}`);
-      if (client.hasFatalError) this.commandListeners.delete(key);
+      if (client.hasFatalError) {
+        this.commandListeners.delete(key);
+      } else if (attempt < 3 && this.commandListeners.get(key) === client) {
+        // A listener whose first connect timed out never retries by itself and would stay dead.
+        await client.destroy().catch(() => undefined);
+        this.commandListeners.delete(key);
+        await this.openCommandListener(configId, sid, channelId, key, attempt + 1);
+      }
     }
   }
 
