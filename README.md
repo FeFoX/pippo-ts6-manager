@@ -1,3 +1,15 @@
+> [!NOTE]
+> This is a personalized version of [uniskela/ts6-manager](https://github.com/uniskela/ts6-manager), kept for one
+> private TeamSpeak community. The upstream maintainers have nothing to do with it and do not support it, so please
+> open issues about this version here and not on the upstream tracker.
+>
+> TS6 Manager is the work of [@uniskela](https://github.com/uniskela) and the
+> [uniskela/ts6-manager contributors](https://github.com/uniskela/ts6-manager/graphs/contributors), building on the
+> original [clusterzx/ts6-manager](https://github.com/clusterzx/ts6-manager) by [@clusterzx](https://github.com/clusterzx)
+> and its contributors. This fork starts from upstream v1.10.1 (commit `7d81468`), and
+> [CHANGES-FROM-UPSTREAM.md](CHANGES-FROM-UPSTREAM.md) lists what it adds. Everything below this note is upstream's
+> README and describes the upstream project.
+
 #### DISCLAIMER: 
 ![AI Assisted](https://img.shields.io/badge/AI%20Assisted-Project-00ADD8?style=for-the-badge&logo=dependabot&logoColor=white)
 

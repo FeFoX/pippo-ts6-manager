@@ -6,6 +6,14 @@ This fork builds on the original [clusterzx/ts6-manager](https://github.com/clus
 
 For source-revision evidence, provenance categories, and the maintainer policy for future external work, see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
+## Fork
+
+[FeFoX/pippo-ts6-manager](https://github.com/FeFoX/pippo-ts6-manager) is a personalized fork of
+[uniskela/ts6-manager](https://github.com/uniskela/ts6-manager) release v1.10.1 (commit
+[`7d81468`](https://github.com/uniskela/ts6-manager/commit/7d814684c65369b8ba3f8cf68843dd79283a0938)).
+The code up to that commit comes from the uniskela/ts6-manager and clusterzx/ts6-manager maintainers and the
+contributors credited in this file. The fork's own changes are listed in [CHANGES-FROM-UPSTREAM.md](CHANGES-FROM-UPSTREAM.md).
+
 ## Upstream project
 
 - **Author / maintainer:** [@clusterzx](https://github.com/clusterzx) and contributors to `clusterzx/ts6-manager`
