@@ -197,30 +197,17 @@ describe('direct stream decision', () => {
   });
 
   it('copies when the file passes the check, and keeps the answer across seeks', async () => {
-    const bot = makeBot();
-    const { b, calls } = fakeVideo(bot, { direct: true });
-    let checks = 0;
-    // The real check runs ffprobe; here the answer is fixed so the decision logic is tested alone.
-    b.decideDirect = Object.getPrototypeOf(b).decideDirect;
-    const original = b.decideDirect;
-    b.decideDirect = async function (sourcePath: string, audio?: string) {
-      checks++;
-      this._videoDirect = true;
-      this._videoDirectCodec = 'vp9';
-      this._videoDirectPath = sourcePath;
-      this._videoDirectFallback = null;
-      return 'vp9';
-    };
+    const { bot, calls, probes } = remoteBot('vp9');
     await bot.seekVideo(5);
     await bot.seekVideo(9);
-    assert.equal(calls.at(-1)!.options.passthrough, true);
-    assert.equal(calls.at(-1)!.options.encoder, 'vp9', 'the sidecar is told which codec the file is');
-    assert.equal(checks, 2);
+    const sources = calls.filter((c) => c.kind === 'source');
+    assert.equal(sources.at(-1)!.options.passthrough, true);
+    assert.equal(sources.at(-1)!.options.encoder, 'vp9', 'the sidecar is told which codec the file is');
+    assert.equal(probes.count, 1, 'the second seek answers from the cache and does not probe again');
     assert.equal(bot.videoStreamStatus.direct, true);
-    assert.equal(typeof original, 'function');
   });
 
-  it('keeps the codec the viewers negotiated: a re-encode follows it, and another codec is not copied', async () => {
+  it('keeps the codec the viewers negotiated: a re-encode follows it', async () => {
     const bot = makeBot();
     const { b, calls } = fakeVideo(bot, { direct: true });
     b._videoEncoder.selected = 'vp8';
@@ -229,11 +216,27 @@ describe('direct stream decision', () => {
     await bot.seekVideo(5);
     assert.equal(calls.at(-1)!.options.encoder, 'vp9');
     assert.equal(calls.at(-1)!.options.passthrough, undefined);
+  });
+
+  it('keeps the codec the viewers negotiated: another codec is not copied', async () => {
     // A copyable H.264 file cannot be copied to viewers who negotiated VP9.
-    b._videoDirectPath = null;
-    b._videoDirect = null;
-    const probe = await import('./streaming/source-probe.js');
-    assert.equal(typeof probe.checkDirectEligible, 'function');
+    const { b, bot, calls } = remoteBot('h264');
+    b._videoActiveCodec = 'vp9';
+    await bot.seekVideo(5);
+    const last = calls.filter((c) => c.kind === 'source').at(-1)!;
+    assert.equal(last.options.passthrough, undefined);
+    assert.equal(last.options.encoder, 'vp9', 'the re-encode follows the negotiated codec');
+    assert.equal(bot.videoStreamStatus.direct, false);
+    assert.match(bot.videoStreamStatus.directFallback ?? '', /viewers are already receiving VP9 and this video is H264/);
+  });
+
+  it('a codec is copied when it matches the one the viewers negotiated', async () => {
+    const { b, bot, calls } = remoteBot('vp9');
+    b._videoActiveCodec = 'vp9';
+    await bot.seekVideo(5);
+    const last = calls.filter((c) => c.kind === 'source').at(-1)!;
+    assert.equal(last.options.passthrough, true);
+    assert.equal(last.options.encoder, 'vp9');
   });
 
   it('the real decision is cached per file', async () => {
@@ -248,7 +251,81 @@ describe('direct stream decision', () => {
     assert.equal(second, null);
     assert.equal(b._videoDirectPath, file);
   });
+
+  it('a cached "copy this" answer is not reused once viewers have negotiated another codec', async () => {
+    const { b, probes } = remoteBot('vp9');
+    // No viewer has negotiated anything yet, so the file is copied and the answer is cached.
+    assert.equal(await b.decideDirect(REMOTE_WEBM), 'vp9');
+    assert.equal(b._videoDirect, true);
+    assert.equal(await b.decideDirect(REMOTE_WEBM), 'vp9', 'while nothing changed, the cache answers');
+    assert.equal(probes.count, 1);
+    // A viewer then joins on H.264. The next decision for the same file must not copy VP9 to them.
+    b._videoActiveCodec = 'h264';
+    assert.equal(await b.decideDirect(REMOTE_WEBM), null);
+    assert.equal(b._videoDirect, false);
+    assert.match(b._videoDirectFallback ?? '', /viewers are already receiving H264 and this video is VP9/);
+  });
+
+  it('a seek after a viewer joined on another codec re-encodes instead of copying the cached answer', async () => {
+    const { b, bot, calls } = remoteBot('vp9');
+    await bot.seekVideo(5);
+    assert.equal(calls.filter((c) => c.kind === 'source').at(-1)!.options.passthrough, true);
+    // The first seek copied VP9 and cached it. Now the stream's codec is H.264.
+    b._videoActiveCodec = 'h264';
+    await bot.seekVideo(9);
+    const last = calls.filter((c) => c.kind === 'source').at(-1)!;
+    assert.equal(last.options.passthrough, undefined, 'VP9 is not copied to viewers who negotiated H.264');
+    assert.equal(last.options.encoder, 'h264', 'the re-encode follows the negotiated codec');
+    assert.equal(bot.videoStreamStatus.direct, false);
+  });
+
+  it('a volume change after a viewer joined on another codec does not copy the cached answer either', async () => {
+    const { b, bot, calls } = remoteBot('vp9');
+    await bot.seekVideo(5);
+    b._videoActiveCodec = 'h264';
+    await bot.applyVolume(30);
+    const last = calls.filter((c) => c.kind === 'source').at(-1)!;
+    assert.equal(last.options.volume, 30);
+    assert.equal(last.options.passthrough, undefined);
+    assert.equal(last.options.encoder, 'h264');
+  });
+
+  it('a different file is judged on its own, not by the previous answer', async () => {
+    const { b, probes } = remoteBot('vp9');
+    b._videoActiveCodec = 'h264';
+    assert.equal(await b.decideDirect(REMOTE_WEBM), null);
+    // A different file is judged on its own, not by the previous answer.
+    assert.equal(await b.decideDirect('https://cdn.example/other.webm'), null);
+    assert.equal(probes.count, 2);
+  });
 });
+
+const REMOTE_WEBM = 'https://cdn.example/video.webm';
+
+const COPYABLE: Record<'vp9' | 'h264', string> = {
+  vp9: JSON.stringify({
+    streams: [{ codec_name: 'vp9', profile: 'Profile 0', pix_fmt: 'yuv420p' }], packets: [], format: { duration: '90' },
+  }),
+  h264: JSON.stringify({
+    streams: [{ codec_name: 'h264', profile: 'Main', pix_fmt: 'yuv420p', has_b_frames: 0 }], packets: [], format: { duration: '90' },
+  }),
+};
+
+/**
+ * A bot streaming a remote video whose sidecar probe reports a file that can be copied in `codec`.
+ * The decision itself is the real one; only the probe answer is scripted, and `probes.count` says
+ * how often it was asked.
+ */
+function remoteBot(codec: 'vp9' | 'h264') {
+  const bot = makeBot();
+  const { b, calls } = fakeVideo(bot, { direct: true });
+  const probes = { count: 0 };
+  b._videoTempFile = null;
+  b.sidecarHttp.probe = async () => { probes.count++; return COPYABLE[codec]; };
+  b.resolveStreamSource = async () => ({ path: REMOTE_WEBM, loop: false });
+  b.probeStreamSource = async () => null;
+  return { bot, b, calls, probes };
+}
 
 // ─── converting a picture that cannot be copied, before a direct stream starts ───────────────
 
