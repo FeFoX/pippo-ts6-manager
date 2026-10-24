@@ -9,10 +9,11 @@ const musicDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts6-seek-test-'));
 process.env.MUSIC_DIR = musicDir;
 const { SeekRateLimitedError, VoiceBot } = await import('./voice-bot.js');
 
-/** `cooldown` is the seek rate limit in seconds; the tests that seek repeatedly turn it off. */
-function makeBot(cooldown = 0): InstanceType<typeof VoiceBot> {
+/** `cooldown` and `resumeCooldown` are the rate limits in seconds; the tests that repeat an action turn them off. */
+function makeBot(cooldown = 0, resumeCooldown = 0): InstanceType<typeof VoiceBot> {
   return new VoiceBot({
     seekCooldownSec: cooldown,
+    resumeCooldownSec: resumeCooldown,
     id: 9,
     serverConfigId: 1,
     name: 'test',
@@ -231,6 +232,50 @@ describe('seek rate limit on remote sources', () => {
     await assert.rejects(() => bot.seek(2400), (err: unknown) =>
       err instanceof SeekRateLimitedError && err.retryAfterSec === 110);
     b.clearVideoEndTimer();
+  });
+
+  it('keeps a short floor between two resumes of a remote video, then lets the next one through', async () => {
+    const bot = makeBot(120, 10);
+    const { b, sources } = fakeVideo(bot, { duration: 5470 });
+
+    await bot.seek(1800);
+    await bot.pauseVideo();
+    await bot.resumeVideo();
+    await bot.pauseVideo();
+    mock.timers.tick(4_000);
+    await assert.rejects(() => bot.resumeVideo(), (err: unknown) =>
+      err instanceof SeekRateLimitedError && err.kind === 'resume' && err.retryAfterSec === 6 && err.cooldownSec === 10
+      && /Resuming a remote video is limited to once every 10 seconds/.test(err.message));
+    assert.equal(bot.videoPaused, true, 'a refused resume leaves the video paused');
+    assert.equal(sources.length, 2, 'and does not reopen the site');
+
+    mock.timers.tick(6_000);
+    await bot.resumeVideo();
+    assert.equal(bot.videoPaused, false);
+    assert.equal(sources.length, 3);
+    b.clearVideoEndTimer();
+  });
+
+  it('a resume floor of 0 turns it off, and the floor never applies to a video on disk', async () => {
+    const off = makeBot(120, 0);
+    const a = fakeVideo(off, { duration: 5470 });
+    await off.pauseVideo();
+    await off.resumeVideo();
+    await off.pauseVideo();
+    await off.resumeVideo();
+    assert.equal(a.sources.length, 2);
+    a.b.clearVideoEndTimer();
+
+    fs.writeFileSync(path.join(musicDir, '.stream-1.mp4'), '');
+    const local = makeBot(120, 10);
+    const l = fakeVideo(local, { duration: 5470 });
+    l.b._videoTempFile = '.stream-1.mp4';
+    await local.pauseVideo();
+    await local.resumeVideo();
+    await local.pauseVideo();
+    await local.resumeVideo();
+    assert.equal(l.sources.length, 2, 'two resumes in a row from the local copy');
+    l.b.clearVideoEndTimer();
   });
 
   it('does not limit a video that is already on disk, because that seek never leaves the server', async () => {

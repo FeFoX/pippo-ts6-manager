@@ -633,7 +633,7 @@ musicBotRoutes.post('/:id/resume', async (req: Request, res: Response, next) => 
       try {
         await bot.resumeVideo();
       } catch (err) {
-        // A video without a local copy is opened again on its site, which the seek cooldown limits.
+        // A video without a local copy is opened again on its site, which the resume cooldown limits.
         if (err instanceof SeekRateLimitedError) throw new AppError(429, err.message);
         throw err;
       }

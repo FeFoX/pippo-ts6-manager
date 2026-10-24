@@ -17,6 +17,7 @@ feature in more detail.
 |---|---|---|---|
 | Video seek | none | | `!seek`, Now playing card |
 | Seek cooldown | `seek_cooldown_seconds` | `120` s (`0` = off) | Settings → YouTube → Download & Stream Limits |
+| Resume cooldown | `resume_cooldown_seconds` | `10` s (`0` = off) | API only for now (`PUT /api/settings/limits`) |
 | Bot access | `bot_control_groups` | empty (everybody) | Settings → Users → Bot access |
 | Direct streams | none, chosen per start | Re-encode | Bot console → Link → Video options → Streaming mode |
 | Video pause/resume | none | | Now playing card, `!pause` |
@@ -55,6 +56,9 @@ between two such seeks, whoever asks. Seeks in a file that is already on the ser
 - API: `PUT /api/settings/limits` accepts `seekCooldownSeconds`. A refused seek answers `429` on
   `POST /api/music-bots/:id/seek` and `/resume`; in chat the user is told how long to wait; a flow's Voice Seek step
   is skipped with a warning.
+- Resume cooldown: setting `resume_cooldown_seconds`, default `10`, range `0` to `3600`, `0` turns it off, set with
+  `resumeCooldownSeconds` on the same endpoint. It only limits resuming a paused video that has no local copy, and a
+  refused resume answers `429`.
 - Audit: `settings.limits_update`.
 - Files: `packages/backend/src/utils/app-settings.ts`, `routes/settings.routes.ts`, `voice/voice-bot-manager.ts`,
   `bot-engine/flow-runner.ts`.
@@ -99,7 +103,7 @@ A direct stream sends the video as it is, without decoding and encoding it again
 ### Video pause and resume
 
 Pause stops the encode and remembers the position; viewers stay connected and keep the last picture. Resume starts
-again from that position (a video without a local copy is reopened, but resuming is exempt from the seek cooldown).
+again from that position (a video without a local copy is reopened; that does not count as a seek, but a resume cooldown of 10 seconds applies between two resumes).
 Live streams and looping videos cannot be paused.
 
 - `POST /api/music-bots/:id/pause` and `/resume` now handle video (`409` when the video cannot be paused).

@@ -170,6 +170,7 @@ Both settings are in the web panel (admin only) and apply at once, with no resta
 
 - **Settings → Users → Bot access**: one or more TeamSpeak server groups, chosen from the groups of the selected server or typed by name or id. When the list is not empty, only clients in one of those groups can use the built-in chat commands (`!play`, `!stop`, `!seek`, `!help` and the rest). Everybody else gets one short refusal every 30 seconds and the command is not run. The sender's groups are read from TeamSpeak at every command, so taking the group away stops access at once. If TeamSpeak cannot be asked, or a listed group does not exist, nobody is allowed. An empty list (the default) means everybody can. Custom chat commands, viewing a video stream and the web panel are not affected.
 - **Settings → YouTube → Download & Stream Limits → Seek cooldown**: how long a bot waits between two seeks on a **remote** source (a YouTube track or video, a link, a radio URL). Default `120` seconds, `0` turns it off. A seek reopens the remote resource, so this keeps repeated seeks from hammering the site. The limit counts for the whole bot, whoever asks. A seek in a file that is already on the server (a downloaded track or video) is never limited. A refused chat `!seek` tells the user how long to wait, the API answers `429`, and a flow's Voice Seek step is skipped.
+- **Resume cooldown** (`resume_cooldown_seconds`, set through `PUT /api/settings/limits` as `resumeCooldownSeconds`): how long a bot waits between two resumes of a paused video that has no local copy and has to be opened again on its site. Default `10` seconds, range `0` to `3600`, `0` turns it off. A resume is not a seek, so it never uses up the seek cooldown. A refused resume leaves the video paused and answers `429`.
 
 Both changes are written to the audit history (`settings.bot_access_update`, `settings.limits_update`).
 
@@ -244,7 +245,7 @@ behind are removed at the next sidecar start once they are more than four hours 
 **Pausing a video.** The *Now playing* card has *Pause* / *Resume* for a finite video, and `!pause` toggles it in
 chat, as for music. Pausing stops the encode and remembers the position; the viewers stay connected and keep the last
 picture. Resume starts again from that position (a video without a local copy is opened again on its site, but resuming
-does not count against the seek cooldown). Live streams and looping videos cannot be paused. A seek while paused plays
+does not count against the seek cooldown, only against the shorter resume cooldown). Live streams and looping videos cannot be paused. A seek while paused plays
 from the target; a volume change while paused is applied when it plays again. Pause/resume also work through
 `POST /api/music-bots/:id/pause` and `/resume`, which now handle video as well.
 
