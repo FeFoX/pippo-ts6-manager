@@ -42,6 +42,14 @@ import { BrandMark } from '@/components/shared/BrandMark';
 import { Settings as SettingsIcon, Users, Server, Plus, Trash2, Pencil, TestTube, Check, X, Lock, KeyRound, Youtube, Upload, FileText, Wand2, Info, Github, Palette, Loader2, ShieldAlert } from 'lucide-react';
 import { APP_REPOSITORY_URL, APP_VERSION, APP_VERSION_LABEL } from '@/lib/app-version';
 import { apiErrorMessage } from '@/lib/api-error';
+import {
+  MAX_PLAYLIST_IMPORT,
+  MAX_SEEK_COOLDOWN_SECONDS,
+  MIN_PLAYLIST_IMPORT,
+  parseMaxPlaylistImportInput,
+  parseMaxVideoDurationInput,
+  parseSeekCooldownInput,
+} from '@/lib/limits-input';
 import { toast } from 'sonner';
 import type { ConnectionDiagnosticReport } from '@ts6/common';
 
@@ -1182,12 +1190,21 @@ function LimitsCard() {
     }
   }, [limits]);
 
+  const maxVideoDurationValue = parseMaxVideoDurationInput(maxVideoDuration);
+  const maxPlaylistImportValue = parseMaxPlaylistImportInput(maxPlaylistImport);
+  const seekCooldownSeconds = parseSeekCooldownInput(seekCooldown);
+  // Only flag a field once the stored values have loaded into them.
+  const maxVideoDurationInvalid = limits !== undefined && maxVideoDurationValue === null;
+  const maxPlaylistImportInvalid = limits !== undefined && maxPlaylistImportValue === null;
+  const seekCooldownInvalid = limits !== undefined && seekCooldownSeconds === null;
+  const anyInvalid = maxVideoDurationInvalid || maxPlaylistImportInvalid || seekCooldownInvalid;
+
   const saveLimits = useMutation({
     mutationFn: () => settingsApi.updateLimits({
-      maxVideoDuration: parseInt(maxVideoDuration, 10),
-      maxPlaylistImport: parseInt(maxPlaylistImport, 10),
+      maxVideoDuration: maxVideoDurationValue ?? undefined,
+      maxPlaylistImport: maxPlaylistImportValue ?? undefined,
       youtubeDirectStream,
-      seekCooldownSeconds: parseInt(seekCooldown, 10),
+      seekCooldownSeconds: seekCooldownSeconds ?? undefined,
     }),
     onSuccess: () => {
       toast.success('Limits saved');
@@ -1226,26 +1243,42 @@ function LimitsCard() {
               />
             </div>
             <div>
-              <Label className="text-xs">Max video duration (seconds, 0 = unlimited)</Label>
+              <Label htmlFor="max-video-duration" className="text-xs">Max video duration (seconds, 0 = unlimited)</Label>
               <Input
+                id="max-video-duration"
                 type="number"
                 min={0}
+                aria-invalid={maxVideoDurationInvalid}
+                className={maxVideoDurationInvalid ? 'border-destructive' : undefined}
                 value={maxVideoDuration}
                 onChange={(e) => setMaxVideoDuration(e.target.value)}
               />
+              {maxVideoDurationInvalid && (
+                <p role="alert" className="text-xs text-destructive mt-1">
+                  Enter a whole number of seconds, 0 or more, to save.
+                </p>
+              )}
               <p className="text-xs text-muted-foreground mt-1">
                 Applies to downloaded videos; not used when YouTube videos are streamed directly.
               </p>
             </div>
             <div>
-              <Label className="text-xs">Max playlist import tracks (1–500)</Label>
+              <Label htmlFor="max-playlist-import" className="text-xs">Max playlist import tracks ({MIN_PLAYLIST_IMPORT}–{MAX_PLAYLIST_IMPORT})</Label>
               <Input
+                id="max-playlist-import"
                 type="number"
-                min={1}
-                max={500}
+                min={MIN_PLAYLIST_IMPORT}
+                max={MAX_PLAYLIST_IMPORT}
+                aria-invalid={maxPlaylistImportInvalid}
+                className={maxPlaylistImportInvalid ? 'border-destructive' : undefined}
                 value={maxPlaylistImport}
                 onChange={(e) => setMaxPlaylistImport(e.target.value)}
               />
+              {maxPlaylistImportInvalid && (
+                <p role="alert" className="text-xs text-destructive mt-1">
+                  Enter a whole number from {MIN_PLAYLIST_IMPORT} to {MAX_PLAYLIST_IMPORT} to save.
+                </p>
+              )}
             </div>
             <div>
               <Label htmlFor="seek-cooldown" className="text-xs">Seek cooldown for remote sources (seconds, 0 = no limit)</Label>
@@ -1253,10 +1286,17 @@ function LimitsCard() {
                 id="seek-cooldown"
                 type="number"
                 min={0}
-                max={86400}
+                max={MAX_SEEK_COOLDOWN_SECONDS}
+                aria-invalid={seekCooldownInvalid}
+                className={seekCooldownInvalid ? 'border-destructive' : undefined}
                 value={seekCooldown}
                 onChange={(e) => setSeekCooldown(e.target.value)}
               />
+              {seekCooldownInvalid && (
+                <p role="alert" className="text-xs text-destructive mt-1">
+                  Enter a whole number of seconds from 0 to {MAX_SEEK_COOLDOWN_SECONDS} to save.
+                </p>
+              )}
               <p className="text-xs text-muted-foreground mt-1">
                 Minimum wait between two seeks on a YouTube track or video, a link or a radio URL. A seek
                 reopens the remote resource, so this keeps repeated seeks from hammering the site. It counts
@@ -1267,7 +1307,7 @@ function LimitsCard() {
             <Button
               size="sm"
               onClick={() => saveLimits.mutate()}
-              disabled={saveLimits.isPending}
+              disabled={saveLimits.isPending || anyInvalid}
             >
               {saveLimits.isPending ? 'Saving...' : 'Save Limits'}
             </Button>
