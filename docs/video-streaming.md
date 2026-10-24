@@ -35,6 +35,8 @@ Streaming defaults also offer **Performance / Balanced / Quality** profiles (def
 
 1440p and 2160p need a fast CPU with software encoders; a hardware encoder is recommended.
 
+Software VP8 and VP9 use as many encode threads as the container may really use (its CPU limit, not the host's core count). Set **Encode threads** under *Advanced quality settings* to choose a number (0 = automatic); a convert-first conversion uses at most two of them.
+
 ## Encoders
 
 | Encoder | Codec | Notes |

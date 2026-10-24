@@ -220,13 +220,13 @@ says each picture depends on the one before). Measured with headless Chromium on
 is often ten times a normal frame: hundreds of packets at once can overflow a queue on the way (the viewer's router,
 Wi-Fi), and the lost ones freeze the picture. For direct streams the sidecar therefore spreads the packets of each
 frame over time, at a multiple of the video's own measured bitrate (Light 4×, Normal 2.5×, Strong 1.5×; a keyframe may
-arrive up to 0.6 s later, and the audio is aligned to it). Choose it in *Media Library → Streaming defaults → Direct
+arrive up to 0.6 s later; the audio is held back by the pacer's recent average delay so the two stay close). Choose it in *Media Library → Streaming defaults → Direct
 streams: smooth keyframes* (also per server); *Off* sends frames as they come. It never touches a re-encoded stream.
 
 **When the picture cannot be copied.** H.264 with B-frames (most files, including recorded TV),
 AV1, HEVC and 10-bit pictures cannot be sent as they are. By default the manager then **converts the whole video once**
-into H.264 without B-frames (x264 `ultrafast`, a keyframe every second, at the quality the stream was asked for and
-never larger than the source), and **only when the conversion is finished** starts the stream, now copying the converted
+into H.264 without B-frames (x264 `ultrafast`, a keyframe every second, at the quality the stream was asked for; the
+bitrate cap is lowered to the source's own bitrate when it is known, so the file is not larger than its source), and **only when the conversion is finished** starts the stream, now copying the converted
 file. A source is read through the sidecar's network rules, as for streaming it. While it converts, the *Now playing*
 card shows the progress and a *Cancel* button (`!stopstream` cancels too), the chat is told when the conversion starts and
 ends, and the page answers "still starting" after 20 s instead of waiting for the end. The converted file is the one
@@ -236,8 +236,10 @@ preset gives a better picture for the same size) or *Re-encode while it plays* (
 
 Not converted, and re-encoded while they play instead, with the reason on the card and in chat: a live source (it has no
 end), a video longer than *Max video duration* (default 15 min; raise it in Settings for long videos), a conversion that
-fails, and a source that cannot be inspected. Only one conversion runs at a time. The sidecar writes the result as
-`.stream-<digits>.mp4` in the music folder and it is deleted when the stream ends.
+fails, a conversion that stalls (no progress for 5 minutes) or would take longer than twice the video's length, and a
+source that cannot be inspected. Only one conversion runs at a time, using at most 2 CPU threads. The sidecar writes the
+result as `.stream-<digits>.mp4` in the music folder and it is deleted when the stream ends; files a restart left
+behind are removed at the next sidecar start once they are more than four hours old.
 
 **Pausing a video.** The *Now playing* card has *Pause* / *Resume* for a finite video, and `!pause` toggles it in
 chat, as for music. Pausing stops the encode and remembers the position; the viewers stay connected and keep the last

@@ -23,6 +23,7 @@ feature in more detail.
 | Retransmission (NACK) | none | always on | |
 | VP9 descriptor rewrite | none | always on for copied VP9 | |
 | Keyframe pacing | `video_direct_pacing` | `2.5` (`0` = off, 1 to 10) | Media Library → Streaming defaults (also per server) |
+| Encode threads | `video_encode_threads` | `0` (automatic) | Media Library → Streaming defaults → Advanced (also per server) |
 | Convert-first fallback | `video_direct_fallback` | `ultrafast` | Media Library → Streaming defaults (also per server) |
 | Bitrate per resolution | `video_preset_bitrates` | see below | Media Library → Streaming defaults (also per server) |
 | Command listener race | none | | |
@@ -126,7 +127,8 @@ In a test with 2% packet loss, frozen picture went from 10 to 27 s per 40 s down
 
 On direct streams the sidecar spreads the packets of each frame over time, at a multiple of the video's measured
 bitrate, so a large keyframe does not go out as one burst. A keyframe can arrive up to 0.6 s later, and the audio is
-aligned to it.
+held back by the pacer's recent average delay (smoothed over about 2 s), so the two stay close; a single late keyframe
+can still trail the audio by up to 0.6 s.
 
 - Setting `video_direct_pacing`, default `2.5`; `0` = off, otherwise `1` to `10`. GUI choices: Light 4×, Normal 2.5×,
   Strong 1.5×, Off. Also settable per server.
@@ -134,10 +136,24 @@ aligned to it.
 - Files: `packages/sidecar/pacer.go` (new), `main.go`, `utils/app-settings.ts`,
   frontend `VideoStreamDefaultsCard.tsx`.
 
+### Encode threads
+
+The software VP8 and VP9 encoders were given one thread per CPU the sidecar process could see. A container limited to
+3 CPUs on a 6-core host still saw 6, so ffmpeg ran 6 threads inside a 3-CPU budget and was throttled. The default is
+now the smaller of the visible CPUs and the container's CPU quota (cgroup v1 or v2).
+
+- Setting `video_encode_threads`: `0` (default) = automatic, otherwise 1 to 64. `VIDEO_ENCODE_THREADS` still applies
+  when the setting is `0`. Also settable per server. The sidecar's `POST /source` and `POST /convert` accept `threads`.
+- Files: `packages/sidecar/cpu_limit.go` (new), `encoders.go`, `convert.go`, `utils/app-settings.ts`,
+  frontend `VideoStreamDefaultsCard.tsx`.
+
 ### Convert-first fallback
 
 If a direct stream cannot copy the picture, the manager first converts the whole video to H.264 without B-frames
-(x264, a keyframe about every second, never larger than the source) and then streams the converted file by copy.
+(x264, a keyframe about every second) and then streams the converted file by copy. The conversion's bitrate cap is the
+stream's bitrate, lowered to the source's own video bitrate when the probe reports one, so the file does not come out
+larger than its source by more than the audio and container overhead. When the source reports no bitrate, only the
+stream's cap applies.
 
 - Setting `video_direct_fallback`: `ultrafast` (default), `superfast`, `veryfast`, or `live` (re-encode while it
   plays, the upstream behaviour). Also settable per server.
@@ -147,7 +163,11 @@ If a direct stream cannot copy the picture, the manager first converts the whole
   A start that takes longer than 20 s is answered with HTTP `202` ("still starting").
 - Sidecar API (new, authenticated like the rest): `POST /convert`, `GET /convert?id=`, `POST /convert/cancel`.
   The source is read under the sidecar's egress rules. The output `.stream-<digits>.mp4` is written to the music
-  folder and deleted when the stream ends.
+  folder and deleted when the stream ends. A restart can leave one behind, so at start-up the sidecar removes
+  `.stream-<digits>.mp4` and `.stream-<digits>.mp4.part` files in the music folder that are more than four hours old.
+- The conversion uses at most 2 x264 threads (`VIDEO_CONVERT_THREADS` overrides), so it cannot take the CPUs a live
+  stream needs. The manager gives up on a conversion that makes no progress for 5 minutes, or that would take longer
+  than twice the video's length (at least 10 minutes), and re-encodes the video live instead.
 - Files: `packages/sidecar/convert.go` (new), `voice/streaming/sidecar-client.ts`, `voice/voice-bot.ts`,
   `routes/music-bots.routes.ts`, frontend `NowPlaying.tsx`.
 
