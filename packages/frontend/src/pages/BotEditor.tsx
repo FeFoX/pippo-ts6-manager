@@ -858,7 +858,7 @@ export default function BotEditor() {
                           value={selectedNodeData.config.secret || ''}
                           onChange={(e) => setNodes((prev) => prev.map((n) => n.id === selectedNode ? { ...n, config: { ...n.config, secret: e.target.value } } : n))}
                         />
-                        <p className="text-[9px] text-muted-foreground/60 mt-0.5">Validated via X-Webhook-Secret header or ?secret= query param</p>
+                        <p className="text-[9px] text-muted-foreground/60 mt-0.5">Send it in the X-Webhook-Secret header</p>
                       </div>
                     </>
                   )}

@@ -1,15 +1,21 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import crypto from 'crypto';
 import { nanoid } from 'nanoid';
 import rateLimit from 'express-rate-limit';
 import { config } from '../config.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { AppError } from '../middleware/error-handler.js';
 import { validatePassword } from '../utils/validate-password.js';
+import { hashRefreshToken, newRefreshToken } from '../utils/refresh-token.js';
 
 export const authRoutes: Router = Router();
+
+// Unknown and disabled users are checked against this, so every login costs one bcrypt
+// comparison and the response time does not tell which usernames exist.
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync(nanoid(32), 12);
+
+const refreshExpiresAt = () => new Date(Date.now() + config.refreshTokenTtlMs);
 
 const meRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -26,21 +32,16 @@ authRoutes.post('/login', async (req: Request, res: Response, next) => {
     const prisma = req.app.locals.prisma;
     const user = await prisma.user.findUnique({ where: { username } });
 
-    if (!user || !user.enabled) throw new AppError(401, 'Invalid credentials');
-
-    const valid = await bcrypt.compare(password, user.passwordHash);
-    if (!valid) throw new AppError(401, 'Invalid credentials');
+    const valid = await bcrypt.compare(String(password), user?.passwordHash ?? DUMMY_PASSWORD_HASH);
+    if (!user || !user.enabled || !valid) throw new AppError(401, 'Invalid credentials');
 
     const payload = { id: user.id, username: user.username, role: user.role };
     const accessToken = jwt.sign(payload, config.jwtSecret, { expiresIn: config.jwtAccessExpiry } as jwt.SignOptions);
-    const refreshToken = crypto.randomBytes(64).toString('hex');
+    const { token: refreshToken, hash } = newRefreshToken();
     const family = nanoid();
 
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 7);
-
     await prisma.refreshToken.create({
-      data: { token: refreshToken, userId: user.id, expiresAt, family },
+      data: { token: hash, userId: user.id, expiresAt: refreshExpiresAt(), family },
     });
 
     await prisma.user.update({
@@ -67,15 +68,16 @@ authRoutes.post('/refresh', async (req: Request, res: Response, next) => {
     if (!refreshToken) throw new AppError(400, 'Refresh token required');
 
     const prisma = req.app.locals.prisma;
+    const presented = hashRefreshToken(String(refreshToken));
     const stored = await prisma.refreshToken.findUnique({
-      where: { token: refreshToken },
+      where: { token: presented },
       include: { user: true },
     });
 
     if (!stored) {
       // H5: Token not found — check if it was already used (reuse detection)
       const replaced = await prisma.refreshToken.findFirst({
-        where: { replacedBy: refreshToken },
+        where: { replacedBy: presented },
       });
       if (replaced) {
         // Reuse detected! Revoke entire token family
@@ -91,21 +93,19 @@ authRoutes.post('/refresh', async (req: Request, res: Response, next) => {
     }
 
     // Rotate: mark old token as replaced, create new one in same family
-    const newRefreshToken = crypto.randomBytes(64).toString('hex');
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 7);
+    const rotated = newRefreshToken();
 
     // Concurrent refresh (multi-tab) can delete this row between findUnique and update.
     const marked = await prisma.refreshToken.updateMany({
       where: { id: stored.id },
-      data: { replacedBy: newRefreshToken },
+      data: { replacedBy: rotated.hash },
     });
     if (marked.count === 0) {
       throw new AppError(401, 'Invalid refresh token');
     }
 
     await prisma.refreshToken.create({
-      data: { token: newRefreshToken, userId: stored.userId, expiresAt, family: stored.family },
+      data: { token: rotated.hash, userId: stored.userId, expiresAt: refreshExpiresAt(), family: stored.family },
     });
 
     // Delete old token after creating new one (ignore if already gone)
@@ -114,7 +114,7 @@ authRoutes.post('/refresh', async (req: Request, res: Response, next) => {
     const payload = { id: stored.user.id, username: stored.user.username, role: stored.user.role };
     const accessToken = jwt.sign(payload, config.jwtSecret, { expiresIn: config.jwtAccessExpiry } as jwt.SignOptions);
 
-    res.json({ accessToken, refreshToken: newRefreshToken });
+    res.json({ accessToken, refreshToken: rotated.token });
   } catch (err) { next(err); }
 });
 
@@ -123,7 +123,7 @@ authRoutes.post('/logout', async (req: Request, res: Response, next) => {
     const { refreshToken } = req.body;
     if (refreshToken) {
       const prisma = req.app.locals.prisma;
-      await prisma.refreshToken.deleteMany({ where: { token: refreshToken } });
+      await prisma.refreshToken.deleteMany({ where: { token: hashRefreshToken(String(refreshToken)) } });
     }
     res.status(204).send();
   } catch (err) { next(err); }
