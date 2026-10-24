@@ -38,6 +38,7 @@ export const settingsApi = {
     maxPlaylistImport?: number;
     youtubeDirectStream?: boolean;
     seekCooldownSeconds?: number;
+    resumeCooldownSeconds?: number;
   }) => api.put('/settings/limits', data).then((r) => r.data),
 
   /** Server groups allowed to use the bot's chat commands; empty = everybody. */
