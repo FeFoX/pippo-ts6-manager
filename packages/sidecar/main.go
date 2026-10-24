@@ -1570,6 +1570,7 @@ func (s *Sidecar) buildFFmpegArgs(req SourceRequest, spec EncoderSpec, lowPower 
 				}
 				args = append(args, "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5")
 				args = append(args, extraIn...)
+				args = append(args, threadQueueArgs()...)
 			} else if req.Loop && mode == modeFile {
 				args = append(args, "-stream_loop", "-1")
 			}

@@ -222,6 +222,7 @@ Set these variables on the **sidecar** container or process. The supplied Docker
 |---|---|---|
 | `FFMPEG_HTTP_PERSISTENT` | `auto` | `auto` and `0` send `Connection: close` for remote HTTP(S) inputs. `1` leaves FFmpeg's default connection behavior and custom headers unchanged. |
 | `FFMPEG_EXTRA_INPUT_ARGS` | unset | Extra options before every remote input, including ffprobe. Custom headers are preserved; their `Connection` header is managed by `FFMPEG_HTTP_PERSISTENT`. Use options understood by both ffmpeg and ffprobe. HLS-only options such as `-http_persistent` can break MP4/MPEG-TS. Values containing `-i` or a bare `scheme://` URL are ignored. |
+| `FFMPEG_THREAD_QUEUE_SIZE` | `512` | Packets each remote input's demuxer may read ahead of playback (FFmpeg's `-thread_queue_size`; FFmpeg's own default is 8). A deeper queue lets a slow segment or playlist fetch overlap with playout, which removes a short freeze at every HLS segment boundary. Applied to FFmpeg playback only, never to ffprobe. `0` leaves FFmpeg's default. Capped at 65536. |
 | `FFMPEG_EXTRA_OUTPUT_ARGS` | unset | Extra options immediately before each RTP output. Same argument parsing and rejection rules. |
 
 For a provider that benefits from keep-alive, set `FFMPEG_HTTP_PERSISTENT=1`. Extra arguments are split into arguments, never run as a shell; inside double quotes, `\r`, `\n` and `\t` expand for HTTP header values.

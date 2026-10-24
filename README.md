@@ -427,6 +427,7 @@ Defaults below are the **sidecar code defaults**. Compose files may intentionall
 | `VIDEO_BUFSIZE` | auto | Optional override; otherwise approximately `2 × VIDEO_BITRATE` |
 | `FFMPEG_HTTP_PERSISTENT` | `auto` | `auto` and `0` send `Connection: close` on remote HTTP(S) requests, including opaque/redirected HLS playlists and segments. Safe for MPEG-TS and MP4 too. `1` leaves FFmpeg's connection behavior unchanged. Applied to playback and probing; sidecar only. |
 | `FFMPEG_EXTRA_INPUT_ARGS` | unset | Extra options before each remote input, also used for probing. Custom headers are preserved; `Connection` is managed by `FFMPEG_HTTP_PERSISTENT`. HLS-only options such as `-http_persistent` can break MP4/MPEG-TS. Values containing `-i` or bare URLs are ignored. |
+| `FFMPEG_THREAD_QUEUE_SIZE` | `512` | Packets each remote input's demuxer may read ahead of playback (FFmpeg's `-thread_queue_size`; FFmpeg's own default is 8). A deeper queue lets a slow segment or playlist fetch overlap with playout, which removes a short freeze at every HLS segment boundary. Applied to FFmpeg playback only, never to ffprobe. `0` leaves FFmpeg's default. Capped at 65536. |
 | `FFMPEG_EXTRA_OUTPUT_ARGS` | unset | Extra FFmpeg options inserted before each RTP output. |
 
 ## Music Bot Text Commands

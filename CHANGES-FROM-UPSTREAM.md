@@ -6,7 +6,7 @@ and three later upstream commits that only touch documentation and CI. Upstream 
 changes have not been rebased onto it yet.
 
 The new settings live in the database and are edited in the web GUI. The new environment variables are
-`TRUST_PROXY` (ported from upstream 1.11, see Security) and `VIDEO_CONVERT_THREADS`. The database schema is the same
+`TRUST_PROXY` (ported from upstream 1.11, see Security), `VIDEO_CONVERT_THREADS` and `FFMPEG_THREAD_QUEUE_SIZE`. The database schema is the same
 as upstream's: each new setting is a key/value row with a built-in default.
 
 [`docs/music-bots.md`](docs/music-bots.md) and [`docs/video-streaming.md`](docs/video-streaming.md) cover each
@@ -30,6 +30,7 @@ feature in more detail.
 | CPU priority | `video_cpu_priority` | `normal` | same places |
 | Convert-first fallback | `video_direct_fallback` | `ultrafast` | Media Library → Streaming defaults (also per server) |
 | Bitrate per resolution | `video_preset_bitrates` | see below | Media Library → Streaming defaults (also per server) |
+| Segment-boundary freeze | `FFMPEG_THREAD_QUEUE_SIZE` (env) | `512` (`0` = FFmpeg's 8) | |
 | Command listener race | none | | |
 
 ## Chat commands
@@ -200,6 +201,19 @@ Each resolution has its own target bitrate, set in the GUI.
   (upstream Balanced was 4500). The documented default of `VIDEO_MAX_BITRATE_KBPS` is now 7000.
 - Files: `utils/app-settings.ts`, `voice/streaming/quality.ts`, `voice/streaming/encode-profiles.ts`,
   `voice/streaming/types.ts`, frontend `VideoStreamDefaultsCard.tsx`, `lib/encode-profiles.ts`.
+
+### Segment-boundary freeze
+
+With a remote HLS source, FFmpeg paces the output with `-re` and reads each input through a demuxer thread that, by
+default, may be only eight packets ahead. At every segment boundary the HLS demuxer reloads the playlist and fetches
+the next segment over a new connection (the sidecar sends `Connection: close`), which takes a few hundred
+milliseconds over a slow link. With a queue that shallow the paced output waits for it, so every destination freezes
+briefly once per segment.
+
+Remote inputs now get `-thread_queue_size 512`, so the demuxers read seconds ahead and the fetch overlaps with
+playout. The option is added to FFmpeg's playback arguments only: ffprobe does not accept it, so it is not part of
+the arguments shared with `FFMPEG_EXTRA_INPUT_ARGS`. Set `FFMPEG_THREAD_QUEUE_SIZE=0` to use FFmpeg's default again.
+A deeper queue costs memory only while a stream runs (at most 512 compressed packets per input).
 
 ### Command listener race (bot flows)
 

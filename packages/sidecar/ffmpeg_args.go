@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -60,6 +61,32 @@ func remoteFFmpegInputArgs() []string {
 		return args
 	}
 	return append(args, "-headers", headers)
+}
+
+// defaultThreadQueueSize is how many packets ffmpeg's demuxer thread may read ahead of the
+// pace the stream is played at.
+//
+// With more than one input (a video and its separate audio, as for YouTube), ffmpeg reads each
+// input in a thread of its own and hands the packets to the main loop through a queue, which
+// holds only 8 packets by default: well under a second of video. -re waits in the main loop, so
+// a demuxer that stops to open the next HLS segment (a playlist reload and a fetch, each on a
+// new connection, which over a slow link takes half a second or more) runs the queue dry, and the
+// output freezes. A deeper queue lets the demuxer read seconds ahead, so that fetch overlaps
+// with playing what is already queued.
+const defaultThreadQueueSize = 512
+
+// threadQueueArgs is -thread_queue_size for one remote ffmpeg input. FFMPEG_THREAD_QUEUE_SIZE
+// changes it (0 leaves ffmpeg's own default). It is an ffmpeg-only option, so it is not part of
+// remoteFFmpegInputArgs, which ffprobe shares.
+func threadQueueArgs() []string {
+	n := envIntOrDefault("FFMPEG_THREAD_QUEUE_SIZE", defaultThreadQueueSize)
+	if n <= 0 {
+		return nil
+	}
+	if n > 65536 {
+		n = 65536
+	}
+	return []string{"-thread_queue_size", strconv.Itoa(n)}
 }
 
 // extraFFmpegOutputArgs is FFMPEG_EXTRA_OUTPUT_ARGS, inserted immediately

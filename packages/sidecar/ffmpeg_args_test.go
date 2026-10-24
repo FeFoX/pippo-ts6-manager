@@ -187,3 +187,54 @@ func TestBuildFFmpegArgsPassthroughVP9(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteInputsGetADeeperDemuxQueue(t *testing.T) {
+	t.Setenv("FFMPEG_THREAD_QUEUE_SIZE", "")
+	s := NewSidecar()
+	spec, _ := lookupEncoder("h264")
+	split := strings.Join(s.buildFFmpegArgs(SourceRequest{
+		Source: "https://v.example/video", AudioSource: "https://a.example/audio", Mode: modeLive, Volume: 100,
+	}, spec, false), " ")
+	// Input options apply to the next -i only: each remote input needs its own, before its -i.
+	if n := strings.Count(split, "-thread_queue_size 512"); n != 2 {
+		t.Fatalf("want one queue option per remote input, got %d: %s", n, split)
+	}
+	if q, i := strings.Index(split, "-thread_queue_size"), strings.Index(split, "-i https://v.example/video"); q < 0 || q > i {
+		t.Errorf("the queue option must come before the first -i: %s", split)
+	}
+	// A local file is read from disk and needs none.
+	local := ffmpegArgLine(SourceRequest{Source: "/data/music/clip.mp4"})
+	if strings.Contains(local, "-thread_queue_size") {
+		t.Errorf("a local file needs no demux queue: %s", local)
+	}
+}
+
+func TestThreadQueueSizeCanBeChangedOrTurnedOff(t *testing.T) {
+	t.Setenv("FFMPEG_THREAD_QUEUE_SIZE", "128")
+	if got := strings.Join(threadQueueArgs(), " "); got != "-thread_queue_size 128" {
+		t.Errorf("env should set the size: %q", got)
+	}
+	t.Setenv("FFMPEG_THREAD_QUEUE_SIZE", "0")
+	if got := threadQueueArgs(); got != nil {
+		t.Errorf("0 leaves ffmpeg's default: %v", got)
+	}
+	t.Setenv("FFMPEG_THREAD_QUEUE_SIZE", "99999999")
+	if got := strings.Join(threadQueueArgs(), " "); got != "-thread_queue_size 65536" {
+		t.Errorf("a huge value is capped: %q", got)
+	}
+}
+
+// ffprobe rejects ffmpeg-only options, so the shared remote input options must not carry the queue size.
+func TestSharedRemoteInputArgsStayProbeSafe(t *testing.T) {
+	t.Setenv("FFMPEG_THREAD_QUEUE_SIZE", "512")
+	for _, a := range remoteFFmpegInputArgs() {
+		if a == "-thread_queue_size" {
+			t.Fatal("remoteFFmpegInputArgs is shared with ffprobe, which has no -thread_queue_size")
+		}
+	}
+	for _, a := range probeDirectArgs() {
+		if a == "-thread_queue_size" {
+			t.Fatal("ffprobe would fail on -thread_queue_size")
+		}
+	}
+}
