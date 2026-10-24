@@ -226,5 +226,6 @@ bot-access list is empty (everybody may use the bot) until groups are added in S
 
 ## Tests
 
-Sidecar `go vet` and `go test ./...` pass; typecheck is clean for common, backend and frontend; backend 974 tests pass
-(4 skipped); frontend 181 unit tests pass.
+The sidecar's `go vet` and `go test ./...`, the backend and frontend unit suites, and the typecheck for common, backend
+and frontend all pass. The Settings limits card, which sets the seek and resume cooldowns, has a Playwright spec in
+[`packages/frontend/tests/settings-limits.spec.ts`](packages/frontend/tests/settings-limits.spec.ts).
