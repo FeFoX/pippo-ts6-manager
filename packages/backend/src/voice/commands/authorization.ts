@@ -74,18 +74,30 @@ export class ControlAccess {
     const list = await this.source.serverGroups(configId, sid);
     const ids = new Set<number>();
     for (const entry of groups) {
-      if (/^\d+$/.test(entry)) {
-        ids.add(Number(entry));
-        continue;
-      }
       const wanted = entry.toLowerCase();
+      const numeric = /^\d+$/.test(entry);
+      let matched = false;
       for (const group of list) {
-        if (group.name.toLowerCase() === wanted) ids.add(group.id);
+        if (numeric ? group.id === Number(entry) : group.name.toLowerCase() === wanted) {
+          ids.add(group.id);
+          matched = true;
+        }
+      }
+      // A numeric entry is checked against the list too, so a mistyped id is reported
+      // like a mistyped name, also when other entries are fine.
+      const warnKey = `${key}\u0000${entry}`;
+      if (matched) {
+        this.warnedNoMatch.delete(warnKey);
+      } else if (!this.warnedNoMatch.has(warnKey)) {
+        this.warnedNoMatch.add(warnKey);
+        console.warn(`[MusicCmd] Bot access group ${JSON.stringify(entry)} matches no server group and is ignored`);
       }
     }
     if (ids.size === 0 && !this.warnedNoMatch.has(key)) {
       this.warnedNoMatch.add(key);
       console.warn(`[MusicCmd] Bot access groups ${JSON.stringify(groups)} match no server group: nobody can use the bot`);
+    } else if (ids.size > 0) {
+      this.warnedNoMatch.delete(key);
     }
     this.groupIds.set(key, { at: this.now(), ids });
     return ids;
