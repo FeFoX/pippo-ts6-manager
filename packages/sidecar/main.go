@@ -1065,16 +1065,21 @@ func (s *Sidecar) CreatePeerFor(id string, codec string, browser bool) (sdp stri
 		return "", err
 	}
 
-	videoSender, err := pc.AddTrack(videoTrack)
+	// Send-only, not AddTrack's sendrecv: the sidecar never receives media,
+	// and the TeamSpeak 6.0.0-beta5 client never answers an offer whose media
+	// is sendrecv (its trace log stops at HandleRemoteOffer).
+	sendOnly := webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendonly}
+	videoTransceiver, err := pc.AddTransceiverFromTrack(videoTrack, sendOnly)
 	if err != nil {
 		pc.Close()
 		return "", err
 	}
-	audioSender, err := pc.AddTrack(audioTrack)
+	audioTransceiver, err := pc.AddTransceiverFromTrack(audioTrack, sendOnly)
 	if err != nil {
 		pc.Close()
 		return "", err
 	}
+	videoSender, audioSender := videoTransceiver.Sender(), audioTransceiver.Sender()
 	// Pion's interceptors (NACK retransmission among them) only see the feedback of a
 	// viewer if something reads it.
 	go s.readFeedback(videoSender, id, "video")
