@@ -115,6 +115,35 @@ describe('a conversion that does not finish', () => {
     await drive(b.prepareDirectSource({ path: REMOTE, loop: true, durationSec: null }, QUALITY, 'vod'), 2_000, 20);
     assert.equal(calls.started[0].sourceBitrateKbps, 640);
     assert.equal(calls.started[0].threads, 3);
+    assert.equal(calls.started[0].convertThreads, undefined, 'automatic is left to the sidecar');
+    assert.equal(calls.started[0].cpuPriority, 'normal');
+  });
+
+  it('uses the stream\'s own thread and priority choices over the settings', async () => {
+    const { b, calls } = prepBot([{ state: 'done', percent: 100, speed: 12 }]);
+    b._videoSettings = { ...b._videoSettings, encodeThreads: 3, convertThreads: 5, cpuPriority: 'low' };
+    const origWrite = b.sidecarHttp.convertStatus;
+    b.sidecarHttp.convertStatus = async () => {
+      fs.writeFileSync(path.join(musicDir, calls.started[0].output), 'converted');
+      return origWrite();
+    };
+    // Settings only: the bot, server or global values apply.
+    await drive(b.prepareDirectSource({ path: REMOTE, loop: true, durationSec: null }, QUALITY, 'vod'), 2_000, 20);
+    assert.deepEqual(
+      [calls.started[0].threads, calls.started[0].convertThreads, calls.started[0].cpuPriority],
+      [3, 5, 'low'],
+    );
+    // This stream asked for its own: 0 means automatic, so nothing is sent for the threads.
+    calls.started.length = 0;
+    calls.polls = 0;
+    b._videoRequestedEncodeThreads = 0;
+    b._videoRequestedConvertThreads = 2;
+    b._videoRequestedCpuPriority = 'lowest';
+    await drive(b.prepareDirectSource({ path: REMOTE, loop: true, durationSec: null }, QUALITY, 'vod'), 2_000, 20);
+    assert.deepEqual(
+      [calls.started[0].threads, calls.started[0].convertThreads, calls.started[0].cpuPriority],
+      [undefined, 2, 'lowest'],
+    );
   });
 
   it('is abandoned once its progress stops moving, and the stream is re-encoded instead', async () => {

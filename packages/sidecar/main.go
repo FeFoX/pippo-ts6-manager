@@ -1398,6 +1398,8 @@ type SourceRequest struct {
 	// Threads is the software VP8/VP9 encode thread count; 0 = VIDEO_ENCODE_THREADS, else the
 	// CPUs the container may use.
 	Threads int
+	// CPUPriority is normal, low or lowest (a nice value on ffmpeg); "" = VIDEO_CPU_PRIORITY, else normal.
+	CPUPriority string
 	// StartSeconds starts a VOD or file source at this offset (a seek). Zero
 	// starts at the beginning; a live source has no timeline and ignores it.
 	StartSeconds float64
@@ -1684,7 +1686,7 @@ func (s *Sidecar) buildFFmpegArgs(req SourceRequest, spec EncoderSpec, lowPower 
 }
 
 // launchFFmpegLocked starts ffmpeg and returns a channel closed on exit.
-func (s *Sidecar) launchFFmpegLocked(args []string, gen uint64, health *healthTracker) (<-chan struct{}, *tailBuffer, error) {
+func (s *Sidecar) launchFFmpegLocked(args []string, priority string, gen uint64, health *healthTracker) (<-chan struct{}, *tailBuffer, error) {
 	tail := &tailBuffer{}
 	cmd := exec.Command(getFfmpegPath(), args...)
 	if s.egress != nil {
@@ -1695,6 +1697,7 @@ func (s *Sidecar) launchFFmpegLocked(args []string, gen uint64, health *healthTr
 	if err := cmd.Start(); err != nil {
 		return nil, nil, err
 	}
+	applyCPUPriority(cmd, priority)
 	s.ffmpeg = cmd
 
 	done := make(chan struct{})
@@ -1824,7 +1827,7 @@ func (s *Sidecar) StartFFmpeg(req SourceRequest) (EncoderSession, error) {
 		s.health = health
 		s.statusMu.Unlock()
 		log.Printf("[FFmpeg] Starting: encoder=%s mode=%s video=:%d audio=:%d", spec.ID, mode, s.videoPort, s.audioPort)
-		done, tail, err := s.launchFFmpegLocked(args, gen, health)
+		done, tail, err := s.launchFFmpegLocked(args, resolveCPUPriority(req.CPUPriority), gen, health)
 		if err != nil {
 			log.Printf("[FFmpeg] Start error: %v", err)
 			s.statusMu.Lock()
@@ -2074,6 +2077,8 @@ func main() {
 			CpuUsed int `json:"cpuUsed"`
 			// Threads is the software VP8/VP9 thread count; 0 = automatic.
 			Threads int `json:"threads"`
+			// CPUPriority is normal, low or lowest.
+			CPUPriority string `json:"cpuPriority"`
 			// StartSeconds starts a VOD or file source at this offset (a seek).
 			StartSeconds float64 `json:"startSeconds"`
 			// Passthrough streams the source's own H.264 or VP9 without re-encoding it
@@ -2112,6 +2117,10 @@ func main() {
 			http.Error(w, "unknown encoder", 400)
 			return
 		}
+		if !validCPUPriority(req.CPUPriority) {
+			http.Error(w, "cpuPriority must be normal, low or lowest", 400)
+			return
+		}
 		loop := req.Loop == nil || *req.Loop
 		log.Printf("[API] Setting source (%dx%d @ %dfps vol=%d loop=%v encoder=%s passthrough=%v)", req.Width, req.Height, req.Framerate, vol, loop, encoderID, req.Passthrough)
 		session, err := sidecar.StartFFmpeg(SourceRequest{
@@ -2128,6 +2137,7 @@ func main() {
 			AllowedHosts: req.AllowedHosts,
 			CpuUsed:      req.CpuUsed,
 			Threads:      clampThreads(req.Threads),
+			CPUPriority:  req.CPUPriority,
 			StartSeconds: clampStartSeconds(req.StartSeconds),
 			Passthrough:  req.Passthrough,
 			PacingFactor: req.Pacing,

@@ -3,7 +3,7 @@
  * Manages peers, media sources, and health checks.
  */
 
-import type { VideoCodec, VideoEncoderCapabilities, VideoEncoderId, VideoSourceMode } from '@ts6/common';
+import type { VideoCodec, VideoCpuPriority, VideoEncoderCapabilities, VideoEncoderId, VideoSourceMode } from '@ts6/common';
 import path from 'node:path';
 import { resolvePathUnderMusicDir } from './video-download.js';
 
@@ -33,6 +33,8 @@ export interface SidecarSourceOptions {
   cpuUsed?: number;
   /** Software VP8/VP9 encode threads; 0 or absent = the sidecar decides. */
   threads?: number;
+  /** nice level of ffmpeg: normal (unchanged), low or lowest. */
+  cpuPriority?: VideoCpuPriority;
   /** Second remote input carrying the audio, when `source` is video only (YouTube direct). */
   audioSource?: string;
   /** Start a VOD or file source at this offset in seconds (a seek); live sources ignore it. */
@@ -53,8 +55,11 @@ export interface SidecarConvertOptions {
   bitrate: string;
   /** The source's own video bitrate in kbps; the conversion's cap is not raised above it. */
   sourceBitrateKbps?: number;
-  /** The "Encode threads" setting; the conversion uses at most two of them. */
+  /** The encode threads in effect; without `convertThreads`, a conversion uses at most two of them. */
   threads?: number;
+  /** The convert threads in effect (1 to 64); absent = automatic. */
+  convertThreads?: number;
+  cpuPriority?: VideoCpuPriority;
   preset: 'ultrafast' | 'superfast' | 'veryfast';
   /** Keyframe interval in frames. */
   gop: number;

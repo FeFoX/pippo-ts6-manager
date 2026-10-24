@@ -6,7 +6,7 @@
 import type { VideoStreamStartOptions } from '../voice-bot.js';
 import { isPresetKey } from './types.js';
 import { isEncoderId } from './encoders.js';
-import { MAX_NO_VIEWER_TIMEOUT_SEC, parseBoundedInt } from '../../utils/app-settings.js';
+import { CPU_PRIORITIES, MAX_ENCODE_THREADS, parseCpuPriority, MAX_NO_VIEWER_TIMEOUT_SEC, parseBoundedInt } from '../../utils/app-settings.js';
 import { parseReplaceSessionIds } from '../media-session.js';
 
 export type ParsedStartOptions =
@@ -70,6 +70,19 @@ export function parseStreamStartOptions(body: Record<string, unknown> | null | u
   if (b.direct != null && b.direct !== '') {
     if (typeof b.direct !== 'boolean') return { ok: false, error: 'direct must be true or false' };
     options.direct = b.direct;
+  }
+
+  for (const field of ['encodeThreads', 'convertThreads'] as const) {
+    if (b[field] == null || b[field] === '') continue;
+    const n = parseBoundedInt(b[field], MAX_ENCODE_THREADS);
+    if (n == null) return { ok: false, error: `${field} must be 0–${MAX_ENCODE_THREADS} (0 = automatic)` };
+    options[field] = n;
+  }
+
+  if (b.cpuPriority != null && b.cpuPriority !== '') {
+    const v = parseCpuPriority(b.cpuPriority);
+    if (v == null) return { ok: false, error: `cpuPriority must be ${CPU_PRIORITIES.join(', ')}` };
+    options.cpuPriority = v;
   }
 
   const replace = parseReplaceSessionIds(b);

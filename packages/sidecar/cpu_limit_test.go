@@ -48,15 +48,30 @@ func TestEncodeThreadsPrecedence(t *testing.T) {
 func TestConvertThreadsAreCapped(t *testing.T) {
 	t.Setenv("VIDEO_CONVERT_THREADS", "")
 	t.Setenv("VIDEO_ENCODE_THREADS", "6")
-	if got := convertThreads(0); got != 2 {
+	if got := convertThreads(0, 0); got != 2 {
 		t.Errorf("conversion should be capped at 2, got %d", got)
 	}
 	t.Setenv("VIDEO_ENCODE_THREADS", "1")
-	if got := convertThreads(0); got != 1 {
+	if got := convertThreads(0, 0); got != 1 {
 		t.Errorf("conversion should not exceed the encode threads, got %d", got)
 	}
+	if got := convertThreads(0, 5); got != 2 {
+		t.Errorf("the encode threads setting is capped too, got %d", got)
+	}
+}
+
+func TestConvertThreadsPrecedenceIsSettingThenEnvThenDefault(t *testing.T) {
+	t.Setenv("VIDEO_ENCODE_THREADS", "6")
 	t.Setenv("VIDEO_CONVERT_THREADS", "4")
-	if got := convertThreads(0); got != 4 {
-		t.Errorf("VIDEO_CONVERT_THREADS should override, got %d", got)
+	if got := convertThreads(0, 0); got != 4 {
+		t.Errorf("VIDEO_CONVERT_THREADS should apply without a setting, got %d", got)
+	}
+	if got := convertThreads(3, 0); got != 3 {
+		t.Errorf("the Convert threads setting should win over the env, got %d", got)
+	}
+	// An explicit setting is the admin's choice and is not held to the default cap.
+	t.Setenv("VIDEO_CONVERT_THREADS", "")
+	if got := convertThreads(5, 1); got != 5 {
+		t.Errorf("the setting is not capped, got %d", got)
 	}
 }

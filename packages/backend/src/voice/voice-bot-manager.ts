@@ -121,7 +121,7 @@ export class VoiceBotManager extends EventEmitter {
     const bot = new VoiceBot({
       ...config,
       loadVideoSettings: config.loadVideoSettings
-        ?? (() => loadVideoStreamingSettings(this.prisma, config.serverConfigId)),
+        ?? (() => loadVideoStreamingSettings(this.prisma, config.serverConfigId, config.id)),
       loadYoutubeDirectStream: config.loadYoutubeDirectStream
         ?? (() => loadYoutubeDirectStream(this.prisma)),
       loadSeekCooldownSec: config.loadSeekCooldownSec

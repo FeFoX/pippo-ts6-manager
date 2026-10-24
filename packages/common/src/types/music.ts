@@ -373,6 +373,11 @@ export interface VideoStreamStatus {
   direct: boolean | null;
   /** Why a direct stream was requested but the video is being re-encoded; null otherwise. */
   directFallback: string | null;
+  /** Encode and convert threads in effect for this stream (0 = automatic); 0 when nothing is streaming. */
+  encodeThreads: number;
+  convertThreads: number;
+  /** CPU priority in effect for this stream; 'normal' when nothing is streaming. */
+  cpuPriority: VideoCpuPriority;
   /** Set while the video is converted before it starts; null otherwise. */
   preparing: VideoPreparation | null;
 }
@@ -404,6 +409,13 @@ export interface VideoStreamSettings {
    * 0 = automatic: the CPUs the container may really use (its CPU quota), or `VIDEO_ENCODE_THREADS`.
    */
   encodeThreads: number;
+  /**
+   * Threads for the x264 conversion of a direct stream. 0 = automatic: `VIDEO_CONVERT_THREADS`, else
+   * two, or fewer when the encode threads are fewer. A number here is used as it is.
+   */
+  convertThreads: number;
+  /** Priority of the ffmpeg processes (encode and conversion) against the rest of the host. */
+  cpuPriority: VideoCpuPriority;
   /**
    * Direct streams only: spread the packets of each frame over time at this multiple of the
    * video's own bitrate, so a keyframe does not leave as one burst. 0 = off, otherwise 1 to 10.
@@ -454,6 +466,9 @@ export interface VideoViewerInfo {
 }
 
 /** What a direct stream does when it cannot copy the picture: re-encode while playing, or convert first. */
+/** CPU priority of ffmpeg: Normal leaves it alone; Low (nice 10) and Lowest (nice 19) let the rest of the host go first. */
+export type VideoCpuPriority = 'normal' | 'low' | 'lowest';
+
 export type VideoDirectFallback = 'live' | 'ultrafast' | 'superfast' | 'veryfast';
 
 /** A direct stream that is being made copyable before it starts (the picture is converted first). */

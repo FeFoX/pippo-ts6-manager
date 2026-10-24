@@ -1,7 +1,12 @@
 import { Router, Request, Response, type RequestHandler } from 'express';
 import multer from 'multer';
 import { createHash } from 'node:crypto';
-import { actorFromRequest, runRemoteAudited } from '../audit/index.js';
+import { actorFromRequest, recordLocalSuccess, runRemoteAudited } from '../audit/index.js';
+import {
+  applyBotResourceUpdate,
+  loadBotResourceSettings,
+  videoBotOverridesKey,
+} from '../utils/app-settings.js';
 import { avatarImageType, saveBotAvatar, readBotAvatar, removeBotAvatarFile, MAX_AVATAR_BYTES, type BotAvatarMode } from '../utils/bot-avatar-storage.js';
 import { requireRole } from '../middleware/rbac.js';
 import { AppError } from '../middleware/error-handler.js';
@@ -1003,6 +1008,46 @@ musicBotRoutes.post('/:id/stream/start', async (req: Request, res: Response, nex
         : undefined,
       status: bot.videoStreamStatus,
     });
+  } catch (err) { next(err); }
+});
+
+// GET /:id/video-resources — this bot's own encode threads, convert threads and CPU priority
+// (each null while it inherits the server's, then the global, setting) and what the bot gets.
+musicBotRoutes.get('/:id/video-resources', async (req: Request, res: Response, next) => {
+  try {
+    const bot = await avatarBot(req);
+    res.json(await loadBotResourceSettings(req.app.locals.prisma, bot.serverConfigId, bot.id));
+  } catch (err) { next(err); }
+});
+
+// PUT /:id/video-resources — change them; a number or priority sets one, null removes it (inherit),
+// a field left out stays. Applies from the bot's next stream start.
+musicBotRoutes.put('/:id/video-resources', async (req: Request, res: Response, next) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const bot = await avatarBot(req);
+    const { overrides: current } = await loadBotResourceSettings(prisma, bot.serverConfigId, bot.id);
+    const update = applyBotResourceUpdate(current, req.body);
+    if (!update.ok) throw new AppError(400, update.error);
+    const key = videoBotOverridesKey(bot.id);
+    await recordLocalSuccess(
+      prisma,
+      {
+        actor: actorFromRequest(req.user),
+        action: 'settings.video_streaming_update',
+        connectionId: bot.serverConfigId,
+        target: { type: 'settings', id: 'video-streaming:bot' },
+      },
+      async (tx) => {
+        if (Object.keys(update.overrides).length === 0) {
+          await tx.appSetting.deleteMany({ where: { key } });
+        } else {
+          const value = JSON.stringify(update.overrides);
+          await tx.appSetting.upsert({ where: { key }, create: { key, value }, update: { value } });
+        }
+      },
+    );
+    res.json(await loadBotResourceSettings(prisma, bot.serverConfigId, bot.id));
   } catch (err) { next(err); }
 });
 

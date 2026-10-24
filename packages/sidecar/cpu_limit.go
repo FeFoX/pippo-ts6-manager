@@ -98,14 +98,18 @@ func encodeThreads(requested int) int {
 	return usableCPUs()
 }
 
-// convertThreads caps the x264 conversion so that it cannot starve a live stream sharing the
-// same CPUs. VIDEO_CONVERT_THREADS overrides; the default is two, or fewer when the
-// encode threads are fewer.
-func convertThreads(requested int) int {
+// convertThreads is the -threads value for the x264 conversion. The manager's "Convert threads"
+// setting (convertRequested) wins, then VIDEO_CONVERT_THREADS. With neither, the conversion is
+// capped at two threads, or at the encode threads when those are fewer, so that it cannot
+// starve a live stream sharing the same CPUs.
+func convertThreads(convertRequested, encodeRequested int) int {
+	if convertRequested > 0 {
+		return convertRequested
+	}
 	if n := envIntOrDefault("VIDEO_CONVERT_THREADS", 0); n > 0 {
 		return n
 	}
-	n := encodeThreads(requested)
+	n := encodeThreads(encodeRequested)
 	if n > convertThreadsLimit {
 		n = convertThreadsLimit
 	}

@@ -50,6 +50,11 @@ const DIRECT_PACING_OPTIONS = [
   { value: '2.5', label: 'Normal (2.5×)' },
   { value: '1.5', label: 'Strong (1.5×)' },
 ];
+const CPU_PRIORITY_OPTIONS: Array<{ value: VideoStreamSettings['cpuPriority']; label: string }> = [
+  { value: 'normal', label: 'Normal' },
+  { value: 'low', label: 'Low (nice 10)' },
+  { value: 'lowest', label: 'Lowest (nice 19)' },
+];
 const NAMED_PROFILES = Object.keys(ENCODE_PROFILE_PRESETS) as NamedEncodeProfile[];
 
 const FIELD_LABELS: Record<keyof VideoStreamSettings, string> = {
@@ -62,6 +67,8 @@ const FIELD_LABELS: Record<keyof VideoStreamSettings, string> = {
   encodeProfile: 'encode profile',
   cpuUsed: 'encode speed',
   encodeThreads: 'encode threads',
+  convertThreads: 'convert threads',
+  cpuPriority: 'CPU priority',
   directPacing: 'direct stream pacing',
   directFallback: 'direct stream fallback',
   presetBitrates: 'bitrate per resolution',
@@ -403,7 +410,40 @@ export function VideoStreamDefaultsCard({ server }: VideoStreamDefaultsCardProps
                 <p className="text-xs text-muted-foreground">
                   0 = automatic: the CPUs this container may use (its CPU limit), or VIDEO_ENCODE_THREADS.
                   Set it to the container&apos;s CPU limit if the host has more cores than that.
-                  Applies to software VP8/VP9; a convert-first conversion uses at most 2.
+                  Applies to software VP8/VP9. A bot or a single stream can use its own value.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="convert-threads">Convert threads</Label>
+                <Input
+                  id="convert-threads"
+                  type="number"
+                  min={0}
+                  max={64}
+                  value={draft.convertThreads}
+                  onChange={(e) => set('convertThreads', Math.min(64, Math.max(0, Math.floor(Number(e.target.value) || 0))))}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Threads for the convert-first x264 conversion of a direct stream. 0 = automatic: VIDEO_CONVERT_THREADS,
+                  else 2 (or fewer when the encode threads are fewer), so a conversion leaves CPUs for the live stream.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="cpu-priority">CPU priority</Label>
+                <Select
+                  value={draft.cpuPriority}
+                  onValueChange={(v) => set('cpuPriority', v as VideoStreamSettings['cpuPriority'])}
+                >
+                  <SelectTrigger id="cpu-priority"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {CPU_PRIORITY_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  How ffmpeg shares the CPU with the rest of the host. Low and Lowest let the web panel and other
+                  programs go first, which can make the video stutter when the host is busy. Not used on Windows.
                 </p>
               </div>
 

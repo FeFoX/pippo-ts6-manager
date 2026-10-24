@@ -57,10 +57,15 @@ type ConvertRequest struct {
 	// SourceBitrateKbps is the source's own video bitrate, 0 when not known. The cap is never
 	// raised above it, so the converted file does not come out larger than its source.
 	SourceBitrateKbps int `json:"sourceBitrateKbps"`
-	// Threads is the manager's encode thread setting (0 = automatic); a conversion uses at most
-	// convertThreadsLimit of them, so a live stream sharing the CPUs keeps its share.
-	Threads int    `json:"threads"`
-	Preset  string `json:"preset"`
+	// Threads is the manager's encode thread setting (0 = automatic). Without a conversion
+	// setting, a conversion uses at most convertThreadsLimit of them, so a live stream sharing
+	// the CPUs keeps its share.
+	Threads int `json:"threads"`
+	// ConvertThreads is the manager's convert thread setting (0 = automatic, see convertThreads).
+	ConvertThreads int `json:"convertThreads"`
+	// CPUPriority is normal, low or lowest (a nice value on ffmpeg); "" = VIDEO_CPU_PRIORITY, else normal.
+	CPUPriority string `json:"cpuPriority"`
+	Preset      string `json:"preset"`
 	// Gop is the keyframe interval in frames: short, so that a viewer who joins late, or loses a
 	// packet, gets a new picture within a second or so.
 	Gop int `json:"gop"`
@@ -145,6 +150,12 @@ func validateConvert(req ConvertRequest) (source, final string, err error) {
 	if req.Threads < 0 || req.Threads > maxEncodeThreads {
 		return "", "", fmt.Errorf("threads must be between 0 and %d", maxEncodeThreads)
 	}
+	if req.ConvertThreads < 0 || req.ConvertThreads > maxEncodeThreads {
+		return "", "", fmt.Errorf("convertThreads must be between 0 and %d", maxEncodeThreads)
+	}
+	if !validCPUPriority(req.CPUPriority) {
+		return "", "", errors.New("cpuPriority must be normal, low or lowest")
+	}
 	if req.Gop < 1 || req.Gop > 300 {
 		return "", "", errors.New("gop must be between 1 and 300 frames")
 	}
@@ -214,7 +225,7 @@ func buildConvertArgs(req ConvertRequest, source string, input []string, part st
 		"-c:v", "libx264", "-preset", req.Preset, "-profile:v", "high", "-bf", "0",
 		// x264 starts about 1.5 threads per CPU it sees; unbounded it takes the CPUs a live
 		// stream needs for as long as the conversion lasts.
-		"-threads", strconv.Itoa(convertThreads(req.Threads)),
+		"-threads", strconv.Itoa(convertThreads(req.ConvertThreads, req.Threads)),
 		"-g", gop, "-keyint_min", gop,
 		"-crf", "24", "-maxrate", bitrate, "-bufsize", videoBufsize(bitrate),
 		"-c:a", "aac", "-b:a", "128k", "-ac", "2",
@@ -289,6 +300,7 @@ func (s *Sidecar) StartConvert(req ConvertRequest) (ConvertStatus, error) {
 		}
 		return ConvertStatus{}, fmt.Errorf("start ffmpeg: %w", err)
 	}
+	applyCPUPriority(cmd, resolveCPUPriority(req.CPUPriority))
 	s.convert = job
 	log.Printf("[Convert %s] started: preset=%s max %dx%d bitrate=%s gop=%d remote=%v", job.status.ID, req.Preset, req.Width, req.Height, req.Bitrate, req.Gop, isRemoteSource(source))
 

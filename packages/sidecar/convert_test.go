@@ -54,6 +54,9 @@ func TestValidateConvertRefusesWhatItShould(t *testing.T) {
 		"a negative length":          func(r *ConvertRequest) { r.DurationSec = -1 },
 		"a negative source bitrate":  func(r *ConvertRequest) { r.SourceBitrateKbps = -5 },
 		"too many threads":           func(r *ConvertRequest) { r.Threads = 500 },
+		"an unknown cpu priority":    func(r *ConvertRequest) { r.CPUPriority = "high" },
+		"too many convert threads":   func(r *ConvertRequest) { r.ConvertThreads = 500 },
+		"negative convert threads":   func(r *ConvertRequest) { r.ConvertThreads = -1 },
 	}
 	for name, change := range cases {
 		req := goodConvert()
@@ -191,6 +194,11 @@ func TestBuildConvertArgsCapsTheThreads(t *testing.T) {
 	args = strings.Join(buildConvertArgs(req, "/music/clip.mp4", nil, "/music/.stream-1.mp4.part"), " ")
 	if !strings.Contains(args, "-threads 1") {
 		t.Errorf("a lower thread setting must apply to the conversion too: %s", args)
+	}
+	req.ConvertThreads = 4
+	args = strings.Join(buildConvertArgs(req, "/music/clip.mp4", nil, "/music/.stream-1.mp4.part"), " ")
+	if !strings.Contains(args, "-threads 4") {
+		t.Errorf("the Convert threads setting must win: %s", args)
 	}
 }
 

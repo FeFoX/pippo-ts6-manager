@@ -1,6 +1,6 @@
 import { parseLocalHostAllowlist } from './url-validator.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import type { VideoDirectFallback, VideoEncodeProfile, VideoStreamPresetKey, VideoStreamSettings } from '@ts6/common';
+import type { VideoCpuPriority, VideoDirectFallback, VideoEncodeProfile, VideoStreamPresetKey, VideoStreamSettings } from '@ts6/common';
 import { VIDEO_STREAM_PRESET_KEYS } from '@ts6/common';
 import { DEFAULT_AUTO_MAX_PRESET, isPresetKey } from '../voice/streaming/types.js';
 import { MIN_PRESET_BITRATE_KBPS, TS_STREAM_MAX_KBPS, defaultPresetBitrates } from '../voice/streaming/quality.js';
@@ -127,6 +127,8 @@ export const VIDEO_MAX_BITRATE_KEY = 'video_max_bitrate_kbps';
 export const VIDEO_ENCODE_PROFILE_KEY = 'video_encode_profile';
 export const VIDEO_CPU_USED_KEY = 'video_cpu_used';
 export const VIDEO_ENCODE_THREADS_KEY = 'video_encode_threads';
+export const VIDEO_CONVERT_THREADS_KEY = 'video_convert_threads';
+export const VIDEO_CPU_PRIORITY_KEY = 'video_cpu_priority';
 export const VIDEO_DIRECT_PACING_KEY = 'video_direct_pacing';
 export const VIDEO_DIRECT_FALLBACK_KEY = 'video_direct_fallback';
 /** JSON object with a bitrate in kbps for each resolution, e.g. {"720p":4000,"1080p":7000,...}. */
@@ -192,6 +194,16 @@ export function parseDirectFallback(value: unknown): VideoDirectFallback | null 
     : null;
 }
 
+/** How nice ffmpeg is to the rest of the host: Normal leaves it alone, Low and Lowest lower its priority. */
+export const CPU_PRIORITIES: readonly VideoCpuPriority[] = ['normal', 'low', 'lowest'];
+export const DEFAULT_CPU_PRIORITY: VideoCpuPriority = 'normal';
+
+export function parseCpuPriority(value: unknown): VideoCpuPriority | null {
+  return typeof value === 'string' && (CPU_PRIORITIES as readonly string[]).includes(value)
+    ? (value as VideoCpuPriority)
+    : null;
+}
+
 /** Most encode threads the setting accepts; 0 means the sidecar works the number out. */
 export const MAX_ENCODE_THREADS = 64;
 
@@ -219,6 +231,8 @@ export const VIDEO_STREAMING_SETTING_KEYS = [
   VIDEO_ENCODE_PROFILE_KEY,
   VIDEO_CPU_USED_KEY,
   VIDEO_ENCODE_THREADS_KEY,
+  VIDEO_CONVERT_THREADS_KEY,
+  VIDEO_CPU_PRIORITY_KEY,
   VIDEO_DIRECT_PACING_KEY,
   VIDEO_DIRECT_FALLBACK_KEY,
   VIDEO_PRESET_BITRATES_KEY,
@@ -280,6 +294,8 @@ export function videoStreamingDefaults(env: NodeJS.ProcessEnv = process.env): Vi
     encodeProfile,
     cpuUsed: Math.max(MIN_CPU_USED, cpuUsed),
     encodeThreads: 0,
+    convertThreads: 0,
+    cpuPriority: DEFAULT_CPU_PRIORITY,
     directPacing: DEFAULT_DIRECT_PACING,
     directFallback: DEFAULT_DIRECT_FALLBACK,
     presetBitrates: defaultPresetBitrates(),
@@ -315,6 +331,8 @@ export function parseVideoStreamingSettings(
     encodeProfile,
     cpuUsed,
     encodeThreads: parseBoundedInt(stored.get(VIDEO_ENCODE_THREADS_KEY), MAX_ENCODE_THREADS) ?? defaults.encodeThreads,
+    convertThreads: parseBoundedInt(stored.get(VIDEO_CONVERT_THREADS_KEY), MAX_ENCODE_THREADS) ?? defaults.convertThreads,
+    cpuPriority: parseCpuPriority(stored.get(VIDEO_CPU_PRIORITY_KEY)) ?? defaults.cpuPriority,
     directPacing: parseDirectPacing(stored.get(VIDEO_DIRECT_PACING_KEY)) ?? defaults.directPacing,
     directFallback: parseDirectFallback(stored.get(VIDEO_DIRECT_FALLBACK_KEY)) ?? defaults.directFallback,
     presetBitrates: { ...defaults.presetBitrates, ...parsePresetBitratesLenient(stored.get(VIDEO_PRESET_BITRATES_KEY)) },
@@ -338,7 +356,7 @@ export function parseServerOverrides(raw: unknown): Partial<VideoStreamSettings>
   const accepted: Record<string, unknown> = {};
   for (const field of [
     'noViewerTimeoutSec', 'announceAutoStops', 'autoMaxPreset', 'defaultEncoder', 'preferHardware',
-    'maxBitrateKbps', 'encodeProfile', 'cpuUsed', 'encodeThreads', 'directPacing', 'directFallback', 'presetBitrates',
+    'maxBitrateKbps', 'encodeProfile', 'cpuUsed', 'encodeThreads', 'convertThreads', 'cpuPriority', 'directPacing', 'directFallback', 'presetBitrates',
   ] as const) {
     const value = (obj as Record<string, unknown>)[field];
     if (value === undefined) continue;
@@ -360,6 +378,8 @@ export function parseServerOverrides(raw: unknown): Partial<VideoStreamSettings>
     else if (row.key === VIDEO_ENCODE_PROFILE_KEY) out.encodeProfile = row.value as VideoEncodeProfile;
     else if (row.key === VIDEO_CPU_USED_KEY) out.cpuUsed = Number(row.value);
     else if (row.key === VIDEO_ENCODE_THREADS_KEY) out.encodeThreads = Number(row.value);
+    else if (row.key === VIDEO_CONVERT_THREADS_KEY) out.convertThreads = Number(row.value);
+    else if (row.key === VIDEO_CPU_PRIORITY_KEY) out.cpuPriority = row.value as VideoCpuPriority;
     else if (row.key === VIDEO_DIRECT_PACING_KEY) out.directPacing = Number(row.value);
     else if (row.key === VIDEO_DIRECT_FALLBACK_KEY) out.directFallback = row.value as VideoDirectFallback;
     else if (row.key === VIDEO_PRESET_BITRATES_KEY) out.presetBitrates = JSON.parse(row.value) as PresetBitrates;
@@ -367,17 +387,106 @@ export function parseServerOverrides(raw: unknown): Partial<VideoStreamSettings>
   return out;
 }
 
+/** What one bot can override: absent = inherit the server, then the global, value. */
+export interface BotResourceOverrides {
+  encodeThreads?: number;
+  convertThreads?: number;
+  cpuPriority?: VideoCpuPriority;
+}
+
+/** App setting holding one bot's thread overrides as JSON. */
+export function videoBotOverridesKey(botId: number): string {
+  return `video_streaming_bot:${botId}`;
+}
+
+/** Validate stored overrides; an invalid field is dropped (inherits). */
+export function parseBotResourceOverrides(raw: unknown): BotResourceOverrides {
+  let obj: unknown = raw;
+  if (typeof raw === 'string') {
+    try { obj = JSON.parse(raw); } catch { return {}; }
+  }
+  if (!obj || typeof obj !== 'object') return {};
+  const out: BotResourceOverrides = {};
+  const enc = parseBoundedInt((obj as Record<string, unknown>).encodeThreads, MAX_ENCODE_THREADS);
+  if (enc != null) out.encodeThreads = enc;
+  const conv = parseBoundedInt((obj as Record<string, unknown>).convertThreads, MAX_ENCODE_THREADS);
+  if (conv != null) out.convertThreads = conv;
+  const prio = parseCpuPriority((obj as Record<string, unknown>).cpuPriority);
+  if (prio != null) out.cpuPriority = prio;
+  return out;
+}
+
+export type BotResourceUpdate =
+  | { ok: true; overrides: BotResourceOverrides }
+  | { ok: false; error: string };
+
+/**
+ * Apply a PUT body to the stored overrides: a number from 0 to 64 (threads) or a priority sets a
+ * field, null removes it (inherit), an absent field is left as it was.
+ */
+export function applyBotResourceUpdate(current: BotResourceOverrides, body: Record<string, unknown> | null | undefined): BotResourceUpdate {
+  const b = body ?? {};
+  const next: BotResourceOverrides = { ...current };
+  let supplied = 0;
+  for (const field of ['encodeThreads', 'convertThreads'] as const) {
+    const value = b[field];
+    if (value === undefined) continue;
+    supplied++;
+    if (value === null) {
+      delete next[field];
+      continue;
+    }
+    const n = parseBoundedInt(value, MAX_ENCODE_THREADS);
+    if (n == null) return { ok: false, error: `${field} must be 0–${MAX_ENCODE_THREADS} (0 = automatic) or null to inherit` };
+    next[field] = n;
+  }
+  const prio = b.cpuPriority;
+  if (prio !== undefined) {
+    supplied++;
+    if (prio === null) delete next.cpuPriority;
+    else {
+      const v = parseCpuPriority(prio);
+      if (v == null) return { ok: false, error: `cpuPriority must be ${CPU_PRIORITIES.join(', ')} or null to inherit` };
+      next.cpuPriority = v;
+    }
+  }
+  if (supplied === 0) return { ok: false, error: 'No resource settings supplied' };
+  return { ok: true, overrides: next };
+}
+
 export async function loadVideoStreamingSettings(
   prisma: PrismaClient,
   serverConfigId?: number,
+  botId?: number,
 ): Promise<VideoStreamSettings> {
   const keys: string[] = [...VIDEO_STREAMING_SETTING_KEYS];
   if (serverConfigId != null) keys.push(videoServerOverridesKey(serverConfigId));
+  if (botId != null) keys.push(videoBotOverridesKey(botId));
   const rows = await prisma.appSetting.findMany({ where: { key: { in: keys } } });
   const map = new Map(rows.map((r) => [r.key, r.value]));
-  const global = parseVideoStreamingSettings(map);
-  if (serverConfigId == null) return global;
-  return mergeVideoSettings(global, parseServerOverrides(map.get(videoServerOverridesKey(serverConfigId))));
+  let settings = parseVideoStreamingSettings(map);
+  if (serverConfigId != null) {
+    settings = mergeVideoSettings(settings, parseServerOverrides(map.get(videoServerOverridesKey(serverConfigId))));
+  }
+  if (botId != null) {
+    settings = mergeVideoSettings(settings, parseBotResourceOverrides(map.get(videoBotOverridesKey(botId))));
+  }
+  return settings;
+}
+
+/** One bot's stored overrides, and the values it gets from them and the levels above. */
+export async function loadBotResourceSettings(prisma: PrismaClient, serverConfigId: number, botId: number) {
+  const row = await prisma.appSetting.findUnique({ where: { key: videoBotOverridesKey(botId) } });
+  const overrides = parseBotResourceOverrides(row?.value);
+  const effective = await loadVideoStreamingSettings(prisma, serverConfigId, botId);
+  return {
+    overrides,
+    effective: {
+      encodeThreads: effective.encodeThreads,
+      convertThreads: effective.convertThreads,
+      cpuPriority: effective.cpuPriority,
+    },
+  };
 }
 
 /** Global defaults, one server's overrides, and the merged result. */
@@ -457,6 +566,16 @@ export function parseVideoStreamingUpdate(body: Record<string, unknown> | null |
     const n = parseBoundedInt(b.encodeThreads, MAX_ENCODE_THREADS);
     if (n == null) return { ok: false, error: `encodeThreads must be 0–${MAX_ENCODE_THREADS} (0 = automatic)` };
     rows.push({ key: VIDEO_ENCODE_THREADS_KEY, value: String(n) });
+  }
+  if (b.convertThreads !== undefined) {
+    const n = parseBoundedInt(b.convertThreads, MAX_ENCODE_THREADS);
+    if (n == null) return { ok: false, error: `convertThreads must be 0–${MAX_ENCODE_THREADS} (0 = automatic)` };
+    rows.push({ key: VIDEO_CONVERT_THREADS_KEY, value: String(n) });
+  }
+  if (b.cpuPriority !== undefined) {
+    const v = parseCpuPriority(b.cpuPriority);
+    if (v == null) return { ok: false, error: `cpuPriority must be ${CPU_PRIORITIES.join(', ')}` };
+    rows.push({ key: VIDEO_CPU_PRIORITY_KEY, value: v });
   }
 
   if (b.directPacing !== undefined) {

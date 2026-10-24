@@ -24,6 +24,7 @@ import type {
   VideoStreamEncoderInfo,
   VideoStreamPresetKey,
   VideoStreamQualityInfo,
+  VideoCpuPriority,
   VideoStreamSettings,
   VideoSourceMode,
   VideoSourceModeRequest,
@@ -159,6 +160,14 @@ export interface VideoStreamStartOptions {
    */
   direct?: boolean;
   /**
+   * Encode and convert threads for this stream only (0 = automatic, 1 to 64). Left out, the bot's,
+   * the server's and the global setting apply, in that order.
+   */
+  encodeThreads?: number;
+  convertThreads?: number;
+  /** CPU priority of ffmpeg for this stream only; left out, the bot's, server's and global setting apply. */
+  cpuPriority?: VideoCpuPriority;
+  /**
    * Called with a plain-language line when something takes a while or changes the plan, such as
    * "converting the video first". Chat commands pass a reply so the person who asked is told.
    */
@@ -271,6 +280,10 @@ export class VoiceBot extends EventEmitter {
   private _videoBitrate: string = STREAM_PRESETS[DEFAULT_PRESET].bitrate;
   private _videoRequestedFramerate: number | null = null;
   private _videoRequestedBitrate: string | null = null;
+  /** Thread counts asked for this stream only; null = use the settings. */
+  private _videoRequestedEncodeThreads: number | null = null;
+  private _videoRequestedConvertThreads: number | null = null;
+  private _videoRequestedCpuPriority: VideoCpuPriority | null = null;
   private _videoSettings: VideoStreamSettings = videoStreamingDefaults();
   private _videoQuality: VideoStreamQualityInfo | null = null;
   private _videoEncoder: VideoStreamEncoderInfo | null = null;
@@ -2079,8 +2092,24 @@ export class VoiceBot extends EventEmitter {
       paused: this._videoStreaming && this._videoPaused,
       direct: this._videoStreaming ? this._videoDirect : null,
       directFallback: this._videoStreaming ? this._videoDirectFallback : null,
+      encodeThreads: this._videoStreaming ? this.effectiveEncodeThreads : 0,
+      convertThreads: this._videoStreaming ? this.effectiveConvertThreads : 0,
+      cpuPriority: this._videoStreaming ? this.effectiveCpuPriority : 'normal',
       preparing: this.videoPreparation,
     };
+  }
+
+  /** Encode threads for this stream: its own request, else the bot, server and global setting. 0 = automatic. */
+  private get effectiveEncodeThreads(): number {
+    return this._videoRequestedEncodeThreads ?? this._videoSettings.encodeThreads;
+  }
+
+  private get effectiveCpuPriority(): VideoCpuPriority {
+    return this._videoRequestedCpuPriority ?? this._videoSettings.cpuPriority;
+  }
+
+  private get effectiveConvertThreads(): number {
+    return this._videoRequestedConvertThreads ?? this._videoSettings.convertThreads;
   }
 
   private async loadVideoSettings(): Promise<VideoStreamSettings> {
@@ -2348,7 +2377,9 @@ export class VoiceBot extends EventEmitter {
         height: quality.height,
         bitrate,
         sourceBitrateKbps: check.bitrateKbps,
-        threads: this._videoSettings.encodeThreads > 0 ? this._videoSettings.encodeThreads : undefined,
+        threads: this.effectiveEncodeThreads || undefined,
+        convertThreads: this.effectiveConvertThreads || undefined,
+        cpuPriority: this.effectiveCpuPriority,
         preset: fallback,
         gop: Math.min(60, Math.max(10, Math.round(fps))),
         durationSec: duration,
@@ -2526,7 +2557,8 @@ export class VoiceBot extends EventEmitter {
       mode,
       allowedHosts: this._videoLocalHosts,
       cpuUsed: this._videoSettings.cpuUsed,
-      threads: this._videoSettings.encodeThreads > 0 ? this._videoSettings.encodeThreads : undefined,
+      threads: this.effectiveEncodeThreads || undefined,
+      cpuPriority: this.effectiveCpuPriority,
       audioSource,
       startSeconds: startSeconds > 0 ? startSeconds : undefined,
       passthrough: directCodec ? true : undefined,
@@ -2771,6 +2803,9 @@ export class VoiceBot extends EventEmitter {
     this._videoLocalHosts = options.localHosts ?? [];
     this._videoRequestedFramerate = options.framerate && options.framerate > 0 ? options.framerate : null;
     this._videoRequestedBitrate = options.bitrate?.trim() || null;
+    this._videoRequestedEncodeThreads = options.encodeThreads ?? null;
+    this._videoRequestedConvertThreads = options.convertThreads ?? null;
+    this._videoRequestedCpuPriority = options.cpuPriority ?? null;
 
     const sidecarBinary = this.config.sidecarBinaryPath || process.env.SIDECAR_BINARY_PATH || 'sidecar';
     const sidecarPort = this.config.sidecarPort || 9800;
