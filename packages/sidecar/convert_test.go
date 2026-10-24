@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func goodConvert() ConvertRequest {
@@ -51,6 +52,8 @@ func TestValidateConvertRefusesWhatItShould(t *testing.T) {
 		"a slow preset":              func(r *ConvertRequest) { r.Preset = "slow" },
 		"no keyframe interval":       func(r *ConvertRequest) { r.Gop = 0 },
 		"a negative length":          func(r *ConvertRequest) { r.DurationSec = -1 },
+		"a negative source bitrate":  func(r *ConvertRequest) { r.SourceBitrateKbps = -5 },
+		"too many threads":           func(r *ConvertRequest) { r.Threads = 500 },
 	}
 	for name, change := range cases {
 		req := goodConvert()
@@ -148,4 +151,93 @@ func TestProbeDirectArgsAskForWhatDecidesACopy(t *testing.T) {
 		}
 	}
 	_ = os.Getenv
+}
+
+func TestConvertMaxrateNeverExceedsTheSource(t *testing.T) {
+	cases := []struct {
+		requested string
+		source    int
+		want      string
+	}{
+		{"7000k", 500, "500k"},   // a small clip is not given the room of a 1080p stream
+		{"7000k", 0, "7000k"},    // unknown source bitrate: the requested cap stands
+		{"2500k", 4000, "2500k"}, // a richer source is still held to the stream's cap
+		{"7M", 3000, "3000k"},
+		{"2500k", 40, "100k"}, // never starved below the floor
+	}
+	for _, c := range cases {
+		if got := convertMaxrate(c.requested, c.source); got != c.want {
+			t.Errorf("convertMaxrate(%q, %d) = %q, want %q", c.requested, c.source, got, c.want)
+		}
+	}
+	req := goodConvert()
+	req.Bitrate = "7000k"
+	req.SourceBitrateKbps = 500
+	args := strings.Join(buildConvertArgs(req, "/music/clip.mp4", nil, "/music/.stream-1.mp4.part"), " ")
+	if !strings.Contains(args, "-maxrate 500k") || !strings.Contains(args, "-bufsize 1000k") {
+		t.Errorf("maxrate and bufsize must follow the source bitrate: %s", args)
+	}
+}
+
+func TestBuildConvertArgsCapsTheThreads(t *testing.T) {
+	t.Setenv("VIDEO_CONVERT_THREADS", "")
+	t.Setenv("VIDEO_ENCODE_THREADS", "6")
+	args := strings.Join(buildConvertArgs(goodConvert(), "/music/clip.mp4", nil, "/music/.stream-1.mp4.part"), " ")
+	if !strings.Contains(args, "-threads 2") {
+		t.Errorf("a conversion must not use every CPU: %s", args)
+	}
+	req := goodConvert()
+	req.Threads = 1
+	args = strings.Join(buildConvertArgs(req, "/music/clip.mp4", nil, "/music/.stream-1.mp4.part"), " ")
+	if !strings.Contains(args, "-threads 1") {
+		t.Errorf("a lower thread setting must apply to the conversion too: %s", args)
+	}
+}
+
+func TestCancelOfAFinishedJobIsNotACancellation(t *testing.T) {
+	cancelled := false
+	s := NewSidecar()
+	job := &convertJob{status: ConvertStatus{ID: "abc", State: "running"}, cancel: func() { cancelled = true }}
+	s.convert = job
+	job.finish("done", "")
+	if s.CancelConvert("abc") || cancelled {
+		t.Fatal("a job that already finished cannot be cancelled")
+	}
+	if st, _ := s.ConvertStatusFor("abc"); st.State != "done" {
+		t.Fatalf("the finished state must stay: %+v", st)
+	}
+}
+
+func TestSweepOrphanStreamFilesRemovesOnlyOldLeftovers(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	write := func(name string, age time.Duration) {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, now.Add(-age), now.Add(-age)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(".stream-100.mp4", 10*time.Hour)      // finished conversion nobody used
+	write(".stream-101.mp4.part", 10*time.Hour) // conversion a restart cut short
+	write(".stream-102.mp4", time.Minute)       // may belong to a stream that is running
+	write(".stream-103.mp4.part", time.Minute)  // may belong to a download or conversion in progress
+	write("song.mp4", 10*time.Hour)             // not ours
+	write(".stream-x.mp4", 10*time.Hour)        // not ours
+	removed := sweepOrphanStreamFiles(dir, orphanStreamFileAge, now)
+	if len(removed) != 2 {
+		t.Fatalf("removed %v", removed)
+	}
+	for _, name := range []string{".stream-102.mp4", ".stream-103.mp4.part", "song.mp4", ".stream-x.mp4"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s must be kept: %v", name, err)
+		}
+	}
+	for _, name := range []string{".stream-100.mp4", ".stream-101.mp4.part"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			t.Errorf("%s must be removed", name)
+		}
+	}
 }

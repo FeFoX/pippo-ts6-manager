@@ -1,9 +1,9 @@
 package main
 
 import (
-	"errors"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -448,10 +448,15 @@ func (s *Sidecar) sendTime(kind string, clock, arrived, now time.Time) time.Time
 // track that has not started yet is released soon after it starts.
 const pacingPoll = 10 * time.Millisecond
 
-// waitToSend blocks until q is due.
+// waitToSend blocks until q is due. The audio is also held back by the pacer's average delay
+// on the video of a direct stream, which sendTime does not know about.
 func (s *Sidecar) waitToSend(kind string, q queuedPacket) {
 	for {
-		d := time.Until(s.sendTime(kind, q.clock, q.arrived, time.Now()))
+		due := s.sendTime(kind, q.clock, q.arrived, time.Now())
+		if kind == "audio" {
+			due = due.Add(s.videoPaceLag.current())
+		}
+		d := time.Until(due)
 		if d <= 0 {
 			return
 		}
@@ -595,19 +600,21 @@ const maxPendingICE = 64
 type Sidecar struct {
 	// rtcpNacks and rtcpKeyframeRequests count what viewers ask for (all viewers, whole run).
 	// videoPacer paces the video of a direct stream; nil when off or when the video is re-encoded.
-	videoPacer           atomic.Pointer[videoPacer]
+	videoPacer atomic.Pointer[videoPacer]
+	// videoPaceLag is the pacer's average delay; the audio is held back by it (see paceLag).
+	videoPaceLag paceLag
 	// convert is the latest conversion job (see convert.go); one runs at a time.
 	convertMu sync.Mutex
 	convert   *convertJob
 	// vp9Rewrite is on while a copied VP9 video is sent: its packets get a proper payload
 	// descriptor (see vp9_descriptor.go). vp9Desc keeps its counters across sources.
-	vp9Rewrite atomic.Bool
-	vp9Desc    vp9Descriptor
+	vp9Rewrite           atomic.Bool
+	vp9Desc              vp9Descriptor
 	rtcpNacks            uint64
 	rtcpKeyframeRequests uint64
-	peers     map[string]*Peer
-	peersLock sync.RWMutex
-	creating  map[string]*createInFlight
+	peers                map[string]*Peer
+	peersLock            sync.RWMutex
+	creating             map[string]*createInFlight
 
 	videoPort int
 	audioPort int
@@ -830,7 +837,10 @@ func (s *Sidecar) processVideoRTP() {
 		s.waitToSend("video", q)
 		pkt := q.pkt
 		if p := s.videoPacer.Load(); p != nil {
-			if d := p.delay(len(pkt.Payload)+12, time.Now()); d > 500*time.Microsecond {
+			now := time.Now()
+			d := p.delay(len(pkt.Payload)+12, now)
+			s.videoPaceLag.observe(d, now)
+			if d > 500*time.Microsecond {
 				time.Sleep(d)
 			}
 		}
@@ -1380,6 +1390,9 @@ type SourceRequest struct {
 	AllowedHosts []string
 	// CpuUsed overrides VIDEO_CPU_USED / VIDEO_VP9_CPU_USED when > 0.
 	CpuUsed int
+	// Threads is the software VP8/VP9 encode thread count; 0 = VIDEO_ENCODE_THREADS, else the
+	// CPUs the container may use.
+	Threads int
 	// StartSeconds starts a VOD or file source at this offset (a seek). Zero
 	// starts at the beginning; a live source has no timeline and ignores it.
 	StartSeconds float64
@@ -1479,6 +1492,20 @@ func hwVerifyWindow() time.Duration {
 // fit one 1500-byte Ethernet frame after the sidecar has added SRTP's auth tag
 // and the IP and UDP headers; 1200 is the size WebRTC senders use.
 const rtpPacketSize = 1200
+
+// vp9DescriptorGrowth is the most the VP9 descriptor rewrite adds to a packet: four bytes for
+// the picture id and layer byte, and four more for the scalability structure of a keyframe.
+const vp9DescriptorGrowth = 8
+
+// videoPacketSize is the -pkt_size for a request. A copied VP9 video gets a longer descriptor
+// afterwards (vp9_descriptor.go), so ffmpeg writes shorter packets and the result stays within
+// rtpPacketSize.
+func videoPacketSize(req SourceRequest, spec EncoderSpec) int {
+	if req.Passthrough && spec.Codec == codecVP9 {
+		return rtpPacketSize - vp9DescriptorGrowth
+	}
+	return rtpPacketSize
+}
 
 // clampStartSeconds keeps a requested seek offset usable: negative, NaN and
 // infinite values mean "from the start".
@@ -1593,7 +1620,7 @@ func (s *Sidecar) buildFFmpegArgs(req SourceRequest, spec EncoderSpec, lowPower 
 		} else if spec.Hardware {
 			args = append(args, "-vf", uploadFilter(spec))
 		}
-		args = append(args, encoderArgs(spec, vBitrate, lowPower, req.CpuUsed)...)
+		args = append(args, encoderArgs(spec, vBitrate, lowPower, req.CpuUsed, req.Threads)...)
 	}
 	args = append(args,
 		"-payload_type", "96",
@@ -1605,7 +1632,7 @@ func (s *Sidecar) buildFFmpegArgs(req SourceRequest, spec EncoderSpec, lowPower 
 		// FFmpeg's default is 1472 bytes. SRTP adds its auth tag on top, which
 		// puts the packet over a 1500-byte MTU: it is fragmented, and one lost
 		// fragment loses the packet. 1200 leaves room for SRTP and tunnels.
-		"-pkt_size", fmt.Sprintf("%d", rtpPacketSize),
+		"-pkt_size", fmt.Sprintf("%d", videoPacketSize(req, spec)),
 		fmt.Sprintf("rtp://127.0.0.1:%d", s.videoPort),
 	)
 
@@ -1726,6 +1753,7 @@ func (s *Sidecar) StartFFmpeg(req SourceRequest) (EncoderSession, error) {
 	} else {
 		s.videoPacer.Store(nil)
 	}
+	s.videoPaceLag.reset()
 	s.vp9Desc.reset()
 	s.vp9Rewrite.Store(req.Passthrough && requested.Codec == codecVP9)
 
@@ -1926,6 +1954,9 @@ func main() {
 	}
 
 	sidecar := NewSidecar()
+	if removed := sweepOrphanStreamFiles(getMusicDir(), orphanStreamFileAge, time.Now()); len(removed) > 0 {
+		log.Printf("[Convert] Removed %d leftover stream file(s) from an earlier run: %s", len(removed), strings.Join(removed, ", "))
+	}
 	if err := sidecar.startICEMedia(); err != nil {
 		log.Fatalf("Failed to start ICE media: %v", err)
 	}
@@ -2036,6 +2067,8 @@ func main() {
 			AllowedHosts []string `json:"allowedHosts"`
 			// CpuUsed overrides VIDEO_CPU_USED for software VP8/VP9 when > 0.
 			CpuUsed int `json:"cpuUsed"`
+			// Threads is the software VP8/VP9 thread count; 0 = automatic.
+			Threads int `json:"threads"`
 			// StartSeconds starts a VOD or file source at this offset (a seek).
 			StartSeconds float64 `json:"startSeconds"`
 			// Passthrough streams the source's own H.264 or VP9 without re-encoding it
@@ -2089,6 +2122,7 @@ func main() {
 			Mode:         req.Mode,
 			AllowedHosts: req.AllowedHosts,
 			CpuUsed:      req.CpuUsed,
+			Threads:      clampThreads(req.Threads),
 			StartSeconds: clampStartSeconds(req.StartSeconds),
 			Passthrough:  req.Passthrough,
 			PacingFactor: req.Pacing,

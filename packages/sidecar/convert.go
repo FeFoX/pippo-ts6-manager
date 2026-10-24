@@ -30,12 +30,18 @@ const (
 	convertTimeout = 3 * time.Hour
 	// convertKeepFinished is how long a finished job stays readable.
 	convertKeepFinished = 10 * time.Minute
+	// orphanStreamFileAge is how old a ".stream-*" file in the music folder must be before the
+	// start-up sweep removes it. It is longer than a conversion may run, so the sweep never
+	// touches a file that is still in use.
+	orphanStreamFileAge = convertTimeout + time.Hour
 )
 
 var (
 	convertOutputName = regexp.MustCompile(`^\.stream-[0-9]+\.mp4$`)
-	convertBitrate    = regexp.MustCompile(`^[0-9]{2,6}[kKmM]?$`)
-	convertPresets    = map[string]bool{"ultrafast": true, "superfast": true, "veryfast": true}
+	// streamTempName also matches the ".part" file a conversion writes before it renames it.
+	streamTempName = regexp.MustCompile(`^\.stream-[0-9]+\.mp4(\.part)?$`)
+	convertBitrate = regexp.MustCompile(`^[0-9]{2,6}[kKmM]?$`)
+	convertPresets = map[string]bool{"ultrafast": true, "superfast": true, "veryfast": true}
 )
 
 // ConvertRequest is one POST /convert call.
@@ -48,6 +54,12 @@ type ConvertRequest struct {
 	Height int `json:"height"`
 	// Bitrate caps the video bitrate (VBV); quality is constant-rate (CRF) below it.
 	Bitrate string `json:"bitrate"`
+	// SourceBitrateKbps is the source's own video bitrate, 0 when not known. The cap is never
+	// raised above it, so the converted file does not come out larger than its source.
+	SourceBitrateKbps int `json:"sourceBitrateKbps"`
+	// Threads is the manager's encode thread setting (0 = automatic); a conversion uses at most
+	// convertThreadsLimit of them, so a live stream sharing the CPUs keeps its share.
+	Threads int    `json:"threads"`
 	Preset  string `json:"preset"`
 	// Gop is the keyframe interval in frames: short, so that a viewer who joins late, or loses a
 	// packet, gets a new picture within a second or so.
@@ -90,11 +102,12 @@ func (j *convertJob) update(f func(*ConvertStatus)) {
 	j.mu.Unlock()
 }
 
-func (j *convertJob) finish(state, msg string) {
+// finish ends a running job and reports whether it did; a job that already ended is left as it is.
+func (j *convertJob) finish(state, msg string) bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.status.State != "running" {
-		return
+		return false
 	}
 	j.status.State = state
 	j.status.Error = msg
@@ -102,6 +115,7 @@ func (j *convertJob) finish(state, msg string) {
 		j.status.Percent = 100
 	}
 	j.doneAt = time.Now()
+	return true
 }
 
 // validateConvert checks a request and resolves the output path in the music folder.
@@ -125,6 +139,12 @@ func validateConvert(req ConvertRequest) (source, final string, err error) {
 	if !convertPresets[req.Preset] {
 		return "", "", errors.New("preset must be ultrafast, superfast or veryfast")
 	}
+	if req.SourceBitrateKbps < 0 || req.SourceBitrateKbps > 10_000_000 {
+		return "", "", errors.New("sourceBitrateKbps must be between 0 and 10000000")
+	}
+	if req.Threads < 0 || req.Threads > maxEncodeThreads {
+		return "", "", fmt.Errorf("threads must be between 0 and %d", maxEncodeThreads)
+	}
 	if req.Gop < 1 || req.Gop > 300 {
 		return "", "", errors.New("gop must be between 1 and 300 frames")
 	}
@@ -134,10 +154,51 @@ func validateConvert(req ConvertRequest) (source, final string, err error) {
 	return source, filepath.Join(getMusicDir(), name), nil
 }
 
+// convertMinBitrateKbps is the lowest cap a conversion is given, however small its source.
+const convertMinBitrateKbps = 100
+
+// convertMaxrate is the VBV cap of a conversion: the requested bitrate, lowered to the source's
+// own video bitrate when that is known, so the file does not come out larger than its source.
+func convertMaxrate(requested string, sourceKbps int) string {
+	requested = strings.TrimSpace(requested)
+	if sourceKbps <= 0 {
+		return requested
+	}
+	kbps, ok := bitrateKbps(requested)
+	if !ok || sourceKbps >= kbps {
+		return requested
+	}
+	if sourceKbps < convertMinBitrateKbps {
+		sourceKbps = convertMinBitrateKbps
+	}
+	return strconv.Itoa(sourceKbps) + "k"
+}
+
+// bitrateKbps reads "2500k", "2.5M" style values as kilobits per second; a bare number is bits per second
+// as ffmpeg reads it.
+func bitrateKbps(v string) (int, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, false
+	}
+	mult := 1.0 / 1000
+	switch last := v[len(v)-1]; last {
+	case 'k', 'K':
+		mult, v = 1, v[:len(v)-1]
+	case 'm', 'M':
+		mult, v = 1000, v[:len(v)-1]
+	}
+	n, err := strconv.ParseFloat(v, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return int(n * mult), true
+}
+
 // buildConvertArgs assembles the ffmpeg command line. input holds the options that belong to
 // the input (the egress proxy for a remote source).
 func buildConvertArgs(req ConvertRequest, source string, input []string, part string) []string {
-	bitrate := strings.TrimSpace(req.Bitrate)
+	bitrate := convertMaxrate(req.Bitrate, req.SourceBitrateKbps)
 	scale := fmt.Sprintf(
 		"scale=w='min(%d,iw)':h='min(%d,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p",
 		req.Width, req.Height,
@@ -151,6 +212,9 @@ func buildConvertArgs(req ConvertRequest, source string, input []string, part st
 		"-vf", scale,
 		// Constrained High: High profile without B-frames, the only H.264 the viewers render.
 		"-c:v", "libx264", "-preset", req.Preset, "-profile:v", "high", "-bf", "0",
+		// x264 starts about 1.5 threads per CPU it sees; unbounded it takes the CPUs a live
+		// stream needs for as long as the conversion lasts.
+		"-threads", strconv.Itoa(convertThreads(req.Threads)),
 		"-g", gop, "-keyint_min", gop,
 		"-crf", "24", "-maxrate", bitrate, "-bufsize", videoBufsize(bitrate),
 		"-c:a", "aac", "-b:a", "128k", "-ac", "2",
@@ -300,7 +364,8 @@ func (s *Sidecar) ConvertStatusFor(id string) (ConvertStatus, bool) {
 	return st, true
 }
 
-// CancelConvert stops a running job and discards its partial output.
+// CancelConvert stops a running job and discards its partial output. It reports false for an
+// unknown job and for one that had already ended.
 func (s *Sidecar) CancelConvert(id string) bool {
 	s.convertMu.Lock()
 	job := s.convert
@@ -308,7 +373,34 @@ func (s *Sidecar) CancelConvert(id string) bool {
 	if job == nil || job.snapshot().ID != id {
 		return false
 	}
-	job.finish("cancelled", "")
+	// A job that already ended was not cancelled, and its output is not discarded here.
+	if !job.finish("cancelled", "") {
+		return false
+	}
 	job.cancel()
 	return true
+}
+
+// sweepOrphanStreamFiles removes the ".stream-<digits>.mp4" and ".stream-<digits>.mp4.part"
+// files a restart left behind (a conversion that was running, or finished for a start that was
+// abandoned) and that are older than maxAge. It returns the names it removed.
+func sweepOrphanStreamFiles(dir string, maxAge time.Duration, now time.Time) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var removed []string
+	for _, e := range entries {
+		if e.IsDir() || !streamTempName.MatchString(e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || !info.Mode().IsRegular() || now.Sub(info.ModTime()) < maxAge {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err == nil {
+			removed = append(removed, e.Name())
+		}
+	}
+	return removed
 }

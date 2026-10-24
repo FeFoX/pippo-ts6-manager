@@ -123,7 +123,7 @@ func TestVP9DescriptorCountersContinueAcrossAReset(t *testing.T) {
 	a := d.rewrite(ffmpegPacket(true, vp9InterHeader), true)
 	d.reset() // a seek starts a new ffmpeg
 	b := d.rewrite(ffmpegPacket(true, vp9KeyHeader), true)
-	if (int(b[1]&0x7f)<<8|int(b[2])) != (int(a[1]&0x7f)<<8|int(a[2]))+1 {
+	if (int(b[1]&0x7f)<<8 | int(b[2])) != (int(a[1]&0x7f)<<8|int(a[2]))+1 {
 		t.Errorf("picture ids must go on after a reset: % x then % x", a[:5], b[:5])
 	}
 	d.picID = 0x7fff

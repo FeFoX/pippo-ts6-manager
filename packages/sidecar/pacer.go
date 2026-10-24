@@ -80,3 +80,49 @@ func (p *videoPacer) measure(size int, now time.Time) {
 		p.winBytes = 0
 	}
 }
+
+// paceLagWindow is the time constant of the average in paceLag: long enough that the audio
+// follows the pacing delay of a keyframe smoothly instead of jumping with it.
+const paceLagWindow = 2 * time.Second
+
+// paceLag is the running average of the delay the pacer adds to the video. The pacer holds
+// packets back after the sync layer has scheduled them, so the video reaches the viewers later
+// than the audio sent for the same moment. Holding the audio back by the same average keeps the
+// two close. It moves slowly (paceLagWindow), because audio packets are 20 ms apart and a lag
+// that jumped would bunch them up.
+type paceLag struct {
+	mu    sync.Mutex
+	value float64 // seconds
+	last  time.Time
+}
+
+// observe folds in the delay d the pacer gave a video packet at now.
+func (l *paceLag) observe(d time.Duration, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.last.IsZero() {
+		if dt := now.Sub(l.last); dt > 0 {
+			alpha := 1 - math.Exp(-dt.Seconds()/paceLagWindow.Seconds())
+			l.value += alpha * (d.Seconds() - l.value)
+		}
+	}
+	l.last = now
+}
+
+// current is the lag to add to the audio's send time.
+func (l *paceLag) current() time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.value < 0.001 {
+		return 0
+	}
+	return time.Duration(l.value * float64(time.Second))
+}
+
+// reset forgets the average (a new source starts, or pacing is off).
+func (l *paceLag) reset() {
+	l.mu.Lock()
+	l.value = 0
+	l.last = time.Time{}
+	l.mu.Unlock()
+}

@@ -89,3 +89,33 @@ func TestPacerRateFollowsTheMeasuredBitrate(t *testing.T) {
 		t.Fatalf("measured rates should differ by about 5x: slow %.0f fast %.0f", slow.rate, fast.rate)
 	}
 }
+
+func TestPaceLagFollowsTheAverageDelaySlowly(t *testing.T) {
+	var l paceLag
+	now := time.Unix(1000, 0)
+	l.observe(0, now)
+	if l.current() != 0 {
+		t.Fatal("no delay yet")
+	}
+	// A burst of 400 ms delays for one second pulls the lag up, but not all the way.
+	for i := 0; i < 50; i++ {
+		now = now.Add(20 * time.Millisecond)
+		l.observe(400*time.Millisecond, now)
+	}
+	up := l.current()
+	if up < 100*time.Millisecond || up >= 400*time.Millisecond {
+		t.Fatalf("lag after a one-second burst should be partway to 400 ms, got %v", up)
+	}
+	// Quiet packets bring it back down.
+	for i := 0; i < 500; i++ {
+		now = now.Add(20 * time.Millisecond)
+		l.observe(0, now)
+	}
+	if down := l.current(); down >= up/4 {
+		t.Fatalf("lag should fall after ten quiet seconds: %v then %v", up, down)
+	}
+	l.reset()
+	if l.current() != 0 {
+		t.Fatal("reset must clear the lag")
+	}
+}

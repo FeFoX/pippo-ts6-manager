@@ -422,11 +422,12 @@ func copyFlushing(w http.ResponseWriter, body io.Reader) {
 // probeDirectArgs asks for what decides whether a picture can be sent as it is: the codec,
 // profile and pixel format, how many frames the decoder must hold back (B-frames), and the
 // display and decode times of the first packets (they differ by a changing amount when frames
-// are reordered). The length comes along for the progress of a conversion.
+// are reordered). The length comes along for the progress of a conversion, and the bitrate so
+// that a conversion is not given room to come out larger than its source.
 func probeDirectArgs() []string {
 	return []string{
 		"-read_intervals", "%+#150",
-		"-show_entries", "stream=codec_name,profile,pix_fmt,has_b_frames,width,height:packet=pts,dts:format=duration",
+		"-show_entries", "stream=codec_name,profile,pix_fmt,has_b_frames,width,height,bit_rate:packet=pts,dts:format=duration,bit_rate",
 		"-of", "json=c=1",
 	}
 }

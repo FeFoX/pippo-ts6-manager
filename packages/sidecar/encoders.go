@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -187,9 +186,10 @@ func uploadFilter(spec EncoderSpec) string {
 }
 
 // encoderArgs are the codec-specific ffmpeg output options (not the filter
-// chain, not the RTP destination). cpuUsed > 0 overrides VIDEO_CPU_USED /
+// chain, not the RTP destination). threads > 0 sets the software VP8/VP9 thread count (see
+// encodeThreads). cpuUsed > 0 overrides VIDEO_CPU_USED /
 // VIDEO_VP9_CPU_USED for software VP8/VP9; hardware encoders ignore it.
-func encoderArgs(spec EncoderSpec, vBitrate string, lowPower bool, cpuUsed int) []string {
+func encoderArgs(spec EncoderSpec, vBitrate string, lowPower bool, cpuUsed, threads int) []string {
 	gop := strconv.Itoa(envIntOrDefault("VIDEO_GOP", 15))
 	rate := []string{
 		"-b:v", vBitrate,
@@ -218,7 +218,7 @@ func encoderArgs(spec EncoderSpec, vBitrate string, lowPower bool, cpuUsed int) 
 			"-cpu-used", vp8CPU,
 			"-deadline", "realtime",
 			// libvpx does not auto-scale across cores without these.
-			"-threads", strconv.Itoa(envIntOrDefault("VIDEO_ENCODE_THREADS", runtime.NumCPU())),
+			"-threads", strconv.Itoa(encodeThreads(threads)),
 			"-row-mt", "1",
 			"-lag-in-frames", "0",
 			"-error-resilient", "1",
@@ -231,7 +231,7 @@ func encoderArgs(spec EncoderSpec, vBitrate string, lowPower bool, cpuUsed int) 
 			"-c:v", "libvpx-vp9",
 			"-cpu-used", vp9CPU,
 			"-deadline", "realtime",
-			"-threads", strconv.Itoa(envIntOrDefault("VIDEO_ENCODE_THREADS", runtime.NumCPU())),
+			"-threads", strconv.Itoa(encodeThreads(threads)),
 			"-row-mt", "1",
 			"-tile-columns", "2",
 			"-frame-parallel", "0",
@@ -394,7 +394,7 @@ func encoderProbeArgs(spec EncoderSpec, lowPower bool) []string {
 		"-frames:v", "3",
 		"-vf", uploadFilter(spec),
 	)
-	args = append(args, encoderArgs(spec, "500k", lowPower, 0)...)
+	args = append(args, encoderArgs(spec, "500k", lowPower, 0, 0)...)
 	args = append(args, "-f", "null", "-")
 	return args
 }

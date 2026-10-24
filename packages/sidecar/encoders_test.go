@@ -36,7 +36,7 @@ func TestH264OffersConstrainedHigh(t *testing.T) {
 
 func TestEncoderArgsHardwareUsesUploadAndLowPower(t *testing.T) {
 	spec, _ := lookupEncoder("h264_vaapi")
-	args := strings.Join(encoderArgs(spec, "4500k", true, 0), " ")
+	args := strings.Join(encoderArgs(spec, "4500k", true, 0, 0), " ")
 	for _, want := range []string{"-c:v h264_vaapi", "-profile:v high", "-bf 0", "-low_power 1", "-b:v 4500k"} {
 		if !strings.Contains(args, want) {
 			t.Errorf("h264_vaapi args missing %q: %s", want, args)
@@ -46,7 +46,7 @@ func TestEncoderArgsHardwareUsesUploadAndLowPower(t *testing.T) {
 		t.Errorf("hardware filter = %q", uploadFilter(spec))
 	}
 	sw, _ := lookupEncoder("vp9")
-	swArgs := strings.Join(encoderArgs(sw, "2500k", true, 0), " ")
+	swArgs := strings.Join(encoderArgs(sw, "2500k", true, 0, 0), " ")
 	if strings.Contains(swArgs, "low_power") {
 		t.Errorf("software encoder must not get -low_power: %s", swArgs)
 	}
@@ -57,11 +57,11 @@ func TestEncoderArgsHardwareUsesUploadAndLowPower(t *testing.T) {
 
 func TestEncoderArgsHonorsCpuUsed(t *testing.T) {
 	spec, _ := lookupEncoder("vp8")
-	args := strings.Join(encoderArgs(spec, "2500k", false, 6), " ")
+	args := strings.Join(encoderArgs(spec, "2500k", false, 6, 0), " ")
 	if !strings.Contains(args, "-cpu-used 6") {
 		t.Fatalf("expected cpu-used 6, got %s", args)
 	}
-	def := strings.Join(encoderArgs(spec, "2500k", false, 0), " ")
+	def := strings.Join(encoderArgs(spec, "2500k", false, 0, 0), " ")
 	if !strings.Contains(def, "-cpu-used 4") {
 		t.Fatalf("cpuUsed 0 should keep env/default 4, got %s", def)
 	}
@@ -70,14 +70,14 @@ func TestEncoderArgsHonorsCpuUsed(t *testing.T) {
 func TestH264EncoderArgsRepeatParameterSets(t *testing.T) {
 	t.Setenv("VIDEO_GOP", "15")
 	sw, _ := lookupEncoder("h264")
-	swArgs := strings.Join(encoderArgs(sw, "2500k", false, 0), " ")
+	swArgs := strings.Join(encoderArgs(sw, "2500k", false, 0, 0), " ")
 	for _, want := range []string{"-c:v libx264", "-profile:v high", "-bf 0", "-x264-params repeat-headers=1"} {
 		if !strings.Contains(swArgs, want) {
 			t.Errorf("libx264 args missing %q: %s", want, swArgs)
 		}
 	}
 	amf, _ := lookupEncoder("h264_amf")
-	amfArgs := strings.Join(encoderArgs(amf, "2500k", false, 0), " ")
+	amfArgs := strings.Join(encoderArgs(amf, "2500k", false, 0, 0), " ")
 	for _, want := range []string{"-c:v h264_amf", "-header_spacing 15", "-g 15"} {
 		if !strings.Contains(amfArgs, want) {
 			t.Errorf("h264_amf args missing %q: %s", want, amfArgs)
@@ -85,7 +85,7 @@ func TestH264EncoderArgsRepeatParameterSets(t *testing.T) {
 	}
 	// NVENC repeats SPS/PPS for RTP when global_header is off; do not invent flags.
 	nv, _ := lookupEncoder("h264_nvenc")
-	nvArgs := strings.Join(encoderArgs(nv, "2500k", false, 0), " ")
+	nvArgs := strings.Join(encoderArgs(nv, "2500k", false, 0, 0), " ")
 	if strings.Contains(nvArgs, "header_spacing") || strings.Contains(nvArgs, "repeat-headers") {
 		t.Errorf("nvenc must keep its own repeat behaviour: %s", nvArgs)
 	}
@@ -94,14 +94,14 @@ func TestH264EncoderArgsRepeatParameterSets(t *testing.T) {
 func TestLibvpxHoldsBitrateWithMinrate(t *testing.T) {
 	for _, id := range []string{"vp8", "vp9"} {
 		spec, _ := lookupEncoder(id)
-		args := strings.Join(encoderArgs(spec, "5500k", false, 0), " ")
+		args := strings.Join(encoderArgs(spec, "5500k", false, 0, 0), " ")
 		if !strings.Contains(args, "-minrate 5500k") {
 			t.Errorf("%s needs -minrate to hold its bitrate: %s", id, args)
 		}
 	}
 	for _, id := range []string{"h264", "vp9_vaapi", "h264_vaapi", "h264_nvenc", "h264_amf"} {
 		spec, _ := lookupEncoder(id)
-		if args := strings.Join(encoderArgs(spec, "5500k", false, 0), " "); strings.Contains(args, "-minrate") {
+		if args := strings.Join(encoderArgs(spec, "5500k", false, 0, 0), " "); strings.Contains(args, "-minrate") {
 			t.Errorf("%s holds -maxrate on its own and must not get -minrate: %s", id, args)
 		}
 	}
@@ -454,5 +454,27 @@ func TestProbeCommandLineQuotes(t *testing.T) {
 	want := `ffmpeg -vf format=nv12,hwupload -f null - 'it'\''s here'`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestVideoPacketSizeLeavesRoomForTheVP9Descriptor(t *testing.T) {
+	vp9, _ := lookupEncoder("vp9")
+	h264, _ := lookupEncoder("h264")
+	if got := videoPacketSize(SourceRequest{Passthrough: true}, vp9); got != rtpPacketSize-vp9DescriptorGrowth {
+		t.Errorf("a copied VP9 video needs room to grow: %d", got)
+	}
+	if got := videoPacketSize(SourceRequest{Passthrough: true}, h264); got != rtpPacketSize {
+		t.Errorf("a copied H.264 video is not rewritten: %d", got)
+	}
+	if got := videoPacketSize(SourceRequest{}, vp9); got != rtpPacketSize {
+		t.Errorf("a re-encoded VP9 video is not rewritten: %d", got)
+	}
+	// What the rewrite adds to the largest packet ffmpeg may write must fit the usual size.
+	payload := make([]byte, rtpPacketSize-vp9DescriptorGrowth-12)
+	payload[0] = vp9FlagB
+	payload[1] = 0x82 // a VP9 keyframe header
+	var d vp9Descriptor
+	if out := d.rewrite(payload, true); len(out)+12 > rtpPacketSize {
+		t.Errorf("rewritten packet is %d bytes, over %d", len(out)+12, rtpPacketSize)
 	}
 }
