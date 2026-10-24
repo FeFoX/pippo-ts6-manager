@@ -7,6 +7,8 @@ import { BotEngine } from './bot-engine/engine.js';
 import { VoiceBotManager } from './voice/voice-bot-manager.js';
 import { MusicCommandHandler } from './voice/music-command-handler.js';
 import { config } from './config.js';
+import { describeTrustProxy } from './trust-proxy.js';
+import { purgeUnhashedRefreshTokens } from './utils/refresh-token.js';
 import { setYtCookieFile } from './voice/audio/youtube.js';
 import { logYtDlpVersionInBackground } from './voice/audio/yt-dlp-diagnostics.js';
 import jwt from 'jsonwebtoken';
@@ -58,6 +60,15 @@ async function main() {
   logYtDlpVersionInBackground();
 
   const prisma = new PrismaClient();
+
+  // Refresh tokens are stored hashed now; rows from before cannot be used and are removed.
+  try {
+    const purged = await purgeUnhashedRefreshTokens(prisma);
+    if (purged > 0) console.log(`[Auth] Removed ${purged} unhashed refresh token(s); those sessions sign in again.`);
+  } catch (err: any) {
+    console.warn(`[Auth] Could not remove unhashed refresh tokens: ${err?.message || String(err)}`);
+  }
+
   const app = createApp();
   const server = createServer(app);
 
@@ -158,6 +169,7 @@ async function main() {
     console.log(`[TS6 WebUI] Backend running on http://localhost:${config.port}`);
     console.log(`[TS6 WebUI] WebSocket available at ws://localhost:${config.port}/ws`);
     console.log(`[TS6 WebUI] Environment: ${config.nodeEnv}`);
+    console.log(`[TS6 WebUI] Trusted proxies: ${describeTrustProxy(config.trustProxy)}`);
   });
 
   // Graceful shutdown

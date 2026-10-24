@@ -5,8 +5,9 @@ This fork starts from [uniskela/ts6-manager](https://github.com/uniskela/ts6-man
 and three later upstream commits that only touch documentation and CI. Upstream has since released 1.11.x, and these
 changes have not been rebased onto it yet.
 
-The new settings live in the database and are edited in the web GUI. There are no new environment variables, and the
-database schema is the same as upstream's: each new setting is a key/value row with a built-in default.
+The new settings live in the database and are edited in the web GUI. The new environment variables are
+`TRUST_PROXY` (ported from upstream 1.11, see Security) and `VIDEO_CONVERT_THREADS`. The database schema is the same
+as upstream's: each new setting is a key/value row with a built-in default.
 
 [`docs/music-bots.md`](docs/music-bots.md) and [`docs/video-streaming.md`](docs/video-streaming.md) cover each
 feature in more detail.
@@ -194,6 +195,19 @@ twice. Listeners being set up are now tracked, and a listener whose first connec
 by itself) is replaced, up to three attempts.
 
 - File: `packages/backend/src/bot-engine/event-bridge.ts`.
+
+## Security
+
+- `TRUST_PROXY` from upstream 1.11, ported unchanged, replaces the hard-coded one hop. The all-in-one image defaults to
+  `loopback`; behind a reverse proxy (Caddy, nginx, Traefik) set `TRUST_PROXY=loopback,<proxy address>`, or every user
+  shares one login rate limit.
+- Refresh tokens are stored as SHA-256 hashes. Unhashed rows are deleted at startup, so everyone signs in once more.
+- `JWT_REFRESH_EXPIRY` now sets the refresh token lifetime (it was ignored: always 7 days). A bad value stops startup.
+- Login runs one bcrypt comparison for unknown and disabled users too, so timing no longer shows which usernames exist.
+- Webhook secrets are accepted only in the `X-Webhook-Secret` header, not as `?secret=` (one warning is logged if used).
+- Player widget tokens are compared in constant time. They still travel in the URL (`?token=`), so they still reach
+  access logs: TeamSpeak clients and embeds fetch these widgets as plain URLs and cannot send a header. The token only
+  gives read access to that bot's now-playing data, and revoking it still means rotating `JWT_SECRET`.
 
 ## Known limits
 

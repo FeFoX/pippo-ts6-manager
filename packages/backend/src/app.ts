@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { config } from './config.js';
+import { applyTrustProxy, forwardedHeaderWarning } from './trust-proxy.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { authMiddleware } from './middleware/auth.js';
 import { authRoutes } from './routes/auth.routes.js';
@@ -47,8 +48,9 @@ const backendPkg = require('../package.json') as { version?: string };
 export function createApp(): Express {
   const app = express();
 
-  // Trust first proxy (nginx / Coolify reverse proxy)
-  app.set('trust proxy', 1);
+  // Explicit addresses/subnets prevent direct clients spoofing rate-limit IPs.
+  applyTrustProxy(app, config.trustProxy);
+  app.use(forwardedHeaderWarning(config.trustProxy));
 
   app.use(helmet());
   app.use(cors({ origin: config.frontendUrl, credentials: true }));

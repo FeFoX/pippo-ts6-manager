@@ -275,6 +275,7 @@ export class BotEngine {
   private animationManager: AnimationManager;
   private cronJobs: CronEntry[] = [];
   private webhookEntries: WebhookEntry[] = [];
+  private warnedQuerySecret = false;
   private executionCounts: Map<number, number> = new Map();
   private running: boolean = false;
   private musicCommandHandler: MusicCommandHandler | null = null;
@@ -514,7 +515,12 @@ export class BotEngine {
   handleWebhookRequest(req: Request, res: Response): void {
     const webhookPath = String(req.params.path || req.params[0] || '');
     const method = req.method.toUpperCase();
-    const providedSecret = String(req.headers['x-webhook-secret'] || req.query.secret || '');
+    // Header only: a secret in the URL ends up in proxy and caller access logs.
+    const providedSecret = String(req.headers['x-webhook-secret'] || '');
+    if (!providedSecret && req.query.secret !== undefined && !this.warnedQuerySecret) {
+      this.warnedQuerySecret = true;
+      console.warn('[BotEngine] A webhook call sent its secret as ?secret=, which is no longer accepted. Send it in the X-Webhook-Secret header.');
+    }
 
     const matching = this.webhookEntries.filter(w =>
       w.path === webhookPath && (w.method === method || w.method === 'ANY')

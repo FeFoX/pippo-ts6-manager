@@ -146,12 +146,18 @@ function playerWidgetToken(botId: number): string {
 /** Exported so admin routes can generate tokens for the UI */
 export { playerWidgetToken };
 
+function isPlayerWidgetToken(botId: number, token: unknown): boolean {
+  if (typeof token !== 'string') return false;
+  const expected = Buffer.from(playerWidgetToken(botId));
+  const provided = Buffer.from(token);
+  return provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
+}
+
 // GET /player/:botId/data?token=xxx — JSON: now playing + upcoming queue
 widgetPublicRoutes.get('/player/:botId/data', async (req: Request, res: Response, next) => {
   try {
     const botId = parseInt(String(req.params.botId));
-    const token = req.query.token as string;
-    if (!token || token !== playerWidgetToken(botId)) {
+    if (!isPlayerWidgetToken(botId, req.query.token)) {
       return res.status(403).json({ error: 'Invalid token' });
     }
 
@@ -179,8 +185,7 @@ widgetPublicRoutes.get('/player/:botId/data', async (req: Request, res: Response
 widgetPublicRoutes.get('/player/:botId/bbcode', async (req: Request, res: Response, next) => {
   try {
     const botId = parseInt(String(req.params.botId));
-    const token = req.query.token as string;
-    if (!token || token !== playerWidgetToken(botId)) {
+    if (!isPlayerWidgetToken(botId, req.query.token)) {
       return res.status(403).json({ error: 'Invalid token' });
     }
 
