@@ -46,14 +46,16 @@ describe('video thread labels', () => {
     assert.equal(inheritThreadsLabel(3), 'Use default (3)');
   });
 
-  it('reports what a running stream uses, nothing when idle', () => {
+  it('names what a running stream resolved to, nothing when idle or unreported', () => {
     assert.equal(runningResourcesLabel(null), null);
-    assert.equal(runningResourcesLabel({ encodeThreads: 0, convertThreads: 0, cpuPriority: 'normal' }), null);
-    assert.equal(runningResourcesLabel({ encodeThreads: 4, convertThreads: 0 }), 'encode 4');
-    assert.equal(runningResourcesLabel({ encodeThreads: 4, convertThreads: 2, cpuPriority: 'normal' }), 'encode 4 · convert 2');
-    assert.equal(runningResourcesLabel({ encodeThreads: 4, convertThreads: 2, cpuPriority: 'lowest' }),
-      'encode 4 · convert 2 · lowest priority');
     assert.equal(runningResourcesLabel({}), null);
+    assert.equal(runningResourcesLabel({ streaming: false, encodeThreads: 0, convertThreads: 0, cpuPriority: 'normal' }), null);
+    assert.equal(runningResourcesLabel({ streaming: true, encodeThreads: 4, convertThreads: 2, cpuPriority: 'low' }),
+      'encode 4 · convert 2 · low priority');
+    // 0 is automatic, and it still counts as a value to show while streaming.
+    assert.equal(runningResourcesLabel({ streaming: true, encodeThreads: 0, convertThreads: 0, cpuPriority: 'normal' }),
+      'encode automatic · convert automatic · normal priority');
+    assert.equal(runningResourcesLabel({ streaming: true, encodeThreads: 3 }), null);
   });
 
   it('names the CPU priorities and what an empty choice inherits', () => {

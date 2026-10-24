@@ -65,13 +65,15 @@ export function inheritPriorityLabel(inherited: VideoCpuPriority | null | undefi
   return inherited ? `Use default (${cpuPriorityLabel(inherited)})` : 'Use default';
 }
 
-/** What a running stream uses: "encode 4 · convert 2", plus the priority when it is not Normal. Null when idle. */
+/**
+ * What a running stream resolved to: "encode 4 · convert automatic · low priority". The backend reports 0
+ * for automatic, so a running stream always names all three. Null when nothing is streaming or the backend
+ * does not report them.
+ */
 export function runningResourcesLabel(
-  v: { encodeThreads?: number; convertThreads?: number; cpuPriority?: VideoCpuPriority } | null | undefined,
+  v: { streaming?: boolean; encodeThreads?: number; convertThreads?: number; cpuPriority?: VideoCpuPriority } | null | undefined,
 ): string | null {
-  if (!v || !(v.encodeThreads && v.encodeThreads > 0)) return null;
-  const parts = [`encode ${v.encodeThreads}`];
-  if (v.convertThreads && v.convertThreads > 0) parts.push(`convert ${v.convertThreads}`);
-  if (v.cpuPriority && v.cpuPriority !== 'normal') parts.push(`${cpuPriorityLabel(v.cpuPriority).toLowerCase()} priority`);
-  return parts.join(' · ');
+  if (!v || !v.streaming || v.encodeThreads == null || v.convertThreads == null || !v.cpuPriority) return null;
+  const count = (n: number) => (n > 0 ? String(n) : 'automatic');
+  return `encode ${count(v.encodeThreads)} · convert ${count(v.convertThreads)} · ${cpuPriorityLabel(v.cpuPriority).toLowerCase()} priority`;
 }

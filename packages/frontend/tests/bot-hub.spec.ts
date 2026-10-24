@@ -258,6 +258,27 @@ test('a live stream switches source from the console without stopping', async ({
   expect(stops).toHaveLength(0);
 });
 
+test('Now playing shows the threads and CPU priority a running stream resolved to, and hides them when idle', async ({ page, request }) => {
+  let resources: Record<string, unknown> = { encodeThreads: 4, convertThreads: 0, cpuPriority: 'low' };
+  await page.route('**/api/music-bots/media', (r) => r.fulfill({
+    json: media(Date.now()).map((b) => (b.botId === 2 && b.video ? { ...b, video: { ...b.video, ...resources } } : b)),
+  }));
+  await page.route('**/api/music-bots', (route) => route.fulfill({ json: summaries() }));
+  await page.route('**/api/music-bots/*/state', (route) => route.fulfill({ json: { status: 'connected', currentIndex: -1, queue: [], position: 0, duration: 0, volume: 50, shuffle: false, repeat: 'off' } }));
+  await page.route('**/api/music-bots/2/stream/status', (route) => route.fulfill({ json: { streaming: true, viewerCount: 0, viewers: [] } }));
+  await signIn(page, request);
+
+  await page.goto('/bot-hub/2');
+  const cpu = page.locator('dt', { hasText: 'CPU' }).locator('xpath=following-sibling::dd[1]');
+  await expect(cpu).toHaveText('encode 4 · convert automatic · low priority');
+
+  // A backend that does not report them leaves the row out rather than inventing values.
+  resources = {};
+  await page.reload();
+  await expect(page.locator('dt', { hasText: 'Viewers' })).toBeVisible();
+  await expect(page.locator('dt', { hasText: 'CPU' })).toHaveCount(0);
+});
+
 test('IPTV Stream on… opens the chosen bot\'s console with the channel selected, without streaming', async ({ page, request }) => {
   const streams: unknown[] = [];
   const channel = { id: 7, playlistId: 10, name: 'Morning News', url: 'http://news.invalid/live', logo: null, groupTitle: 'News', tvgId: 'morning.west', position: 0 };

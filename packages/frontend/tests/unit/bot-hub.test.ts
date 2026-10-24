@@ -65,6 +65,23 @@ describe('console Now playing details', () => {
     assert.equal(videoDetails(live, now).find((d) => d.label === 'Auto-stop')?.value, 'if no viewers for 5 min');
     assert.deepEqual(videoDetails(base, now), []);
   });
+
+  it('adds a CPU line with the resolved threads and priority of a running stream', () => {
+    const now = 1_000_000;
+    const running = (resources: Record<string, unknown>) => ({
+      ...base,
+      video: {
+        streaming: true, quality: null, preset: '720p', encoder: null, sourceMode: null, health: null, viewerCount: 0,
+        startedAt: null, noViewer: { stopAt: null, timeoutSec: 0 }, ...resources,
+      },
+    }) as unknown as BotMediaOverview;
+    const cpu = (bot: BotMediaOverview) => videoDetails(bot, now).find((d) => d.label === 'CPU')?.value;
+    assert.equal(cpu(running({ encodeThreads: 4, convertThreads: 2, cpuPriority: 'low' })), 'encode 4 · convert 2 · low priority');
+    assert.equal(cpu(running({ encodeThreads: 0, convertThreads: 0, cpuPriority: 'normal' })),
+      'encode automatic · convert automatic · normal priority');
+    // An older backend does not report them.
+    assert.equal(cpu(running({})), undefined);
+  });
 });
 
 describe('active bots pill', () => {
