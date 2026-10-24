@@ -243,8 +243,8 @@ behind are removed at the next sidecar start once they are more than four hours 
 
 **Pausing a video.** The *Now playing* card has *Pause* / *Resume* for a finite video, and `!pause` toggles it in
 chat, as for music. Pausing stops the encode and remembers the position; the viewers stay connected and keep the last
-picture. Resume starts again from that position (a video without a local copy is opened again on its site, so it
-counts as a seek for the seek cooldown). Live streams and looping videos cannot be paused. A seek while paused plays
+picture. Resume starts again from that position (a video without a local copy is opened again on its site, but resuming
+does not count against the seek cooldown). Live streams and looping videos cannot be paused. A seek while paused plays
 from the target; a volume change while paused is applied when it plays again. Pause/resume also work through
 `POST /api/music-bots/:id/pause` and `/resume`, which now handle video as well.
 

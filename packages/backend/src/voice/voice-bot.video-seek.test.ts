@@ -43,6 +43,7 @@ function fakeVideo(bot: VoiceBot, opts: { duration?: number | null; mode?: strin
   b._videoOffsetAt = Date.now();
   b.sidecarHttp = {
     setSource: async (source: string, options: any) => { sources.push({ source, options }); return null; },
+    stopSource: async () => undefined,
   };
   // Resolving the source is the YouTube extractor's job; the test only needs a URL back.
   b.resolveStreamSource = async () => ({ path: 'https://rr1.googlevideo.example/video', loop: false });
@@ -212,6 +213,23 @@ describe('seek rate limit on remote sources', () => {
     mock.timers.tick(20_000);
     await bot.seek(2400);
     assert.deepEqual(sources.map((x) => x.options.startSeconds), [1800, 2400]);
+    b.clearVideoEndTimer();
+  });
+
+  it('resumes a paused remote video inside the cooldown, and the resume does not use it up', async () => {
+    const bot = makeBot(120);
+    const { b, sources } = fakeVideo(bot, { duration: 5470 });
+
+    await bot.seek(1800);
+    mock.timers.tick(10_000);
+    await bot.pauseVideo();
+    await bot.resumeVideo();
+    assert.equal(bot.videoPaused, false);
+    assert.deepEqual(sources.map((x) => x.options.startSeconds), [1800, 1810], 'resumed at the paused position');
+
+    // The resume left the clock where the seek set it: 10 s later a seek is still refused for the rest.
+    await assert.rejects(() => bot.seek(2400), (err: unknown) =>
+      err instanceof SeekRateLimitedError && err.retryAfterSec === 110);
     b.clearVideoEndTimer();
   });
 

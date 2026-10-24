@@ -99,7 +99,7 @@ A direct stream sends the video as it is, without decoding and encoding it again
 ### Video pause and resume
 
 Pause stops the encode and remembers the position; viewers stay connected and keep the last picture. Resume starts
-again from that position (a video without a local copy is reopened, which counts as a seek for the cooldown).
+again from that position (a video without a local copy is reopened, but resuming is exempt from the seek cooldown).
 Live streams and looping videos cannot be paused.
 
 - `POST /api/music-bots/:id/pause` and `/resume` now handle video (`409` when the video cannot be paused).

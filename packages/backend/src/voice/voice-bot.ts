@@ -1453,7 +1453,6 @@ export class VoiceBot extends EventEmitter {
     return this._videoStreaming && this._videoPaused;
   }
 
-  /** The running stream was started as a direct (no re-encoding) stream. */
   /** A start is under way (downloading, converting) and the stream is not up yet. */
   get videoStarting(): boolean {
     return this._videoStarting && !this._videoStreaming;
@@ -1465,6 +1464,7 @@ export class VoiceBot extends EventEmitter {
     return p ? { stage: p.stage, percent: p.percent, speed: p.speed, etaSec: p.etaSec } : null;
   }
 
+  /** The running stream was started as a direct (no re-encoding) stream. */
   get videoDirectRequested(): boolean {
     return this._videoStreaming && this._videoDirectRequested;
   }
@@ -1504,7 +1504,9 @@ export class VoiceBot extends EventEmitter {
 
   /**
    * Continue a paused video from where it stopped. A video without a local copy is opened
-   * again on its remote site, so that counts as a seek for the seek cooldown.
+   * again on its remote site, but a resume goes back to the position it already had, so it
+   * does not count against the seek cooldown: pausing is a basic control and must not leave
+   * the video stuck for the length of the cooldown.
    */
   resumeVideo(): Promise<void> {
     const run = this._videoSeekChain.then(() => this.resumeVideoNow());
@@ -1514,7 +1516,7 @@ export class VoiceBot extends EventEmitter {
 
   private async resumeVideoNow(): Promise<void> {
     if (!this._videoStreaming || !this._videoPaused) return;
-    await this.seekVideoNow(this._videoPausedAtSec);
+    await this.seekVideoNow(this._videoPausedAtSec, { resume: true });
     // sendSourceToSidecar cleared the flag when ffmpeg started again.
     console.log(`[VoiceBot ${this.config.id}] Video resumed`);
     this.emit('statusChange', this._status);
@@ -1546,7 +1548,7 @@ export class VoiceBot extends EventEmitter {
     }
   }
 
-  private async seekVideoNow(seconds: number): Promise<void> {
+  private async seekVideoNow(seconds: number, opts: { resume?: boolean } = {}): Promise<void> {
     if (!this.canSeekVideo || this._videoSource == null) {
       throw new Error('This video cannot be seeked');
     }
@@ -1568,8 +1570,8 @@ export class VoiceBot extends EventEmitter {
     if (tempPath) {
       sourcePath = tempPath;
     } else {
-      // No local copy: this seek goes back to the remote site.
-      await this.claimRemoteSeek();
+      // No local copy: this seek goes back to the remote site. A resume is exempt from the cooldown.
+      if (!opts.resume) await this.claimRemoteSeek();
       const resolved = await this.resolveForSeek(source, STREAM_PRESETS[quality.actual].height);
       sourcePath = resolved.path;
       audioPath = resolved.audioPath;
