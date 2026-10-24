@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   MAX_PLAYLIST_IMPORT,
+  MAX_RESUME_COOLDOWN_SECONDS,
   MAX_SEEK_COOLDOWN_SECONDS,
   parseMaxPlaylistImportInput,
   parseMaxVideoDurationInput,
+  parseResumeCooldownInput,
   parseSeekCooldownInput,
 } from '../../src/lib/limits-input';
 
@@ -21,6 +23,20 @@ describe('parseSeekCooldownInput', () => {
   it('rejects a cleared field instead of sending NaN, and anything out of range', () => {
     for (const bad of [...NOT_WHOLE, String(MAX_SEEK_COOLDOWN_SECONDS + 1)]) {
       assert.equal(parseSeekCooldownInput(bad), null, bad);
+    }
+  });
+});
+
+describe('parseResumeCooldownInput', () => {
+  it('accepts whole seconds from 0 (off) to the maximum', () => {
+    assert.equal(parseResumeCooldownInput('0'), 0);
+    assert.equal(parseResumeCooldownInput('10'), 10);
+    assert.equal(parseResumeCooldownInput(String(MAX_RESUME_COOLDOWN_SECONDS)), MAX_RESUME_COOLDOWN_SECONDS);
+  });
+
+  it('rejects an empty or non-whole value, and anything above the maximum', () => {
+    for (const bad of [...NOT_WHOLE, String(MAX_RESUME_COOLDOWN_SECONDS + 1)]) {
+      assert.equal(parseResumeCooldownInput(bad), null, bad);
     }
   });
 });

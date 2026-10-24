@@ -44,10 +44,12 @@ import { APP_REPOSITORY_URL, APP_VERSION, APP_VERSION_LABEL } from '@/lib/app-ve
 import { apiErrorMessage } from '@/lib/api-error';
 import {
   MAX_PLAYLIST_IMPORT,
+  MAX_RESUME_COOLDOWN_SECONDS,
   MAX_SEEK_COOLDOWN_SECONDS,
   MIN_PLAYLIST_IMPORT,
   parseMaxPlaylistImportInput,
   parseMaxVideoDurationInput,
+  parseResumeCooldownInput,
   parseSeekCooldownInput,
 } from '@/lib/limits-input';
 import { toast } from 'sonner';
@@ -1180,6 +1182,7 @@ function LimitsCard() {
   const [maxPlaylistImport, setMaxPlaylistImport] = useState('');
   const [youtubeDirectStream, setYoutubeDirectStream] = useState(false);
   const [seekCooldown, setSeekCooldown] = useState('');
+  const [resumeCooldown, setResumeCooldown] = useState('');
 
   useEffect(() => {
     if (limits) {
@@ -1187,17 +1190,20 @@ function LimitsCard() {
       setMaxPlaylistImport(String(limits.maxPlaylistImport ?? 250));
       setYoutubeDirectStream(limits.youtubeDirectStream === true);
       setSeekCooldown(String(limits.seekCooldownSeconds ?? 120));
+      setResumeCooldown(String(limits.resumeCooldownSeconds ?? 10));
     }
   }, [limits]);
 
   const maxVideoDurationValue = parseMaxVideoDurationInput(maxVideoDuration);
   const maxPlaylistImportValue = parseMaxPlaylistImportInput(maxPlaylistImport);
   const seekCooldownSeconds = parseSeekCooldownInput(seekCooldown);
+  const resumeCooldownSeconds = parseResumeCooldownInput(resumeCooldown);
   // Only flag a field once the stored values have loaded into them.
   const maxVideoDurationInvalid = limits !== undefined && maxVideoDurationValue === null;
   const maxPlaylistImportInvalid = limits !== undefined && maxPlaylistImportValue === null;
   const seekCooldownInvalid = limits !== undefined && seekCooldownSeconds === null;
-  const anyInvalid = maxVideoDurationInvalid || maxPlaylistImportInvalid || seekCooldownInvalid;
+  const resumeCooldownInvalid = limits !== undefined && resumeCooldownSeconds === null;
+  const anyInvalid = maxVideoDurationInvalid || maxPlaylistImportInvalid || seekCooldownInvalid || resumeCooldownInvalid;
 
   const saveLimits = useMutation({
     mutationFn: () => settingsApi.updateLimits({
@@ -1205,6 +1211,7 @@ function LimitsCard() {
       maxPlaylistImport: maxPlaylistImportValue ?? undefined,
       youtubeDirectStream,
       seekCooldownSeconds: seekCooldownSeconds ?? undefined,
+      resumeCooldownSeconds: resumeCooldownSeconds ?? undefined,
     }),
     onSuccess: () => {
       toast.success('Limits saved');
@@ -1302,6 +1309,29 @@ function LimitsCard() {
                 reopens the remote resource, so this keeps repeated seeks from hammering the site. It counts
                 per bot, whoever asks. Files already on the server are never limited. A refused chat
                 !seek tells the user how long to wait.
+              </p>
+            </div>
+            <div>
+              <Label htmlFor="resume-cooldown" className="text-xs">Resume cooldown for paused videos (seconds, 0 = no limit)</Label>
+              <Input
+                id="resume-cooldown"
+                type="number"
+                min={0}
+                max={MAX_RESUME_COOLDOWN_SECONDS}
+                aria-invalid={resumeCooldownInvalid}
+                className={resumeCooldownInvalid ? 'border-destructive' : undefined}
+                value={resumeCooldown}
+                onChange={(e) => setResumeCooldown(e.target.value)}
+              />
+              {resumeCooldownInvalid && (
+                <p role="alert" className="text-xs text-destructive mt-1">
+                  Enter a whole number of seconds from 0 to {MAX_RESUME_COOLDOWN_SECONDS} to save.
+                </p>
+              )}
+              <p className="text-xs text-muted-foreground mt-1">
+                Minimum wait between two resumes of a paused video that has no copy on the server and has to be
+                opened again on its site. A resume never uses up the seek cooldown. A refused resume leaves the
+                video paused.
               </p>
             </div>
             <Button
