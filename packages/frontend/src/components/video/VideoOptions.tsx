@@ -1,10 +1,15 @@
 import type { VideoStreamSettings } from '@ts6/common';
+import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { ChevronDown } from 'lucide-react';
 import {
   ENCODER_OPTIONS, NO_VIEWER_TIMEOUT_OPTIONS, QUALITY_OPTIONS, SOURCE_MODE_OPTIONS,
   autoEncoderPreferenceHint, autoEncoderPreferenceLabel, qualityOptionLabel,
 } from '@/lib/video-streaming';
+import {
+  CPU_PRIORITY_OPTIONS, MAX_VIDEO_THREADS, inheritPriorityLabel, inheritThreadsLabel, isCpuPriority, sanitizeThreadsInput,
+  type VideoResources,
+} from '@/lib/video-resources';
 import { noViewerTimeoutLabel, videoOptionsSummary, type VideoStartOptions } from '@/lib/video-options';
 
 /**
@@ -12,10 +17,12 @@ import { noViewerTimeoutLabel, videoOptionsSummary, type VideoStartOptions } fro
  * folded behind a "Video options" row that shows the current choices. They
  * inherit the bot and server defaults; nothing is saved.
  */
-export function VideoOptions({ value, onChange, defaults }: {
+export function VideoOptions({ value, onChange, defaults, resourceDefaults }: {
   value: VideoStartOptions;
   onChange(v: VideoStartOptions): void;
   defaults?: VideoStreamSettings;
+  /** What empty CPU fields inherit for this bot (its saved values, else the server's). */
+  resourceDefaults?: VideoResources;
 }) {
   const field = 'h-10 w-full rounded-md border bg-background px-2 text-sm';
   // Preserve any explicit custom timeout alongside the default choice.
@@ -94,7 +101,35 @@ export function VideoOptions({ value, onChange, defaults }: {
               {SOURCE_MODE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </div>
+          <div className="space-y-1">
+            <Label htmlFor="vo-encode-threads">Encode threads</Label>
+            <Input id="vo-encode-threads" className="h-10" inputMode="numeric" autoComplete="off"
+              placeholder={inheritThreadsLabel(resourceDefaults?.encodeThreads ?? defaults?.encodeThreads)}
+              value={value.encodeThreads}
+              onChange={(e) => onChange({ ...value, encodeThreads: sanitizeThreadsInput(e.target.value) })} />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="vo-convert-threads">Convert threads</Label>
+            <Input id="vo-convert-threads" className="h-10" inputMode="numeric" autoComplete="off"
+              placeholder={inheritThreadsLabel(resourceDefaults?.convertThreads ?? defaults?.convertThreads)}
+              value={value.convertThreads}
+              onChange={(e) => onChange({ ...value, convertThreads: sanitizeThreadsInput(e.target.value) })} />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="vo-cpu-priority">CPU priority</Label>
+            <select id="vo-cpu-priority" className={field} value={value.cpuPriority}
+              onChange={(e) => onChange({
+                ...value, cpuPriority: isCpuPriority(e.target.value) ? e.target.value : '',
+              })}>
+              <option value="">{inheritPriorityLabel(resourceDefaults?.cpuPriority ?? defaults?.cpuPriority)}</option>
+              {CPU_PRIORITY_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}: {o.hint}</option>)}
+            </select>
+          </div>
         </div>
+        <p className="text-xs text-muted-foreground">
+          Threads: leave empty to inherit, 0 for automatic, or 1 to {MAX_VIDEO_THREADS}. Encode threads apply to a software
+          VP8/VP9 encode; convert threads to the convert-first conversion of a direct stream.
+        </p>
       </div>
     </details>
   );

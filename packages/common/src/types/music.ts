@@ -497,6 +497,12 @@ export interface StartVideoStreamRequest {
   sourceMode?: VideoSourceModeRequest;
   /** Send the source's H.264 to viewers without re-encoding it (falls back to re-encoding when it cannot be copied). */
   direct?: boolean;
+  /** One-start override of the encode threads (0 = automatic); absent inherits the bot's, server's or global setting. */
+  encodeThreads?: number;
+  /** One-start override of the convert threads (0 = automatic); absent inherits. */
+  convertThreads?: number;
+  /** One-start override of the CPU priority; absent inherits. */
+  cpuPriority?: VideoCpuPriority;
 }
 
 export interface SetVideoSourceRequest {

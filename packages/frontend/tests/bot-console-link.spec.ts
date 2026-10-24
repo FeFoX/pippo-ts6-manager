@@ -48,7 +48,13 @@ async function mockConsole(page: Page) {
   await page.route('**/api/music-bots/media', (r) => r.fulfill({ json: media(Date.now()) }));
   await page.route('**/api/music-bots/1/state', (r) => r.fulfill({ json: state }));
   await page.route('**/api/settings/video-streaming/servers/1', (r) => r.fulfill({ json: {
-    global: {}, overrides: {}, effective: { defaultEncoder: 'h264_vaapi', noViewerTimeoutSec: 900 },
+    global: {}, overrides: {}, effective: {
+      defaultEncoder: 'h264_vaapi', noViewerTimeoutSec: 900, encodeThreads: 2, convertThreads: 0, cpuPriority: 'normal',
+    },
+  } }));
+  // This bot's own value for CPU priority wins over the server's in the "Use default" labels.
+  await page.route('**/api/music-bots/1/video-resources', (r) => r.fulfill({ json: {
+    overrides: { cpuPriority: 'low' }, effective: { encodeThreads: 2, convertThreads: 0, cpuPriority: 'low' },
   } }));
   await page.route('**/api/music-bots/1/play-url', async (r) => {
     calls.push({ method: r.request().method(), url: r.request().url(), body: r.request().postDataJSON() });
@@ -107,6 +113,33 @@ test('Stream as video sends stream/start with the source and chosen options', as
     encoder: 'h264_vaapi',
     noViewerTimeoutSec: 600,
     sourceMode: 'live',
+  });
+});
+
+test('Video options send the thread counts and CPU priority of one start, and show what an empty choice inherits', async ({ page, request }) => {
+  await page.setViewportSize({ width: 1400, height: 1000 });
+  const calls = await mockConsole(page);
+  await signIn(page, request);
+  await page.goto('/bot-hub/1');
+  await page.getByRole('tab', { name: 'Link' }).click();
+  await page.getByLabel('YouTube, Twitch, direct link, or a file already in the music folder')
+    .fill('https://youtu.be/dQw4w9WgXcQ');
+  await page.getByRole('radio', { name: 'Stream as video' }).check();
+  await page.locator('summary', { hasText: 'Video options' }).click();
+
+  await expect(page.locator('#vo-encode-threads')).toHaveAttribute('placeholder', 'Use default (2)');
+  await expect(page.locator('#vo-convert-threads')).toHaveAttribute('placeholder', 'Use default (automatic)');
+  await expect(page.locator('#vo-cpu-priority option').first()).toHaveText('Use default (Low)');
+
+  await page.locator('#vo-encode-threads').fill('6');
+  // 0 is an explicit automatic, not the same as an empty box.
+  await page.locator('#vo-convert-threads').fill('0');
+  await page.locator('#vo-cpu-priority').selectOption('lowest');
+  await expect(page.locator('summary', { hasText: 'Video options' })).toContainText('encode 6 threads');
+  await page.getByRole('button', { name: 'Stream as video' }).click();
+
+  await expect.poll(() => calls.find((c) => c.url.includes('/stream/start'))?.body).toEqual({
+    source: 'https://youtu.be/dQw4w9WgXcQ', sourceMode: 'auto', encodeThreads: 6, convertThreads: 0, cpuPriority: 'lowest',
   });
 });
 

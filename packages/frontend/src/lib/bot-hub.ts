@@ -3,6 +3,7 @@
  */
 
 import type { BotMediaOverview } from '@ts6/common';
+import { runningResourcesLabel } from './video-resources';
 import {
   SOURCE_MODE_LABELS, formatClock, lastStopLabel, qualityLabel, encoderLabel, formatTimeout, healthLabel,
 } from './video-streaming';
@@ -75,6 +76,8 @@ export function videoDetails(bot: BotMediaOverview, now: number): { label: strin
   ];
   if (v.paused) details.unshift({ label: 'State', value: 'Paused' });
   if (v.sourceMode) details.push({ label: 'Source', value: SOURCE_MODE_LABELS[v.sourceMode] });
+  const resources = runningResourcesLabel(v);
+  if (resources) details.push({ label: 'CPU', value: resources });
   if (v.health?.speed != null) details.push({ label: 'Encode health', value: healthLabel(v.health) });
   details.push({ label: 'Viewers', value: `${v.viewerCount} in channel` });
   if (v.startedAt) details.push({ label: 'Up for', value: formatClock(now - v.startedAt) });

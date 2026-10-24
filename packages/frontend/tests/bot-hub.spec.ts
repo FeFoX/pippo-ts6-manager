@@ -113,6 +113,42 @@ test('New bot creates a media bot on the chosen server', async ({ page, request 
   await expect(dialog).toBeHidden();
 });
 
+test('a bot\'s video CPU settings load, show what they inherit, and save only what changed', async ({ page, request }) => {
+  let saved: Record<string, unknown> | null = null;
+  const effective = { encodeThreads: 4, convertThreads: 2, cpuPriority: 'low' };
+  await page.route('**/api/music-bots/media', (r) => r.fulfill({ json: media(Date.now()) }));
+  await page.route('**/api/music-bots', (route) => route.fulfill({ json: summaries() }));
+  await page.route('**/api/music-bots/3/video-resources', async (route) => {
+    if (route.request().method() === 'PUT') {
+      saved = route.request().postDataJSON();
+      await route.fulfill({ json: { overrides: { encodeThreads: 8 }, effective: { ...effective, encodeThreads: 8 } } });
+      return;
+    }
+    await route.fulfill({ json: { overrides: { cpuPriority: 'low' }, effective } });
+  });
+  await signIn(page, request);
+  await page.goto('/bot-hub');
+
+  await page.getByRole('button', { name: 'Settings for Backup Bot' }).click();
+  await page.getByRole('menuitem', { name: 'Video CPU settings' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Video CPU settings: Backup Bot' });
+  await expect(dialog.getByLabel('CPU priority')).toHaveValue('low');
+  await expect(dialog.getByLabel('Encode threads')).toHaveAttribute('placeholder', 'Use default (4)');
+  await expect(dialog.getByLabel('Convert threads')).toHaveAttribute('placeholder', 'Use default (2)');
+  await expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled();
+
+  // Typing keeps digits only and clamps to 64.
+  await dialog.getByLabel('Encode threads').fill('8x');
+  await expect(dialog.getByLabel('Encode threads')).toHaveValue('8');
+  await dialog.getByLabel('Encode threads').fill('999');
+  await expect(dialog.getByLabel('Encode threads')).toHaveValue('64');
+  await dialog.getByLabel('Encode threads').fill('8');
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  // An empty field clears (null) so the bot inherits again; the priority it already had is kept.
+  await expect.poll(() => saved).toEqual({ encodeThreads: 8, convertThreads: null, cpuPriority: 'low' });
+  await expect(dialog).toBeHidden();
+});
+
 test('a bot\'s settings menu edits, stops, shows the widget link, and deletes', async ({ page, request }) => {
   const calls: string[] = [];
   await page.route('**/api/music-bots/media', (r) => r.fulfill({ json: media(Date.now()) }));
@@ -133,7 +169,7 @@ test('a bot\'s settings menu edits, stops, shows the widget link, and deletes', 
   const openMenu = () => page.getByRole('button', { name: 'Settings for Backup Bot' }).click();
 
   await openMenu();
-  await expect(page.getByRole('menuitem')).toHaveText(['Edit bot', 'Stop bot', 'Widget link', 'Delete bot']);
+  await expect(page.getByRole('menuitem')).toHaveText(['Edit bot', 'Stop bot', 'Widget link', 'Video CPU settings', 'Delete bot']);
   await page.getByRole('menuitem', { name: 'Edit bot' }).click();
   const edit = page.getByRole('dialog', { name: 'Edit bot' });
   await expect(edit.getByLabel('Bot name and TeamSpeak nickname')).toHaveValue('Backup Bot');

@@ -10,7 +10,7 @@ import { Label } from '@/components/ui/label';
 import { VideoOptions } from '@/components/video/VideoOptions';
 import { usePlayUrl, useStartVideoStream, useBotMedia } from '@/hooks/use-music-bots';
 import { ApiErrorAlert } from '@/components/ApiErrorAlert';
-import { useVideoStartOptions } from '@/hooks/use-video-streaming';
+import { useBotResourceDefaults, useVideoStartOptions } from '@/hooks/use-video-streaming';
 import { toastMediaStarted } from '@/lib/media-start-toast';
 import { cn } from '@/lib/utils';
 import {
@@ -28,6 +28,7 @@ export function LinkSource({ botId, serverConfigId }: ConsoleSourceContext) {
   const [input, setInput] = useState('');
   const [mode, setMode] = useState<LinkPlayMode>('music');
   const [options, setOptions, optionsLoading, defaults] = useVideoStartOptions(serverConfigId);
+  const resourceDefaults = useBotResourceDefaults(botId, defaults);
   const playUrl = usePlayUrl();
   const startVideo = useStartVideoStream();
   const media = useBotMedia();
@@ -151,7 +152,7 @@ export function LinkSource({ botId, serverConfigId }: ConsoleSourceContext) {
       </fieldset>
 
       {effectiveMode === 'video' && (
-        <VideoOptions value={options} onChange={setOptions} defaults={defaults} />
+        <VideoOptions value={options} onChange={setOptions} defaults={defaults} resourceDefaults={resourceDefaults} />
       )}
 
       {error && (

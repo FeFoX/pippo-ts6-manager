@@ -51,6 +51,7 @@ describe('console link request mapping', () => {
   it('passes chosen video options through', () => {
     assert.deepEqual(
       buildLinkStartRequest('https://youtu.be/abc', 'video', {
+        ...DEFAULT_VIDEO_START_OPTIONS,
         quality: '1080p',
         encoder: 'h264_vaapi',
         noViewerTimeout: '600',
@@ -63,6 +64,13 @@ describe('console link request mapping', () => {
         noViewerTimeoutSec: 600,
         sourceMode: 'live',
       },
+    );
+  });
+
+  it('passes the thread counts of one start through', () => {
+    assert.deepEqual(
+      buildLinkStartRequest('clip.mp4', 'video', { ...DEFAULT_VIDEO_START_OPTIONS, encodeThreads: '3', convertThreads: '0' }).body,
+      { source: 'clip.mp4', encodeThreads: 3, convertThreads: 0, sourceMode: 'auto' },
     );
   });
 

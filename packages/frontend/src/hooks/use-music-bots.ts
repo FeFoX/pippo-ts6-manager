@@ -280,6 +280,25 @@ export function useMoveQueueItem() {
 
 // === Video Streaming Hooks ===
 
+/** The bot's saved CPU settings (admin only); fetched only when something shows them. */
+export function useBotVideoResources(botId: number | null, enabled = true) {
+  return useQuery({
+    queryKey: ['bot-video-resources', botId],
+    queryFn: () => musicBotsApi.videoResources(botId!),
+    enabled: !!botId && enabled,
+    staleTime: 30_000,
+  });
+}
+
+export function useUpdateBotVideoResources(botId: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: Parameters<typeof musicBotsApi.updateVideoResources>[1]) =>
+      musicBotsApi.updateVideoResources(botId, data),
+    onSuccess: (resources) => qc.setQueryData(['bot-video-resources', botId], resources),
+  });
+}
+
 export function useVideoStreamStatus(botId: number | null) {
   return useQuery({
     queryKey: ['video-stream-status', botId],

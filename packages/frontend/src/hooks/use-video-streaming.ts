@@ -2,8 +2,10 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { VideoSourceModeRequest, VideoStreamSettings } from '@ts6/common';
 import { settingsApi } from '../api/settings.api';
+import { useBotVideoResources } from './use-music-bots';
 import { expensiveDiagnosticQueryOptions } from '../lib/demand-driven-query-policy';
 import { videoStartDefaults, type VideoStartOptions } from '../lib/video-options';
+import type { VideoResources } from '../lib/video-resources';
 
 export const VIDEO_STREAMING_SETTINGS_QUERY_KEY = ['video-streaming-settings'] as const;
 export const VIDEO_ENCODER_CAPABILITIES_QUERY_KEY = ['video-encoder-capabilities'] as const;
@@ -80,6 +82,20 @@ export function useVideoEncoderCapabilities() {
     isError: query.isError,
     error: query.error,
     check,
+  };
+}
+
+/**
+ * What an empty CPU field inherits for this bot: the bot's own resolved value, otherwise the
+ * server's. Undefined until the settings have loaded.
+ */
+export function useBotResourceDefaults(botId: number, server: VideoStreamSettings | undefined): VideoResources | undefined {
+  const bot = useBotVideoResources(botId).data?.effective;
+  if (!server) return undefined;
+  return {
+    encodeThreads: bot?.encodeThreads ?? server.encodeThreads,
+    convertThreads: bot?.convertThreads ?? server.convertThreads,
+    cpuPriority: bot?.cpuPriority ?? server.cpuPriority,
   };
 }
 

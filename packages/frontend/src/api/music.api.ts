@@ -1,7 +1,22 @@
 import api from './client';
 import type { BotMediaOverview, StartVideoStreamRequest, VideoStreamStatus } from '@ts6/common';
+import type { VideoResources } from '@/lib/video-resources';
 
 // === Music Bot API ===
+
+/**
+ * A bot's saved CPU settings. A key missing from `overrides` inherits the server's;
+ * `effective` is what its next stream uses.
+ */
+export interface BotVideoResources {
+  overrides: { [K in keyof VideoResources]?: VideoResources[K] | null };
+  effective: Partial<VideoResources>;
+}
+
+/** Keep a malformed or older response from reaching the UI without its two objects. */
+function normalizeBotVideoResources(data: Partial<BotVideoResources> | null | undefined): BotVideoResources {
+  return { overrides: data?.overrides ?? {}, effective: data?.effective ?? {} };
+}
 
 export const musicBotsApi = {
   list: () => api.get('/music-bots').then((r) => r.data),
@@ -70,6 +85,11 @@ export const musicBotsApi = {
     api.post(`/music-bots/${id}/stream/source`, { source, volume }, { timeout: 120000 }).then((r) => r.data),
   setStreamVolume: (id: number, volume: number) =>
     api.post(`/music-bots/${id}/stream/volume`, { volume }).then((r) => r.data),
+  videoResources: (id: number): Promise<BotVideoResources> =>
+    api.get(`/music-bots/${id}/video-resources`).then((r) => normalizeBotVideoResources(r.data)),
+  /** A value sets the field, null clears it so the bot inherits again, an omitted field is left alone. */
+  updateVideoResources: (id: number, data: { [K in keyof VideoResources]?: VideoResources[K] | null }): Promise<BotVideoResources> =>
+    api.put(`/music-bots/${id}/video-resources`, data).then((r) => normalizeBotVideoResources(r.data)),
   streamStatus: (id: number): Promise<VideoStreamStatus> =>
     api.get(`/music-bots/${id}/stream/status`).then((r) => r.data),
   kickViewer: (id: number, clid: number) => api.delete(`/music-bots/${id}/stream/viewer/${clid}`).then((r) => r.data),

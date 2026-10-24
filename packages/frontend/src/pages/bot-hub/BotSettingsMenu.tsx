@@ -5,7 +5,7 @@
 
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
-import { Link2, MoreHorizontal, Pencil, Power, PowerOff, Trash2 } from 'lucide-react';
+import { Cpu, Link2, MoreHorizontal, Pencil, Power, PowerOff, Trash2 } from 'lucide-react';
 import type { MusicBotSummary } from '@ts6/common';
 import { Button } from '@/components/ui/button';
 import {
@@ -17,6 +17,7 @@ import { musicBotsApi } from '@/api/music.api';
 import { useDeleteMusicBot, useStartMusicBot, useStopMusicBot } from '@/hooks/use-music-bots';
 import { apiErrorMessage } from '@/lib/api-error';
 import { BotFormDialog } from './BotFormDialog';
+import { BotVideoResourcesDialog } from './BotVideoResourcesDialog';
 import { WidgetLinkDialog } from './WidgetLinkDialog';
 
 /** A bot counts as running unless it is stopped or failed. */
@@ -39,6 +40,7 @@ export function BotSettingsMenu({ botId, botName, status, onDeleted, size = 'sm'
   const stopBot = useStopMusicBot();
   const deleteBot = useDeleteMusicBot();
   const [widgetOpen, setWidgetOpen] = useState(false);
+  const [resourcesOpen, setResourcesOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const running = isBotRunning(status);
 
@@ -87,6 +89,9 @@ export function BotSettingsMenu({ botId, botName, status, onDeleted, size = 'sm'
           <DropdownMenuItem onSelect={() => setWidgetOpen(true)}>
             <Link2 className="mr-2 h-4 w-4" aria-hidden="true" /> Widget link
           </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => setResourcesOpen(true)}>
+            <Cpu className="mr-2 h-4 w-4" aria-hidden="true" /> Video CPU settings
+          </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => setDeleteOpen(true)}>
             <Trash2 className="mr-2 h-4 w-4" aria-hidden="true" /> Delete bot
@@ -96,6 +101,7 @@ export function BotSettingsMenu({ botId, botName, status, onDeleted, size = 'sm'
 
       <BotFormDialog open={editOpen && !!summary} bot={summary} onClose={() => setEditOpen(false)} />
       <WidgetLinkDialog botId={botId} botName={botName} open={widgetOpen} onOpenChange={setWidgetOpen} />
+      <BotVideoResourcesDialog botId={botId} botName={botName} open={resourcesOpen} onOpenChange={setResourcesOpen} />
       <ConfirmDialog
         open={deleteOpen}
         onOpenChange={setDeleteOpen}

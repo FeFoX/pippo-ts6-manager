@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { VideoOptions } from '@/components/video/VideoOptions';
-import { useVideoStartOptions } from '@/hooks/use-video-streaming';
+import { useBotResourceDefaults, useVideoStartOptions } from '@/hooks/use-video-streaming';
 import { Pager } from '@/components/shared/Pager';
 import { ApiErrorAlert } from '@/components/ApiErrorAlert';
 import { apiErrorMessage } from '@/lib/api-error';
@@ -55,6 +55,7 @@ export function IptvSource({ serverConfigId, botId, searchParams }: ConsoleSourc
   const [groupPage, setGroupPage] = useState(1);
   const [groupPageSize, setGroupPageSize] = useState<PageSize>(() => rememberedPageSize('console-iptv-groups'));
   const [options, setOptions, optionsLoading, defaults] = useVideoStartOptions(serverConfigId, 'live');
+  const resourceDefaults = useBotResourceDefaults(botId, defaults);
   const playlistsQuery = useIptvPlaylists(serverConfigId);
   const filtersQuery = useIptvFilters(serverConfigId);
   const countries = filtersQuery.data?.countries ?? [];
@@ -189,7 +190,7 @@ export function IptvSource({ serverConfigId, botId, searchParams }: ConsoleSourc
     }
     return (
       <div className="space-y-4">
-        <VideoOptions value={options} onChange={setOptions} defaults={defaults} />
+        <VideoOptions value={options} onChange={setOptions} defaults={defaults} resourceDefaults={resourceDefaults} />
         {stream.error && <ApiErrorAlert error={stream.error} fallback="Failed to start stream" />}
         {favouriteError && <p role="alert" className="text-sm text-destructive">{apiErrorMessage(favouriteError, 'Could not load favourites')}</p>}
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -203,7 +204,7 @@ export function IptvSource({ serverConfigId, botId, searchParams }: ConsoleSourc
 
   return (
     <div className="min-w-0 space-y-4">
-      <VideoOptions value={options} onChange={setOptions} defaults={defaults} />
+      <VideoOptions value={options} onChange={setOptions} defaults={defaults} resourceDefaults={resourceDefaults} />
       {stream.error && <ApiErrorAlert error={stream.error} fallback="Failed to start stream" />}
       {favouriteError && <p role="alert" className="text-sm text-destructive">{apiErrorMessage(favouriteError, 'Could not load favourites')}</p>}
       {filtersQuery.error && <p role="alert" className="text-sm text-destructive">{apiErrorMessage(filtersQuery.error, 'Could not load filters')}</p>}
