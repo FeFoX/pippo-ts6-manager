@@ -112,6 +112,7 @@ export const VIDEO_PREFER_HARDWARE_KEY = 'video_prefer_hardware';
 export const VIDEO_MAX_BITRATE_KEY = 'video_max_bitrate_kbps';
 export const VIDEO_ENCODE_PROFILE_KEY = 'video_encode_profile';
 export const VIDEO_CPU_USED_KEY = 'video_cpu_used';
+export const VIDEO_ENCODE_THREADS_KEY = 'video_encode_threads';
 export const VIDEO_DIRECT_PACING_KEY = 'video_direct_pacing';
 export const VIDEO_DIRECT_FALLBACK_KEY = 'video_direct_fallback';
 /** JSON object with a bitrate in kbps for each resolution, e.g. {"720p":4000,"1080p":7000,...}. */
@@ -177,6 +178,9 @@ export function parseDirectFallback(value: unknown): VideoDirectFallback | null 
     : null;
 }
 
+/** Most encode threads the setting accepts; 0 means the sidecar works the number out. */
+export const MAX_ENCODE_THREADS = 64;
+
 /** Direct-stream packet pacing: 2.5 times the video's own bitrate unless the admin changes it. */
 export const DEFAULT_DIRECT_PACING = 2.5;
 export const MAX_DIRECT_PACING = 10;
@@ -200,6 +204,7 @@ export const VIDEO_STREAMING_SETTING_KEYS = [
   VIDEO_MAX_BITRATE_KEY,
   VIDEO_ENCODE_PROFILE_KEY,
   VIDEO_CPU_USED_KEY,
+  VIDEO_ENCODE_THREADS_KEY,
   VIDEO_DIRECT_PACING_KEY,
   VIDEO_DIRECT_FALLBACK_KEY,
   VIDEO_PRESET_BITRATES_KEY,
@@ -260,6 +265,7 @@ export function videoStreamingDefaults(env: NodeJS.ProcessEnv = process.env): Vi
     maxBitrateKbps,
     encodeProfile,
     cpuUsed: Math.max(MIN_CPU_USED, cpuUsed),
+    encodeThreads: 0,
     directPacing: DEFAULT_DIRECT_PACING,
     directFallback: DEFAULT_DIRECT_FALLBACK,
     presetBitrates: defaultPresetBitrates(),
@@ -294,6 +300,7 @@ export function parseVideoStreamingSettings(
     maxBitrateKbps,
     encodeProfile,
     cpuUsed,
+    encodeThreads: parseBoundedInt(stored.get(VIDEO_ENCODE_THREADS_KEY), MAX_ENCODE_THREADS) ?? defaults.encodeThreads,
     directPacing: parseDirectPacing(stored.get(VIDEO_DIRECT_PACING_KEY)) ?? defaults.directPacing,
     directFallback: parseDirectFallback(stored.get(VIDEO_DIRECT_FALLBACK_KEY)) ?? defaults.directFallback,
     presetBitrates: { ...defaults.presetBitrates, ...parsePresetBitratesLenient(stored.get(VIDEO_PRESET_BITRATES_KEY)) },
@@ -317,7 +324,7 @@ export function parseServerOverrides(raw: unknown): Partial<VideoStreamSettings>
   const accepted: Record<string, unknown> = {};
   for (const field of [
     'noViewerTimeoutSec', 'announceAutoStops', 'autoMaxPreset', 'defaultEncoder', 'preferHardware',
-    'maxBitrateKbps', 'encodeProfile', 'cpuUsed', 'directPacing', 'directFallback', 'presetBitrates',
+    'maxBitrateKbps', 'encodeProfile', 'cpuUsed', 'encodeThreads', 'directPacing', 'directFallback', 'presetBitrates',
   ] as const) {
     const value = (obj as Record<string, unknown>)[field];
     if (value === undefined) continue;
@@ -338,6 +345,7 @@ export function parseServerOverrides(raw: unknown): Partial<VideoStreamSettings>
     else if (row.key === VIDEO_MAX_BITRATE_KEY) out.maxBitrateKbps = Number(row.value);
     else if (row.key === VIDEO_ENCODE_PROFILE_KEY) out.encodeProfile = row.value as VideoEncodeProfile;
     else if (row.key === VIDEO_CPU_USED_KEY) out.cpuUsed = Number(row.value);
+    else if (row.key === VIDEO_ENCODE_THREADS_KEY) out.encodeThreads = Number(row.value);
     else if (row.key === VIDEO_DIRECT_PACING_KEY) out.directPacing = Number(row.value);
     else if (row.key === VIDEO_DIRECT_FALLBACK_KEY) out.directFallback = row.value as VideoDirectFallback;
     else if (row.key === VIDEO_PRESET_BITRATES_KEY) out.presetBitrates = JSON.parse(row.value) as PresetBitrates;
@@ -429,6 +437,12 @@ export function parseVideoStreamingUpdate(body: Record<string, unknown> | null |
     if (n == null) return { ok: false, error: `cpuUsed must be ${MIN_CPU_USED}–${MAX_CPU_USED}` };
     rows.push({ key: VIDEO_CPU_USED_KEY, value: String(n) });
     if (b.encodeProfile === undefined) rows.push({ key: VIDEO_ENCODE_PROFILE_KEY, value: 'custom' });
+  }
+
+  if (b.encodeThreads !== undefined) {
+    const n = parseBoundedInt(b.encodeThreads, MAX_ENCODE_THREADS);
+    if (n == null) return { ok: false, error: `encodeThreads must be 0–${MAX_ENCODE_THREADS} (0 = automatic)` };
+    rows.push({ key: VIDEO_ENCODE_THREADS_KEY, value: String(n) });
   }
 
   if (b.directPacing !== undefined) {

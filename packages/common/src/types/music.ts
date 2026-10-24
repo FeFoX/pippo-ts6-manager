@@ -400,6 +400,11 @@ export interface VideoStreamSettings {
   /** libvpx `-cpu-used` (higher = faster). Hardware encoders ignore this. */
   cpuUsed: number;
   /**
+   * Threads the software VP8 and VP9 encoders use, and the cap for a convert-first conversion.
+   * 0 = automatic: the CPUs the container may really use (its CPU quota), or `VIDEO_ENCODE_THREADS`.
+   */
+  encodeThreads: number;
+  /**
    * Direct streams only: spread the packets of each frame over time at this multiple of the
    * video's own bitrate, so a keyframe does not leave as one burst. 0 = off, otherwise 1 to 10.
    */

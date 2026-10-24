@@ -31,6 +31,8 @@ export interface SidecarSourceOptions {
   allowedHosts?: string[];
   /** libvpx -cpu-used override; omit or 0 keeps sidecar env default. */
   cpuUsed?: number;
+  /** Software VP8/VP9 encode threads; 0 or absent = the sidecar decides. */
+  threads?: number;
   /** Second remote input carrying the audio, when `source` is video only (YouTube direct). */
   audioSource?: string;
   /** Start a VOD or file source at this offset in seconds (a seek); live sources ignore it. */
@@ -49,6 +51,10 @@ export interface SidecarConvertOptions {
   width: number;
   height: number;
   bitrate: string;
+  /** The source's own video bitrate in kbps; the conversion's cap is not raised above it. */
+  sourceBitrateKbps?: number;
+  /** The "Encode threads" setting; the conversion uses at most two of them. */
+  threads?: number;
   preset: 'ultrafast' | 'superfast' | 'veryfast';
   /** Keyframe interval in frames. */
   gop: number;

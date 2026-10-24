@@ -118,6 +118,8 @@ export interface DirectCheck {
   codec: 'h264' | 'vp9' | null;
   /** Length in seconds when the probe reported one (a live source has none). */
   durationSec?: number;
+  /** The video's own bitrate in kbps when the probe reported one. */
+  bitrateKbps?: number;
 }
 
 /** How many packets are read to look for frame reordering. */
@@ -127,7 +129,7 @@ export function directProbeArgs(path: string): string[] {
   return [
     '-v', 'error',
     '-select_streams', 'v:0',
-    '-show_entries', 'stream=codec_name,profile,pix_fmt,has_b_frames:packet=pts,dts:format=duration',
+    '-show_entries', 'stream=codec_name,profile,pix_fmt,has_b_frames,bit_rate:packet=pts,dts:format=duration,bit_rate',
     '-read_intervals', `%+#${DIRECT_PROBE_PACKETS}`,
     '-of', 'json',
     path,
@@ -152,7 +154,12 @@ const NO_COPY = (reason: string): DirectCheck => ({ ok: false, reason, codec: nu
 export function parseDirectCheck(stdout: string | null): DirectCheck {
   const check = judgeDirect(stdout);
   const duration = durationOf(stdout);
-  return duration != null ? { ...check, durationSec: duration } : check;
+  const bitrate = bitrateOf(stdout);
+  return {
+    ...check,
+    ...(duration != null ? { durationSec: duration } : {}),
+    ...(bitrate != null ? { bitrateKbps: bitrate } : {}),
+  };
 }
 
 /** The reason a probe gave no verdict, as opposed to a verdict that the picture cannot be copied. */
@@ -166,6 +173,22 @@ function durationOf(stdout: string | null): number | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The video's bitrate in kbps: the stream's own figure, else the container's (which also counts
+ * the audio, so it can only be too high). Null when the probe gave neither.
+ */
+function bitrateOf(stdout: string | null): number | null {
+  if (!stdout) return null;
+  try {
+    const data = JSON.parse(stdout) as { streams?: Array<{ bit_rate?: string }>; format?: { bit_rate?: string } };
+    for (const raw of [data.streams?.[0]?.bit_rate, data.format?.bit_rate]) {
+      const bps = Number(raw);
+      if (Number.isFinite(bps) && bps > 0) return Math.max(1, Math.round(bps / 1000));
+    }
+  } catch { /* the verdict already says the probe was unreadable */ }
+  return null;
 }
 
 function judgeDirect(stdout: string | null): DirectCheck {

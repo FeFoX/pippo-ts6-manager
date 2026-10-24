@@ -8,6 +8,7 @@ import {
   VIDEO_DIRECT_FALLBACK_KEY,
   VIDEO_DIRECT_PACING_KEY,
   VIDEO_ENCODE_PROFILE_KEY,
+  VIDEO_ENCODE_THREADS_KEY,
   VIDEO_MAX_BITRATE_KEY,
   VIDEO_NO_VIEWER_TIMEOUT_KEY,
   VIDEO_PREFER_HARDWARE_KEY,
@@ -35,6 +36,7 @@ describe('video streaming settings', () => {
       maxBitrateKbps: 7000,
       encodeProfile: 'balanced',
       cpuUsed: 4,
+      encodeThreads: 0,
       directPacing: 2.5,
       directFallback: 'ultrafast',
       presetBitrates: DEFAULT_PRESET_BITRATES,
@@ -61,6 +63,7 @@ describe('video streaming settings', () => {
         maxBitrateKbps: 12000,
         encodeProfile: 'custom',
         cpuUsed: 6,
+        encodeThreads: 0,
         directPacing: 2.5,
         directFallback: 'ultrafast',
         presetBitrates: DEFAULT_PRESET_BITRATES,
@@ -96,6 +99,7 @@ describe('video streaming settings', () => {
       maxBitrateKbps: 0,
       encodeProfile: 'quality',
       cpuUsed: 2,
+      encodeThreads: 0,
       directPacing: 2.5,
       directFallback: 'ultrafast',
       presetBitrates: DEFAULT_PRESET_BITRATES,
@@ -279,6 +283,36 @@ describe('direct stream fallback setting', () => {
     assert.deepEqual(parseServerOverrides({ directFallback: 'superfast' }), { directFallback: 'superfast' });
     assert.deepEqual(parseServerOverrides({ directFallback: 'slow' }), {});
   });
+  describe('encode threads', () => {
+    it('is automatic (0) until an admin sets it', () => {
+      assert.equal(parseVideoStreamingSettings(new Map()).encodeThreads, 0);
+    });
+
+    it('reads a stored count and ignores one out of range', () => {
+      assert.equal(parseVideoStreamingSettings(new Map([[VIDEO_ENCODE_THREADS_KEY, '3']])).encodeThreads, 3);
+      for (const bad of ['65', '-1', 'x', '2.5']) {
+        assert.equal(parseVideoStreamingSettings(new Map([[VIDEO_ENCODE_THREADS_KEY, bad]])).encodeThreads, 0, bad);
+      }
+    });
+
+    it('is saved from the settings page and refuses anything else', () => {
+      assert.deepEqual(parseVideoStreamingUpdate({ encodeThreads: 3 }), {
+        ok: true, rows: [{ key: VIDEO_ENCODE_THREADS_KEY, value: '3' }],
+      });
+      assert.deepEqual(parseVideoStreamingUpdate({ encodeThreads: 0 }), {
+        ok: true, rows: [{ key: VIDEO_ENCODE_THREADS_KEY, value: '0' }],
+      });
+      for (const bad of [65, -1, 'many', 2.5]) {
+        assert.equal(parseVideoStreamingUpdate({ encodeThreads: bad }).ok, false, String(bad));
+      }
+    });
+
+    it('can be set for one server only', () => {
+      assert.deepEqual(parseServerOverrides({ encodeThreads: 2 }), { encodeThreads: 2 });
+      assert.deepEqual(parseServerOverrides({ encodeThreads: 99 }), {});
+    });
+  });
+
   describe('bitrate per resolution', () => {
     function prismaWith(rows: Record<string, string>) {
       return {

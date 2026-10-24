@@ -61,6 +61,7 @@ const FIELD_LABELS: Record<keyof VideoStreamSettings, string> = {
   maxBitrateKbps: 'bitrate limit',
   encodeProfile: 'encode profile',
   cpuUsed: 'encode speed',
+  encodeThreads: 'encode threads',
   directPacing: 'direct stream pacing',
   directFallback: 'direct stream fallback',
   presetBitrates: 'bitrate per resolution',
@@ -386,6 +387,23 @@ export function VideoStreamDefaultsCard({ server }: VideoStreamDefaultsCardProps
                 <p className="text-xs text-muted-foreground">
                   0 = use sidecar default (VIDEO_CPU_USED / VIDEO_VP9_CPU_USED).
                   1–8 override software VP8/VP9 (higher is faster / softer). Hardware ignores this.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="encode-threads">Encode threads</Label>
+                <Input
+                  id="encode-threads"
+                  type="number"
+                  min={0}
+                  max={64}
+                  value={draft.encodeThreads}
+                  onChange={(e) => set('encodeThreads', Math.min(64, Math.max(0, Math.floor(Number(e.target.value) || 0))))}
+                />
+                <p className="text-xs text-muted-foreground">
+                  0 = automatic: the CPUs this container may use (its CPU limit), or VIDEO_ENCODE_THREADS.
+                  Set it to the container&apos;s CPU limit if the host has more cores than that.
+                  Applies to software VP8/VP9; a convert-first conversion uses at most 2.
                 </p>
               </div>
 

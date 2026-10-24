@@ -33,6 +33,7 @@ import { SidecarClient, type SidecarEncoderSession } from './streaming/sidecar-c
 import { SidecarProcess, type SidecarConfig } from './streaming/sidecar-process.js';
 import { STREAM_PRESETS, DEFAULT_PRESET, type VideoViewerInfo, type VideoStreamStatus } from './streaming/types.js';
 import { downloadVideoForStream, safeUnlinkStreamTemp, resolvePathUnderMusicDir } from './streaming/video-download.js';
+import { convertGiveUpReason } from './streaming/convert-limits.js';
 import { effectiveBitrate, normalizeQualityRequest, presetBitrate, resolveQuality } from './streaming/quality.js';
 import {
   ENCODER_CODEC,
@@ -161,6 +162,13 @@ interface ResolvedStreamSource {
   durationSec: number | null;
   resolution?: { width: number; height: number };
 }
+
+/**
+ * How long a seek or resume waits for the video's address to be worked out again (yt-dlp) before it
+ * fails. Pause, resume and seek of a bot run one after another, so a slow extractor would
+ * otherwise hold every later one.
+ */
+const SEEK_RESOLVE_TIMEOUT_MS = 30_000;
 
 /** How often a running conversion is asked how far it is. */
 const CONVERT_POLL_MS = 2_000;
@@ -712,15 +720,9 @@ export class VoiceBot extends EventEmitter {
   private async resolveStreamSource(
     source: string,
     maxHeight: number,
-  ): Promise<{
-    path: string;
-    /** Second remote input with the audio (YouTube direct, above 720p). */
-    audioPath?: string;
-    loop: boolean;
-    live?: boolean;
-    durationSec: number | null;
-    resolution?: { width: number; height: number };
-  }> {
+    /** True once the caller gave up waiting: the result is then dropped, not applied. */
+    isAbandoned: () => boolean = () => false,
+  ): Promise<ResolvedStreamSource> {
     const maxDur = this.config.maxVideoDurationSec ?? 900;
     const youtubeDirect = await this.youtubeDirectStream();
     const { path: filePath, audioPath, durationSec, live, resolution } = await downloadVideoForStream(
@@ -730,6 +732,11 @@ export class VoiceBot extends EventEmitter {
       { localHosts: this._videoLocalHosts, youtubeDirect, forDirect: this._videoDirectRequested },
     );
     const isDownloadedTemp = filePath.includes('.stream-') && filePath.endsWith('.mp4');
+    if (isAbandoned()) {
+      // Too late: a seek stopped waiting for this, and the stream must not pick up its state.
+      if (isDownloadedTemp) safeUnlinkStreamTemp(filePath);
+      throw new Error('The video address arrived after the request had given up');
+    }
 
     // Clear any prior end-stop timer; applyVideoSource schedules a new one only
     // after sendSourceToSidecar succeeds (avoids Auto probe + setup eating the
@@ -1520,6 +1527,25 @@ export class VoiceBot extends EventEmitter {
     return run;
   }
 
+  /** `resolveStreamSource` for a seek, which gives up after SEEK_RESOLVE_TIMEOUT_MS. */
+  private async resolveForSeek(source: string, maxHeight: number): Promise<ResolvedStreamSource> {
+    let abandoned = false;
+    let timer: NodeJS.Timeout | undefined;
+    const work = this.resolveStreamSource(source, maxHeight, () => abandoned);
+    const limit = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        abandoned = true;
+        reject(new Error(`Reopening the video took longer than ${SEEK_RESOLVE_TIMEOUT_MS / 1000} s`));
+      }, SEEK_RESOLVE_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([work, limit]);
+    } finally {
+      clearTimeout(timer);
+      work.catch(() => { /* its failure after the timeout has nobody to tell */ });
+    }
+  }
+
   private async seekVideoNow(seconds: number): Promise<void> {
     if (!this.canSeekVideo || this._videoSource == null) {
       throw new Error('This video cannot be seeked');
@@ -1544,7 +1570,7 @@ export class VoiceBot extends EventEmitter {
     } else {
       // No local copy: this seek goes back to the remote site.
       await this.claimRemoteSeek();
-      const resolved = await this.resolveStreamSource(source, STREAM_PRESETS[quality.actual].height);
+      const resolved = await this.resolveForSeek(source, STREAM_PRESETS[quality.actual].height);
       sourcePath = resolved.path;
       audioPath = resolved.audioPath;
       loop = resolved.loop;
@@ -2272,6 +2298,7 @@ export class VoiceBot extends EventEmitter {
       + 'it starts by itself when the conversion is finished.',
     );
     const startedAt = Date.now();
+    let jobId: string | null = null;
     try {
       const job = await sidecar.convertStart({
         source: resolved.path,
@@ -2279,13 +2306,18 @@ export class VoiceBot extends EventEmitter {
         width: quality.width,
         height: quality.height,
         bitrate,
+        sourceBitrateKbps: check.bitrateKbps,
+        threads: this._videoSettings.encodeThreads > 0 ? this._videoSettings.encodeThreads : undefined,
         preset: fallback,
         gop: Math.min(60, Math.max(10, Math.round(fps))),
         durationSec: duration,
         allowedHosts: this._videoLocalHosts,
       });
+      jobId = job.id;
       this._videoPrep = { stage: 'converting', percent: 0, speed: null, etaSec: null, jobId: job.id };
       let failures = 0;
+      let lastPercent = -1;
+      let lastMoveAt = Date.now();
       for (;;) {
         await new Promise((r) => setTimeout(r, CONVERT_POLL_MS));
         this.throwIfStartAborted();
@@ -2306,7 +2338,20 @@ export class VoiceBot extends EventEmitter {
           etaSec: percent != null && speed ? Math.round(((100 - percent) / 100) * duration / speed) : null,
           jobId: job.id,
         };
-        if (st.state === 'running') continue;
+        if (st.state === 'running') {
+          // A stalled ffmpeg keeps reporting "running"; do not wait out the sidecar's own limit.
+          const now = Date.now();
+          if (st.percent !== lastPercent) {
+            lastPercent = st.percent;
+            lastMoveAt = now;
+          }
+          const giveUp = convertGiveUpReason(
+            { elapsedMs: now - startedAt, stalledMs: now - lastMoveAt, etaSec: this._videoPrep?.etaSec ?? null },
+            duration,
+          );
+          if (giveUp) throw new Error(giveUp);
+          continue;
+        }
         if (st.state === 'done') break;
         throw new Error(st.state === 'cancelled' ? 'conversion cancelled' : (st.error || 'conversion failed'));
       }
@@ -2324,6 +2369,8 @@ export class VoiceBot extends EventEmitter {
       return { path: converted, loop: false, live: false, durationSec: duration };
     } catch (err: any) {
       this._videoPrep = null;
+      // Do not leave ffmpeg converting a video nobody is waiting for; a job that ended answers 404.
+      if (jobId) void sidecar.convertCancel(jobId).catch(() => { /* already finished or gone */ });
       if (this._videoStartAbortError || this._videoPrepCancelled) throw this._videoStartAbortError ?? err;
       console.warn(`[VoiceBot ${this.config.id}] Conversion for a direct stream failed: ${err?.message ?? err}`);
       this._videoPrepNote = `Converting it first failed (${String(err?.message ?? err).slice(0, 160)}), so it is re-encoded while it plays.`;
@@ -2349,7 +2396,15 @@ export class VoiceBot extends EventEmitter {
       this._videoDirectFallback = null;
       return null;
     }
-    if (this._videoDirect !== null && this._videoDirectPath === sourcePath) return this._videoDirectCodec;
+    if (this._videoDirect !== null && this._videoDirectPath === sourcePath) {
+      // The file was inspected already, but the viewers' codec may have been settled since.
+      const cachedCodec = this._videoDirectCodec;
+      if (cachedCodec && this._videoActiveCodec && this._videoActiveCodec !== cachedCodec) {
+        this.rejectDirectCodec(cachedCodec);
+        return null;
+      }
+      return cachedCodec;
+    }
     let codec: 'h264' | 'vp9' | null = null;
     let reason: string | null = null;
     if (audioSource) {
@@ -2363,7 +2418,7 @@ export class VoiceBot extends EventEmitter {
     // Viewers who already joined negotiated a codec for the whole stream; a source in another
     // codec cannot be copied to them.
     if (codec && this._videoActiveCodec && this._videoActiveCodec !== codec) {
-      reason = `viewers are already receiving ${this._videoActiveCodec.toUpperCase()} and this video is ${codec.toUpperCase()}`;
+      reason = this.codecMismatchReason(codec);
       codec = null;
     }
     this._videoDirect = codec !== null;
@@ -2378,6 +2433,19 @@ export class VoiceBot extends EventEmitter {
       console.log(`[VoiceBot ${this.config.id}] Direct stream: the ${codec.toUpperCase()} video is copied, not re-encoded`);
     }
     return codec;
+  }
+
+  private codecMismatchReason(sourceCodec: 'h264' | 'vp9'): string {
+    return `viewers are already receiving ${this._videoActiveCodec!.toUpperCase()} and this video is ${sourceCodec.toUpperCase()}`;
+  }
+
+  /** A remembered "copy this" decision no longer holds: viewers settled on another codec. */
+  private rejectDirectCodec(sourceCodec: 'h264' | 'vp9'): void {
+    const reason = this.codecMismatchReason(sourceCodec);
+    this._videoDirect = false;
+    this._videoDirectCodec = null;
+    this._videoDirectFallback = `Direct stream not possible: ${reason}. ${this._videoPrepNote ?? 'The video is re-encoded.'}`;
+    console.log(`[VoiceBot ${this.config.id}] Direct stream falls back to re-encoding: ${reason}`);
   }
 
   /** The encoder for a re-encode: the chosen one, kept in the codec the viewers already negotiated. */
@@ -2417,6 +2485,7 @@ export class VoiceBot extends EventEmitter {
       mode,
       allowedHosts: this._videoLocalHosts,
       cpuUsed: this._videoSettings.cpuUsed,
+      threads: this._videoSettings.encodeThreads > 0 ? this._videoSettings.encodeThreads : undefined,
       audioSource,
       startSeconds: startSeconds > 0 ? startSeconds : undefined,
       passthrough: directCodec ? true : undefined,
