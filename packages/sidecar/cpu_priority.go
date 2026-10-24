@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strings"
+	"sync"
 )
 
 // The manager's "CPU priority" setting lowers how much ffmpeg competes with the rest of the host
@@ -23,16 +25,25 @@ func validCPUPriority(p string) bool {
 	return false
 }
 
+var warnBadPriorityEnv sync.Once
+
 // resolveCPUPriority picks the level for a request: the request's own, else
 // VIDEO_CPU_PRIORITY, else normal.
 func resolveCPUPriority(requested string) string {
 	if requested != "" {
 		return requested
 	}
-	if env := strings.ToLower(strings.TrimSpace(os.Getenv("VIDEO_CPU_PRIORITY"))); validCPUPriority(env) && env != "" {
-		return env
+	env := strings.ToLower(strings.TrimSpace(os.Getenv("VIDEO_CPU_PRIORITY")))
+	if env == "" {
+		return cpuPriorityNormal
 	}
-	return cpuPriorityNormal
+	if !validCPUPriority(env) {
+		warnBadPriorityEnv.Do(func() {
+			log.Printf("[FFmpeg] Ignoring VIDEO_CPU_PRIORITY=%q: use normal, low or lowest", os.Getenv("VIDEO_CPU_PRIORITY"))
+		})
+		return cpuPriorityNormal
+	}
+	return env
 }
 
 // niceFor is the nice value of a level: 0 leaves ffmpeg alone, 10 is a clear step down, 19 only

@@ -379,7 +379,7 @@ export function parseServerOverrides(raw: unknown): Partial<VideoStreamSettings>
     else if (row.key === VIDEO_CPU_USED_KEY) out.cpuUsed = Number(row.value);
     else if (row.key === VIDEO_ENCODE_THREADS_KEY) out.encodeThreads = Number(row.value);
     else if (row.key === VIDEO_CONVERT_THREADS_KEY) out.convertThreads = Number(row.value);
-    else if (row.key === VIDEO_CPU_PRIORITY_KEY) out.cpuPriority = row.value as VideoCpuPriority;
+    else if (row.key === VIDEO_CPU_PRIORITY_KEY) out.cpuPriority = parseCpuPriority(row.value) ?? DEFAULT_CPU_PRIORITY;
     else if (row.key === VIDEO_DIRECT_PACING_KEY) out.directPacing = Number(row.value);
     else if (row.key === VIDEO_DIRECT_FALLBACK_KEY) out.directFallback = row.value as VideoDirectFallback;
     else if (row.key === VIDEO_PRESET_BITRATES_KEY) out.presetBitrates = JSON.parse(row.value) as PresetBitrates;
