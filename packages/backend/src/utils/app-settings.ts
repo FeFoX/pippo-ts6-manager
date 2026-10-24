@@ -53,6 +53,10 @@ export const SEEK_COOLDOWN_KEY = 'seek_cooldown_seconds';
 
 export const DEFAULT_SEEK_COOLDOWN_SEC = 120;
 export const MAX_SEEK_COOLDOWN_SEC = 86_400;
+/** Seconds between two resumes of a paused video that has to be opened again on its remote site. */
+export const RESUME_COOLDOWN_KEY = 'resume_cooldown_seconds';
+export const DEFAULT_RESUME_COOLDOWN_SEC = 10;
+export const MAX_RESUME_COOLDOWN_SEC = 3_600;
 const MAX_CONTROL_GROUPS = 20;
 const MAX_CONTROL_GROUP_NAME_LENGTH = 100;
 
@@ -64,6 +68,16 @@ export function parseSeekCooldown(raw: string | null | undefined, fallback = DEF
 export async function loadSeekCooldownSec(prisma: PrismaClient): Promise<number> {
   const row = await prisma.appSetting.findUnique({ where: { key: SEEK_COOLDOWN_KEY } });
   return parseSeekCooldown(row?.value);
+}
+
+/** Seconds between remote resumes; 0 turns the limit off. Anything unreadable gives the default. */
+export function parseResumeCooldown(raw: string | null | undefined, fallback = DEFAULT_RESUME_COOLDOWN_SEC): number {
+  return parseBoundedInt(raw, MAX_RESUME_COOLDOWN_SEC) ?? fallback;
+}
+
+export async function loadResumeCooldownSec(prisma: PrismaClient): Promise<number> {
+  const row = await prisma.appSetting.findUnique({ where: { key: RESUME_COOLDOWN_KEY } });
+  return parseResumeCooldown(row?.value);
 }
 
 /** The stored list; a damaged value reads as "none". */

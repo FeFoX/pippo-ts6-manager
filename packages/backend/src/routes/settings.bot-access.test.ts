@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import express, { type Express } from 'express';
 import { settingsRoutes } from './settings.routes.js';
 import { errorHandler } from '../middleware/error-handler.js';
-import { loadBotControlGroups, loadSeekCooldownSec } from '../utils/app-settings.js';
+import { loadBotControlGroups, loadResumeCooldownSec, loadSeekCooldownSec } from '../utils/app-settings.js';
 
 function fakePrisma() {
   const settings = new Map<string, string>();
@@ -91,6 +91,24 @@ describe('bot access and seek cooldown settings', () => {
       assert.equal(await loadSeekCooldownSec(prisma), 45);
       assert.equal((await put(`${s.base}/limits`, { seekCooldownSeconds: 0 })).status, 200);
       assert.equal(await loadSeekCooldownSec(prisma), 0);
+    } finally { await s.close(); }
+  });
+
+  it('shows ten seconds for the resume cooldown until changed, and an update leaves the seek cooldown alone', async () => {
+    const { prisma } = fakePrisma();
+    const s = await serve('admin', prisma);
+    try {
+      assert.equal((await (await fetch(`${s.base}/limits`)).json()).resumeCooldownSeconds, 10);
+      assert.equal((await put(`${s.base}/limits`, { resumeCooldownSeconds: 25 })).status, 200);
+      assert.equal((await (await fetch(`${s.base}/limits`)).json()).resumeCooldownSeconds, 25);
+      assert.equal(await loadResumeCooldownSec(prisma), 25);
+      assert.equal(await loadSeekCooldownSec(prisma), 120);
+      assert.equal((await put(`${s.base}/limits`, { resumeCooldownSeconds: 0 })).status, 200);
+      assert.equal(await loadResumeCooldownSec(prisma), 0);
+      for (const bad of [-1, 1.5, 'soon', 3_601]) {
+        assert.equal((await put(`${s.base}/limits`, { resumeCooldownSeconds: bad })).status, 400, String(bad));
+      }
+      assert.equal(await loadResumeCooldownSec(prisma), 0);
     } finally { await s.close(); }
   });
 

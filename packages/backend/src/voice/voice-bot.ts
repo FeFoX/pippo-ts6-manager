@@ -63,7 +63,7 @@ import {
   resolveSourceMode,
   type AutoStopMedia,
 } from './streaming/lifecycle.js';
-import { videoStreamingDefaults, DEFAULT_SEEK_COOLDOWN_SEC } from '../utils/app-settings.js';
+import { videoStreamingDefaults, DEFAULT_SEEK_COOLDOWN_SEC, DEFAULT_RESUME_COOLDOWN_SEC } from '../utils/app-settings.js';
 import { AppError } from '../middleware/error-handler.js';
 import { MediaSessionConflictError, newMediaSessionId, safeSourceLabel } from './media-session.js';
 
@@ -76,10 +76,19 @@ export interface PlaybackProgress {
   duration: number;  // seconds
 }
 
-/** Thrown when a remote source is seeked again before the cooldown has passed. */
+/**
+ * Thrown when a remote source is seeked (or, with `kind` 'resume', a paused remote video is
+ * resumed) again before the cooldown has passed.
+ */
 export class SeekRateLimitedError extends Error {
-  constructor(readonly retryAfterSec: number, readonly cooldownSec: number) {
-    super(`Seeking a remote source is limited to once every ${cooldownSec} seconds; try again in ${retryAfterSec} s`);
+  constructor(
+    readonly retryAfterSec: number,
+    readonly cooldownSec: number,
+    readonly kind: 'seek' | 'resume' = 'seek',
+  ) {
+    super(kind === 'resume'
+      ? `Resuming a remote video is limited to once every ${cooldownSec} seconds; try again in ${retryAfterSec} s`
+      : `Seeking a remote source is limited to once every ${cooldownSec} seconds; try again in ${retryAfterSec} s`);
     this.name = 'SeekRateLimitedError';
   }
 }
@@ -109,6 +118,10 @@ export interface VoiceBotConfig {
   seekCooldownSec?: number;
   /** Reads the "Seek cooldown" setting of the web panel at the moment of each remote seek. */
   loadSeekCooldownSec?: () => Promise<number>;
+  /** Fixed seconds between remote resumes for this bot; tests use it. Normally the panel's setting applies. */
+  resumeCooldownSec?: number;
+  /** Reads the "Resume cooldown" setting of the web panel at the moment of each remote resume. */
+  loadResumeCooldownSec?: () => Promise<number>;
   videoStreamVolume?: number;
   /** Loads admin video-streaming defaults when a stream starts (falls back to env defaults). */
   loadVideoSettings?: () => Promise<VideoStreamSettings>;
@@ -307,6 +320,7 @@ export class VoiceBot extends EventEmitter {
   private _videoSeekChain: Promise<void> = Promise.resolve();
   /** When a seek on a remote source was last allowed (0 = never). */
   private _lastRemoteSeekAt = 0;
+  private _lastRemoteResumeAt = 0;
   private _viewers: Map<number, VideoViewerInfo> = new Map();
   private _videoTempFile: string | null = null;
   private _videoEndTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1433,6 +1447,30 @@ export class VoiceBot extends EventEmitter {
     this._lastRemoteSeekAt = now;
   }
 
+  /**
+   * A paused remote video is opened again on resume. That is exempt from the seek cooldown, but
+   * a short floor between resumes keeps pause and resume from reopening the site over and over.
+   */
+  private async claimRemoteResume(): Promise<void> {
+    const cooldownMs = (await this.resumeCooldownSec()) * 1000;
+    if (cooldownMs <= 0) return;
+    const now = Date.now();
+    const waitMs = this._lastRemoteResumeAt + cooldownMs - now;
+    if (this._lastRemoteResumeAt > 0 && waitMs > 0) {
+      throw new SeekRateLimitedError(Math.ceil(waitMs / 1000), Math.round(cooldownMs / 1000), 'resume');
+    }
+    this._lastRemoteResumeAt = now;
+  }
+
+  private async resumeCooldownSec(): Promise<number> {
+    if (this.config.resumeCooldownSec != null) return this.config.resumeCooldownSec;
+    try {
+      return (await this.config.loadResumeCooldownSec?.()) ?? DEFAULT_RESUME_COOLDOWN_SEC;
+    } catch {
+      return DEFAULT_RESUME_COOLDOWN_SEC;
+    }
+  }
+
   private async seekCooldownSec(): Promise<number> {
     if (this.config.seekCooldownSec != null) return this.config.seekCooldownSec;
     try {
@@ -1453,7 +1491,6 @@ export class VoiceBot extends EventEmitter {
     return this._videoStreaming && this._videoPaused;
   }
 
-  /** The running stream was started as a direct (no re-encoding) stream. */
   /** A start is under way (downloading, converting) and the stream is not up yet. */
   get videoStarting(): boolean {
     return this._videoStarting && !this._videoStreaming;
@@ -1465,6 +1502,7 @@ export class VoiceBot extends EventEmitter {
     return p ? { stage: p.stage, percent: p.percent, speed: p.speed, etaSec: p.etaSec } : null;
   }
 
+  /** The running stream was started as a direct (no re-encoding) stream. */
   get videoDirectRequested(): boolean {
     return this._videoStreaming && this._videoDirectRequested;
   }
@@ -1504,7 +1542,9 @@ export class VoiceBot extends EventEmitter {
 
   /**
    * Continue a paused video from where it stopped. A video without a local copy is opened
-   * again on its remote site, so that counts as a seek for the seek cooldown.
+   * again on its remote site, but a resume goes back to the position it already had, so it
+   * does not count against the seek cooldown: pausing is a basic control and must not leave
+   * the video stuck for the length of the cooldown. Only a short resume cooldown applies.
    */
   resumeVideo(): Promise<void> {
     const run = this._videoSeekChain.then(() => this.resumeVideoNow());
@@ -1514,7 +1554,7 @@ export class VoiceBot extends EventEmitter {
 
   private async resumeVideoNow(): Promise<void> {
     if (!this._videoStreaming || !this._videoPaused) return;
-    await this.seekVideoNow(this._videoPausedAtSec);
+    await this.seekVideoNow(this._videoPausedAtSec, { resume: true });
     // sendSourceToSidecar cleared the flag when ffmpeg started again.
     console.log(`[VoiceBot ${this.config.id}] Video resumed`);
     this.emit('statusChange', this._status);
@@ -1546,7 +1586,7 @@ export class VoiceBot extends EventEmitter {
     }
   }
 
-  private async seekVideoNow(seconds: number): Promise<void> {
+  private async seekVideoNow(seconds: number, opts: { resume?: boolean } = {}): Promise<void> {
     if (!this.canSeekVideo || this._videoSource == null) {
       throw new Error('This video cannot be seeked');
     }
@@ -1568,8 +1608,9 @@ export class VoiceBot extends EventEmitter {
     if (tempPath) {
       sourcePath = tempPath;
     } else {
-      // No local copy: this seek goes back to the remote site.
-      await this.claimRemoteSeek();
+      // No local copy: this seek goes back to the remote site. A resume has its own, shorter cooldown.
+      if (opts.resume) await this.claimRemoteResume();
+      else await this.claimRemoteSeek();
       const resolved = await this.resolveForSeek(source, STREAM_PRESETS[quality.actual].height);
       sourcePath = resolved.path;
       audioPath = resolved.audioPath;

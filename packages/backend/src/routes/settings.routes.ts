@@ -20,6 +20,9 @@ import {
   MAX_SEEK_COOLDOWN_SEC,
   BOT_CONTROL_GROUPS_KEY,
   parseSeekCooldown,
+  RESUME_COOLDOWN_KEY,
+  MAX_RESUME_COOLDOWN_SEC,
+  parseResumeCooldown,
   parseBoundedInt,
   parseControlGroupsUpdate,
   loadBotControlGroups,
@@ -169,7 +172,7 @@ settingsRoutes.get('/limits', requireAdmin, async (req: Request, res: Response, 
   try {
     const prisma = req.app.locals.prisma;
     const rows = await prisma.appSetting.findMany({
-      where: { key: { in: [MAX_VIDEO_DURATION_KEY, MAX_PLAYLIST_IMPORT_KEY, YOUTUBE_DIRECT_STREAM_KEY, SEEK_COOLDOWN_KEY] } },
+      where: { key: { in: [MAX_VIDEO_DURATION_KEY, MAX_PLAYLIST_IMPORT_KEY, YOUTUBE_DIRECT_STREAM_KEY, SEEK_COOLDOWN_KEY, RESUME_COOLDOWN_KEY] } },
     });
     const map = new Map(rows.map((r: { key: string; value: string }) => [r.key, r.value]));
     res.json({
@@ -177,6 +180,7 @@ settingsRoutes.get('/limits', requireAdmin, async (req: Request, res: Response, 
       maxPlaylistImport: parseImportCap(map.get(MAX_PLAYLIST_IMPORT_KEY) as string | undefined),
       youtubeDirectStream: map.get(YOUTUBE_DIRECT_STREAM_KEY) === 'true',
       seekCooldownSeconds: parseSeekCooldown(map.get(SEEK_COOLDOWN_KEY) as string | undefined),
+      resumeCooldownSeconds: parseResumeCooldown(map.get(RESUME_COOLDOWN_KEY) as string | undefined),
     });
   } catch (err) { next(err); }
 });
@@ -185,14 +189,19 @@ settingsRoutes.get('/limits', requireAdmin, async (req: Request, res: Response, 
 settingsRoutes.put('/limits', requireAdmin, async (req: Request, res: Response, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const { maxVideoDuration, maxPlaylistImport, youtubeDirectStream, seekCooldownSeconds } = req.body;
+    const { maxVideoDuration, maxPlaylistImport, youtubeDirectStream, seekCooldownSeconds, resumeCooldownSeconds } = req.body;
 
-    if (maxVideoDuration == null && maxPlaylistImport == null && youtubeDirectStream == null && seekCooldownSeconds == null) {
-      throw new AppError(400, 'Provide maxVideoDuration, maxPlaylistImport, youtubeDirectStream and/or seekCooldownSeconds');
+    if (maxVideoDuration == null && maxPlaylistImport == null && youtubeDirectStream == null
+      && seekCooldownSeconds == null && resumeCooldownSeconds == null) {
+      throw new AppError(400, 'Provide maxVideoDuration, maxPlaylistImport, youtubeDirectStream, seekCooldownSeconds and/or resumeCooldownSeconds');
     }
     const seekCooldown = seekCooldownSeconds == null ? null : parseBoundedInt(seekCooldownSeconds, MAX_SEEK_COOLDOWN_SEC);
     if (seekCooldownSeconds != null && seekCooldown == null) {
       throw new AppError(400, `seekCooldownSeconds must be a whole number of seconds from 0 to ${MAX_SEEK_COOLDOWN_SEC} (0 = no limit)`);
+    }
+    const resumeCooldown = resumeCooldownSeconds == null ? null : parseBoundedInt(resumeCooldownSeconds, MAX_RESUME_COOLDOWN_SEC);
+    if (resumeCooldownSeconds != null && resumeCooldown == null) {
+      throw new AppError(400, `resumeCooldownSeconds must be a whole number of seconds from 0 to ${MAX_RESUME_COOLDOWN_SEC} (0 = no limit)`);
     }
     if (youtubeDirectStream != null && typeof youtubeDirectStream !== 'boolean') {
       throw new AppError(400, 'youtubeDirectStream must be true or false');
@@ -240,6 +249,14 @@ settingsRoutes.put('/limits', requireAdmin, async (req: Request, res: Response, 
             where: { key: SEEK_COOLDOWN_KEY },
             create: { key: SEEK_COOLDOWN_KEY, value: String(seekCooldown) },
             update: { value: String(seekCooldown) },
+          });
+        }
+
+        if (resumeCooldown != null) {
+          await tx.appSetting.upsert({
+            where: { key: RESUME_COOLDOWN_KEY },
+            create: { key: RESUME_COOLDOWN_KEY, value: String(resumeCooldown) },
+            update: { value: String(resumeCooldown) },
           });
         }
       },
