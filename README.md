@@ -422,7 +422,8 @@ Defaults below are the **sidecar code defaults**. Compose files may intentionall
 | `AUDIO_BITRATE` | `128k` | Default Opus target bitrate |
 | `VIDEO_CPU_USED` | `4` | libvpx realtime speed/quality trade-off |
 | `VIDEO_ENCODE_THREADS` | CPU count (container CPU quota respected) | libvpx encode thread count; the *Encode threads* setting overrides it |
-| `VIDEO_CONVERT_THREADS` | 2 (or fewer) | x264 threads for a convert-first conversion |
+| `VIDEO_CONVERT_THREADS` | 2 (or fewer) | x264 threads for a convert-first conversion; the *Convert threads* setting overrides it |
+| `VIDEO_CPU_PRIORITY` | `normal` | `normal`, `low` or `lowest` (nice 0, 10, 19) for ffmpeg when the manager names none; the *CPU priority* setting overrides it |
 | `VIDEO_BUFSIZE` | auto | Optional override; otherwise approximately `2 × VIDEO_BITRATE` |
 | `FFMPEG_HTTP_PERSISTENT` | `auto` | `auto` and `0` send `Connection: close` on remote HTTP(S) requests, including opaque/redirected HLS playlists and segments. Safe for MPEG-TS and MP4 too. `1` leaves FFmpeg's connection behavior unchanged. Applied to playback and probing; sidecar only. |
 | `FFMPEG_EXTRA_INPUT_ARGS` | unset | Extra options before each remote input, also used for probing. Custom headers are preserved; `Connection` is managed by `FFMPEG_HTTP_PERSISTENT`. HLS-only options such as `-http_persistent` can break MP4/MPEG-TS. Values containing `-i` or bare URLs are ignored. |

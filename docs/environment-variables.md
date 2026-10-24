@@ -74,7 +74,8 @@ The values below are code defaults. Compose files may override them.
 | `AUDIO_BITRATE` | `128k` | Default Opus bitrate |
 | `VIDEO_CPU_USED` | `4` | libvpx realtime speed/quality trade-off |
 | `VIDEO_ENCODE_THREADS` | CPU count (container CPU quota respected) | libvpx encode thread count; the *Encode threads* setting overrides it |
-| `VIDEO_CONVERT_THREADS` | 2 (or fewer) | x264 threads for a convert-first conversion |
+| `VIDEO_CONVERT_THREADS` | 2 (or fewer) | x264 threads for a convert-first conversion; the *Convert threads* setting overrides it |
+| `VIDEO_CPU_PRIORITY` | `normal` | `normal`, `low` or `lowest` (nice 0, 10, 19) for ffmpeg when the manager names none; the *CPU priority* setting overrides it |
 | `VIDEO_BUFSIZE` | automatic | Optional explicit bitrate buffer |
 | `VIDEO_LIVE_PACING` | `re` | `re` reads live sources with `-re` (measured steady ~1.0x); `source` lets the live source pace input (startup burst) |
 | `FFMPEG_HTTP_PERSISTENT` | `auto` | `auto` and `0` send the standard `Connection: close` header on remote HTTP(S) inputs. FFmpeg forwards it to HLS playlists, segments and redirects, including URLs without a playlist suffix. MPEG-TS and MP4 remain supported. `1` leaves FFmpeg's connection behavior and custom headers unchanged. Applies to playback and ffprobe; sidecar only |

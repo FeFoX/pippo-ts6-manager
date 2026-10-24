@@ -35,7 +35,7 @@ Streaming defaults also offer **Performance / Balanced / Quality** profiles (def
 
 1440p and 2160p need a fast CPU with software encoders; a hardware encoder is recommended.
 
-Software VP8 and VP9 use as many encode threads as the container may really use (its CPU limit, not the host's core count). Set **Encode threads** under *Advanced quality settings* to choose a number (0 = automatic); a convert-first conversion uses at most two of them.
+Software VP8 and VP9 use as many encode threads as the container may really use (its CPU limit, not the host's core count). Set **Encode threads** under *Advanced quality settings* to choose a number (0 = automatic). **Convert threads** does the same for a convert-first conversion (automatic is at most two), and **CPU priority** (Normal, Low, Lowest) lets the rest of the host go ahead of ffmpeg. Each can also be set for one bot or for one stream.
 
 ## Encoders
 

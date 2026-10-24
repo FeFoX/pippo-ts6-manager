@@ -25,7 +25,9 @@ feature in more detail.
 | Retransmission (NACK) | none | always on | |
 | VP9 descriptor rewrite | none | always on for copied VP9 | |
 | Keyframe pacing | `video_direct_pacing` | `2.5` (`0` = off, 1 to 10) | Media Library → Streaming defaults (also per server) |
-| Encode threads | `video_encode_threads` | `0` (automatic) | Media Library → Streaming defaults → Advanced (also per server) |
+| Encode threads | `video_encode_threads` | `0` (automatic) | Media Library → Streaming defaults → Advanced (also per server, per bot, per stream) |
+| Convert threads | `video_convert_threads` | `0` (automatic) | same places |
+| CPU priority | `video_cpu_priority` | `normal` | same places |
 | Convert-first fallback | `video_direct_fallback` | `ultrafast` | Media Library → Streaming defaults (also per server) |
 | Bitrate per resolution | `video_preset_bitrates` | see below | Media Library → Streaming defaults (also per server) |
 | Command listener race | none | | |
@@ -142,14 +144,24 @@ can still trail the audio by up to 0.6 s.
 - Files: `packages/sidecar/pacer.go` (new), `main.go`, `utils/app-settings.ts`,
   frontend `VideoStreamDefaultsCard.tsx`.
 
-### Encode threads
+### Encode threads, convert threads and CPU priority
 
 The software VP8 and VP9 encoders were given one thread per CPU the sidecar process could see. A container limited to
 3 CPUs on a 6-core host still saw 6, so ffmpeg ran 6 threads inside a 3-CPU budget and was throttled. The default is
 now the smaller of the visible CPUs and the container's CPU quota (cgroup v1 or v2).
 
 - Setting `video_encode_threads`: `0` (default) = automatic, otherwise 1 to 64. `VIDEO_ENCODE_THREADS` still applies
-  when the setting is `0`. Also settable per server. The sidecar's `POST /source` and `POST /convert` accept `threads`.
+  when the setting is `0`. The sidecar's `POST /source` and `POST /convert` accept `threads`.
+- Setting `video_convert_threads`: threads of the convert-first x264 conversion. `0` (default) = automatic:
+  `VIDEO_CONVERT_THREADS`, else at most 2 (or the encode threads when fewer). A number is used as it is. `POST /convert`
+  accepts `convertThreads`.
+- Setting `video_cpu_priority`: `normal` (default), `low` (nice 10) or `lowest` (nice 19), applied by the sidecar to
+  every ffmpeg it starts (live encode and conversion); not on Windows. `POST /source` and `POST /convert` accept
+  `cpuPriority`; `VIDEO_CPU_PRIORITY` is used only when a caller names none.
+- Where they are set, highest first: one stream (Video options, or `encodeThreads`/`convertThreads`/`cpuPriority` in the
+  stream start body), one bot (`GET/PUT /api/music-bots/:id/video-resources`, stored as the app setting
+  `video_streaming_bot:<id>`), one server, then the global setting, then the environment, then automatic. On the first
+  three, a missing value inherits and `0` is an explicit "automatic". Bot status reports the values in effect.
 - Files: `packages/sidecar/cpu_limit.go` (new), `encoders.go`, `convert.go`, `utils/app-settings.ts`,
   frontend `VideoStreamDefaultsCard.tsx`.
 
@@ -171,7 +183,7 @@ stream's cap applies.
   The source is read under the sidecar's egress rules. The output `.stream-<digits>.mp4` is written to the music
   folder and deleted when the stream ends. A restart can leave one behind, so at start-up the sidecar removes
   `.stream-<digits>.mp4` and `.stream-<digits>.mp4.part` files in the music folder that are more than four hours old.
-- The conversion uses at most 2 x264 threads (`VIDEO_CONVERT_THREADS` overrides), so it cannot take the CPUs a live
+- By default the conversion uses at most 2 x264 threads (see Convert threads), so it cannot take the CPUs a live
   stream needs. The manager gives up on a conversion that makes no progress for 5 minutes, or that would take longer
   than twice the video's length (at least 10 minutes), and re-encodes the video live instead.
 - Files: `packages/sidecar/convert.go` (new), `voice/streaming/sidecar-client.ts`, `voice/voice-bot.ts`,
