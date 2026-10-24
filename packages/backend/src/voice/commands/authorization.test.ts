@@ -7,6 +7,7 @@ const GROUPS = [
   { id: 7, name: 'Newcomer' },
   { id: 999, name: 'Music Bot Controllers' },
   { id: 101, name: 'Server Admin' },
+  { id: 102, name: 'Moderators' },
 ];
 
 function source(members: Record<number, number[]>, calls = { groupList: 0, client: 0 }): ControlGroupSource & { calls: typeof calls } {
@@ -117,5 +118,36 @@ describe('control group', () => {
     assert.equal(access.shouldNotifyDenied(1, 8), true, 'another user is told separately');
     now += 30_001;
     assert.equal(access.shouldNotifyDenied(1, 7), true);
+  });
+
+  it('warns about a mistyped id, like a mistyped name, once per entry', async () => {
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
+    try {
+      // 998 and "Missing Group" match nothing, 999 does: the member is still let in.
+      const access = new ControlAccess(set('999', '998', 'Missing Group'), source({ 2: [999], 3: [7] }));
+      assert.equal(await allowed(access, 2), true);
+      assert.equal(await allowed(access, 3), false);
+      assert.equal(warnings.filter((w) => w.includes('"998"')).length, 1);
+      assert.equal(warnings.filter((w) => w.includes('"Missing Group"')).length, 1);
+      assert.equal(warnings.filter((w) => w.includes('"999"')).length, 0);
+      assert.equal(warnings.filter((w) => w.includes('nobody can use the bot')).length, 0);
+
+      // A lone mistyped id locks everybody out, and says so.
+      warnings.length = 0;
+      const lockedOut = new ControlAccess(set('998'), source({ 2: [999] }));
+      assert.equal(await allowed(lockedOut, 2), false);
+      await allowed(lockedOut, 2);
+      assert.equal(warnings.filter((w) => w.includes('"998" matches no server group')).length, 1);
+      assert.equal(warnings.filter((w) => w.includes('nobody can use the bot')).length, 1);
+
+      // Two entries that name the same group are both fine.
+      warnings.length = 0;
+      assert.equal(await allowed(new ControlAccess(set('999', 'music bot controllers'), source({ 2: [999] })), 2), true);
+      assert.equal(warnings.length, 0);
+    } finally {
+      console.warn = original;
+    }
   });
 });

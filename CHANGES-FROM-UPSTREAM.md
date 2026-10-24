@@ -71,8 +71,9 @@ Only members of the chosen TeamSpeak server groups can use the built-in chat com
 
 - Setting `bot_control_groups` (group names or ids). Default empty, which means everybody can use the bot.
 - The manager asks TeamSpeak for the sender's groups at every command, so taking a group away works at once. If
-  TeamSpeak does not answer, or a listed group does not exist, nobody is allowed. Anyone refused gets one short reply
-  every 30 seconds, and the command does not run.
+  TeamSpeak does not answer, or a listed group does not exist, nobody is allowed (a name or numeric id that matches no
+  server group is logged as a warning). Anyone refused gets one short reply every 30 seconds, also for `!here`, `!come`
+  and `!help` typed outside the bot's channel, and the command does not run.
 - Custom chat commands, watching a video stream and the web panel are not restricted.
 - API (new, admin only): `GET /api/settings/bot-access` and `PUT /api/settings/bot-access` with
   `{ "controlGroups": ["..."] }`. Entries are trimmed and de-duplicated without regard to case.

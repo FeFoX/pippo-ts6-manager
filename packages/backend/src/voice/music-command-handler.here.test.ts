@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MusicCommandHandler, resetHereDedupForTests } from './music-command-handler.js';
 import { sshTextChannelId } from './commands/routing.js';
+import { ControlAccess, setControlAccessForTests } from './commands/authorization.js';
 import { isReservedChatCommandName, BUILTIN_COMMAND_HELP } from './chat-commands.js';
 
 function makeBot(
@@ -914,4 +915,137 @@ test('parkMainHelper still refuses a connected music-bot home and rebalances', a
   };
   await f.handler.parkMainHelper(9, 1, 1);
   assert.deepEqual(parked, [34]);
+});
+
+/** A control group of one: clid 2 is a member, clid 3 is not. Everything else is looked up too. */
+function installControlGroup() {
+  const members: Record<number, number[]> = { 2: [999], 3: [7] };
+  setControlAccessForTests(new ControlAccess(async () => ['Music Bot Controllers'], {
+    clientGroups: async (_c, _s, clid) => {
+      if (!(clid in members)) throw new Error('client not found');
+      return members[clid]!;
+    },
+    serverGroups: async () => [{ id: 999, name: 'Music Bot Controllers' }, { id: 7, name: 'Newcomer' }],
+  }));
+}
+
+function crossChannelFixture() {
+  const bot = makeBot(1, { channelId: 10 });
+  const f = fixture([bot]);
+  f.handler.channelToBots.set('9:1:20', new Set([1]));
+  const sent: Array<{ cid: number; msg: string; nick?: string }> = [];
+  f.handler.eventBridge = {
+    sendChannelText: async (_c: number, _s: number, cid: number, msg: string, opts?: { helperNickname?: string }) => {
+      sent.push({ cid, msg, nick: opts?.helperNickname });
+      return true;
+    },
+  };
+  return { ...f, bot, sent };
+}
+
+test('cross-channel !here and !help tell a refused user which group is needed, in the channel they typed in', async () => {
+  installControlGroup();
+  try {
+    const f = crossChannelFixture();
+    await f.handler.onCrossChannelTextMessage(9, 1, 20, { invokerid: '3', msg: '!here' });
+    assert.equal(f.bot._joins.length, 0, 'the bot did not move');
+    assert.equal(f.sent.length, 1);
+    assert.equal(f.sent[0]!.cid, 20);
+    assert.equal(f.sent[0]!.nick, 'TS6 Helper');
+    assert.match(f.sent[0]!.msg, /Music Bot Controllers/);
+
+    // Throttled per user, across commands.
+    await f.handler.onCrossChannelTextMessage(9, 1, 20, { invokerid: '3', msg: '!help' });
+    assert.equal(f.sent.length, 1, 'told once, not for every command');
+    assert.equal(f.bot._joins.length, 0);
+  } finally {
+    setControlAccessForTests(null);
+  }
+});
+
+test('cross-channel !help is not posted for a refused user, and is for a member', async () => {
+  installControlGroup();
+  try {
+    const f = crossChannelFixture();
+    await f.handler.onCrossChannelTextMessage(9, 1, 20, { invokerid: '3', msg: '!help' });
+    assert.equal(f.sent.length, 1);
+    assert.match(f.sent[0]!.msg, /permission/, 'the refusal, not the command list');
+    assert.doesNotMatch(f.sent[0]!.msg, /!play/);
+
+    await f.handler.onCrossChannelTextMessage(9, 1, 20, { invokerid: '2', msg: '!help' });
+    assert.equal(f.sent.length, 2);
+    assert.match(f.sent[1]!.msg, /!play/, 'a member gets the command list');
+  } finally {
+    setControlAccessForTests(null);
+  }
+});
+
+test('cross-channel !here from a member still summons the bot', async () => {
+  installControlGroup();
+  try {
+    const f = crossChannelFixture();
+    await f.handler.onCrossChannelTextMessage(9, 1, 20, { invokerid: '2', msg: '!here' });
+    assert.deepEqual(f.bot._joins, [20]);
+    assert.ok(!f.sent.some((m) => /permission/.test(m.msg)));
+  } finally {
+    setControlAccessForTests(null);
+  }
+});
+
+test('cross-channel !here without a sender id is refused when a group is set, and the notice does not repeat', async () => {
+  installControlGroup();
+  try {
+    const f = crossChannelFixture();
+    await f.handler.onCrossChannelTextMessage(9, 1, 20, { msg: '!here' });
+    await f.handler.onCrossChannelTextMessage(9, 1, 20, { msg: '!here' });
+    assert.equal(f.bot._joins.length, 0);
+    assert.equal(f.sent.length, 1);
+  } finally {
+    setControlAccessForTests(null);
+  }
+});
+
+test('cross-channel refusal is left to the voice bot when one is already in the channel', async () => {
+  installControlGroup();
+  try {
+    const bot = makeBot(1, { channelId: 20 });
+    const f = fixture([bot]);
+    f.handler.channelToBots.set('9:1:20', new Set([1]));
+    const sent: string[] = [];
+    f.handler.eventBridge = { sendChannelText: async (_c: number, _s: number, _cid: number, msg: string) => { sent.push(msg); return true; } };
+    await f.handler.onCrossChannelTextMessage(9, 1, 20, { invokerid: '3', msg: '!here' });
+    await f.handler.onCrossChannelTextMessage(9, 1, 20, { invokerid: '3', msg: '!help' });
+    assert.deepEqual(sent, [], 'the SSH helper stays out of it: the voice path answers and refuses');
+  } finally {
+    setControlAccessForTests(null);
+  }
+});
+
+test('a failing refusal notice does not break the cross-channel path', async () => {
+  installControlGroup();
+  try {
+    const f = crossChannelFixture();
+    f.handler.eventBridge = { sendChannelText: async () => { throw new Error('ssh down'); } };
+    await f.handler.onCrossChannelTextMessage(9, 1, 20, { invokerid: '3', msg: '!here' });
+    assert.equal(f.bot._joins.length, 0);
+  } finally {
+    setControlAccessForTests(null);
+  }
+});
+
+test('a refusal notice the SSH helper could not post is logged, not thrown', async () => {
+  installControlGroup();
+  const warnings: string[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
+  try {
+    const f = crossChannelFixture();
+    f.handler.eventBridge = { sendChannelText: async () => false };
+    await f.handler.onCrossChannelTextMessage(9, 1, 20, { invokerid: '3', msg: '!here' });
+    assert.equal(f.bot._joins.length, 0);
+    assert.equal(warnings.filter((w) => w.includes('refusal notice failed to post in cid=20')).length, 1);
+  } finally {
+    console.warn = original;
+    setControlAccessForTests(null);
+  }
 });

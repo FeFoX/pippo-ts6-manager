@@ -194,6 +194,41 @@ function channelBots(
   return bots;
 }
 
+/**
+ * Bot access for the commands the SSH helper answers itself (!here, !come, !help).
+ * A voice bot in the channel answers (and refuses) in its own path, so this runs only once
+ * the helper is the one that would reply. A refused user is told in the channel where they
+ * typed, at most once every 30 seconds, the same as in-channel.
+ */
+async function crossChannelAllowed(
+  context: CommandContext,
+  configId: number,
+  sid: number,
+  channelId: number,
+  data: Record<string, string>,
+  command: string,
+): Promise<boolean> {
+  const access = controlAccessFor(context);
+  const invoker = parseInt(data.invokerid || '0', 10);
+  // Without a sender id the lookup fails, which counts as refused when a group is set.
+  const decision = await access.check(configId, sid, invoker);
+  if (decision.allowed) return true;
+  console.log(`[MusicCmd] Cross-channel !${command} refused for clid=${invoker || '?'} (not in the control group)`);
+  if (context.eventBridge && access.shouldNotifyDenied(configId, invoker)) {
+    try {
+      const ok = await context.eventBridge.sendChannelText(configId, sid, channelId, access.deniedMessage(decision.groups), {
+        helperNickname: 'TS6 Helper',
+      });
+      if (!ok) {
+        console.warn(`[MusicCmd] Cross-channel refusal notice failed to post in cid=${channelId} (SSH listener?)`);
+      }
+    } catch (err: any) {
+      console.warn(`[MusicCmd] Cross-channel refusal notice failed for cid=${channelId}: ${err?.message || err}`);
+    }
+  }
+  return false;
+}
+
 /** Choose one eligible bot for SSH chat, leaving in-channel help and summons to voice. */
 export async function onCrossChannelTextMessage(
   context: CommandContext,
@@ -226,16 +261,6 @@ export async function onCrossChannelTextMessage(
   if (msg.startsWith(CMD_PREFIX)) {
     const parts = msg.substring(CMD_PREFIX.length).split(/\s+/);
     const command = (parts[0] || '').toLowerCase();
-    if (command === 'here' || command === 'come' || command === 'help') {
-      // These are answered here, not by onTextMessage, so the control group applies here too.
-      const invoker = parseInt(data.invokerid || '0', 10);
-      // Without a sender id the lookup fails, which counts as refused when a group is set.
-      const decision = await controlAccessFor(context).check(configId, sid, invoker);
-      if (!decision.allowed) {
-        console.log(`[MusicCmd] Cross-channel !${command} refused for clid=${invoker || '?'} (not in the control group)`);
-        return;
-      }
-    }
     if (command === 'here' || command === 'come') {
       // Prefer the in-channel voice path when a music bot is already here —
       // otherwise SSH + voice both announce/join for the same chat line.
@@ -253,6 +278,7 @@ export async function onCrossChannelTextMessage(
         );
         return;
       }
+      if (!(await crossChannelAllowed(context, configId, sid, channelId, data, command))) return;
       const rawArgs = parts.slice(1).join(' ').trim();
       await context.handleHereCrossChannel(configId, sid, channelId, data, rawArgs);
       return;
@@ -283,6 +309,7 @@ export async function onCrossChannelTextMessage(
         );
         return;
       }
+      if (!(await crossChannelAllowed(context, configId, sid, channelId, data, command))) return;
       await context.handleHelpCrossChannel(configId, sid, channelId, data);
       return;
     }
