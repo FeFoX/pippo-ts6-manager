@@ -98,6 +98,7 @@ interface EnterViewEntry {
   clid: number;
   cid: number;
   isQuery: boolean;
+  nickname: string;
 }
 
 export interface Ts3ClientOptions {
@@ -149,6 +150,8 @@ export class Ts3Client extends EventEmitter {
   private fragmentBuffer: Buffer[] = [];
   private fragmenting = false;
   private fragmentFlags = 0;
+  /** The nickname the server shows for us, once it has told us; "" until then. */
+  private assignedNickname = "";
 
   // Channel map (populated during init sequence for auto-move)
   private channelMap = new Map<string, number>(); // channel_name → cid
@@ -173,6 +176,17 @@ export class Ts3Client extends EventEmitter {
 
   getClientId(): number {
     return this.clientId;
+  }
+
+  /** The nickname the server currently shows for us, or "" before it has said. */
+  getAssignedNickname(): string {
+    return this.assignedNickname;
+  }
+
+  private setAssignedNickname(nickname: string): void {
+    if (nickname === this.assignedNickname) return;
+    this.assignedNickname = nickname;
+    this.emit("nickname", nickname);
   }
 
   getChannelUserCount(): number {
@@ -260,6 +274,7 @@ export class Ts3Client extends EventEmitter {
     this.fragmentBuffer = [];
     this.fragmenting = false;
     this.fragmentFlags = 0;
+    this.assignedNickname = "";
     this.clientId = 0;
     this.channelMap.clear();
     this.currentChannelId = 0;
@@ -883,6 +898,13 @@ export class Ts3Client extends EventEmitter {
         this.applyEnterViewEntries(entries);
         break;
       }
+      case "notifyclientupdated": {
+        const clid = parseInt(parsed.params.clid || "0");
+        if (clid && clid === this.clientId && parsed.params.client_nickname) {
+          this.setAssignedNickname(parsed.params.client_nickname);
+        }
+        break;
+      }
       case "notifyclientleftview": {
         const clid = parseInt(parsed.params.clid || "0");
         if (clid) {
@@ -1083,6 +1105,9 @@ export class Ts3Client extends EventEmitter {
   private handleInitServer(params: Record<string, string>): void {
     this.clientId = parseInt(params.aclid) || 0;
     this.emit("debug", `Connected! ClientId=${this.clientId}`);
+    // `acn` is the nickname the server gave us, which differs from the one we asked for
+    // when another client already held it (the server then appends a number).
+    if (params.acn) this.setAssignedNickname(params.acn);
 
     this.state = "connected";
 
@@ -1126,7 +1151,7 @@ export class Ts3Client extends EventEmitter {
       const clid = parseInt(entry.clid || "0");
       const cid = parseInt(entry.ctid || entry.cid || first.ctid || first.cid || "0");
       if (!clid || cid <= 0) continue;
-      out.push({ clid, cid, isQuery: String(entry.client_type) === "1" });
+      out.push({ clid, cid, isQuery: String(entry.client_type) === "1", nickname: entry.client_nickname || "" });
     }
     return out;
   }
@@ -1146,6 +1171,7 @@ export class Ts3Client extends EventEmitter {
     opts: { requestClientList?: boolean } = {},
   ): void {
     const own = entries.find((e) => e.clid === this.clientId);
+    if (own?.nickname) this.setAssignedNickname(own.nickname);
     if (own && this.currentChannelId <= 0) {
       this.currentChannelId = own.cid;
       this.channelMembers.clear();

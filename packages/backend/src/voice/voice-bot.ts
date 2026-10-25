@@ -220,6 +220,7 @@ export class VoiceBot extends EventEmitter {
   private _avatarError: string | null = null;
   private avatarTail: Promise<void> = Promise.resolve();
   private avatarAbort: AbortController | null = null;
+  private nicknameReclaimTimer: ReturnType<typeof setTimeout> | null = null;
   private identity: IdentityData | null = null;
   private playbackTimer: ReturnType<typeof setTimeout> | null = null;
   private _nowPlaying: QueueItem | null = null;
@@ -391,6 +392,7 @@ export class VoiceBot extends EventEmitter {
     });
 
     this.client.on('disconnected', () => {
+      this.cancelNicknameReclaim();
       // Cancel the separate avatar transfer socket so a later start() is not queued behind it.
       this.avatarAbort?.abort();
       this._streamNotificationsRegistered = false;
@@ -822,6 +824,50 @@ export class VoiceBot extends EventEmitter {
     } catch { }
   }
 
+  /**
+   * When another client held our nickname at connect, the server gave us a numbered one
+   * ("Bot1"). The usual holder is a ServerQuery session that is about to rename itself, so
+   * ask for the real nickname again a few times, then leave it.
+   *
+   * Nothing is sent, and the retries end, when the server already shows the right nickname
+   * or while "now playing" decorates it. When the nickname is not known (a server that sends
+   * no `acn` and has not shown our own entry yet) nothing is sent either, but the next try
+   * is still scheduled. Known limit: once the now-playing decoration starts the retries end,
+   * so a bot that is still numbered then keeps that name until it reconnects.
+   */
+  private scheduleNicknameReclaim(): void {
+    this.cancelNicknameReclaim();
+    const delays = [1_000, 3_000, 8_000, 20_000, 60_000];
+    const attempt = (n: number): void => {
+      this.nicknameReclaimTimer = null;
+      if (this._status === 'stopped' || this._status === 'error') return;
+      const shown = this.client.getAssignedNickname();
+      const wanted = this._originalNickname;
+      if (shown === wanted) return;
+      if (shown.startsWith(`${wanted} \u266A`)) return;
+      const last = n + 1 >= delays.length;
+      if (!shown) {
+        if (last) console.warn(`[VoiceBot ${this.config.id}] Nickname never reported by the server, not checked`);
+      } else {
+        console.log(`[VoiceBot ${this.config.id}] Nickname is "${shown}", asking for "${wanted}" (attempt ${n + 1})`);
+        try {
+          this.client.sendCommand(buildCommand('clientupdate', { client_nickname: wanted }));
+        } catch { /* not connected: the disconnect handler cancels the retries */ }
+      }
+      if (!last) {
+        this.nicknameReclaimTimer = setTimeout(() => attempt(n + 1), delays[n + 1]);
+        this.nicknameReclaimTimer.unref?.();
+      }
+    };
+    this.nicknameReclaimTimer = setTimeout(() => attempt(0), delays[0]);
+    this.nicknameReclaimTimer.unref?.();
+  }
+
+  private cancelNicknameReclaim(): void {
+    if (this.nicknameReclaimTimer) clearTimeout(this.nicknameReclaimTimer);
+    this.nicknameReclaimTimer = null;
+  }
+
   /** Reset TS3 nickname to original. */
   private resetNickname(): void {
     if (this._status === 'stopped') return;
@@ -906,6 +952,7 @@ export class VoiceBot extends EventEmitter {
     this._status = 'connected';
     this.emit('statusChange', this._status);
     this.emit('connected');
+    this.scheduleNicknameReclaim();
     // Avatar upload can take several TS6 round trips; never hold up startup.
     // applyAvatar() records failures itself and emits avatarChange.
     void this.applyAvatar();
@@ -913,6 +960,7 @@ export class VoiceBot extends EventEmitter {
 
   async stop(): Promise<void> {
     this._manuallyStopped = true;
+    this.cancelNicknameReclaim();
     this.avatarAbort?.abort();
     this.stopAutoStopTimer();
     this.stopIcyPolling();
