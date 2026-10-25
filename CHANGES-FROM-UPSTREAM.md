@@ -89,9 +89,13 @@ Only members of the chosen TeamSpeak server groups can use the built-in chat com
 
 A direct stream sends the video as it is, without decoding and encoding it again, so it uses almost no CPU.
 
-- It can copy VP9 profile 0 (8-bit 4:2:0) and H.264 (8-bit 4:2:0) without B-frames. Only a downloaded or local
-  file is checked, with one short `ffprobe`. Remote URLs, AV1, HEVC, 10-bit and H.264 with B-frames are not copied
-  (see the convert-first fallback below), and the Now playing card and the chat reply say why.
+- It can copy VP9 profile 0 (8-bit 4:2:0) and H.264 (8-bit 4:2:0) without B-frames. The picture is checked with one
+  short `ffprobe`, a local file directly and a remote URL through the sidecar. AV1, HEVC, 10-bit and H.264 with
+  B-frames are not copied (see the convert-first fallback below), and the Now playing card and the chat reply say why.
+- When a source delivers the picture and the sound as two downloads (YouTube above 720p, streamed directly), the
+  picture is checked and copied as above and the sound, read as a second input, is encoded to Opus. Nothing is
+  re-encoded but the audio. The convert-first fallback does not apply to such a source: one that cannot be copied is
+  re-encoded while it plays.
 - YouTube downloads for a direct stream ask for VP9 first, then H.264, then the usual choice.
 - Viewers keep the codec they negotiated for the whole stream; a later source in another codec is re-encoded to it.
 - It is chosen for each start, in Video options → Streaming mode → *Direct: no re-encoding* or with

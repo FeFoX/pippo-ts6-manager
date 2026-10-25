@@ -290,6 +290,35 @@ describe('direct stream decision', () => {
     assert.equal(last.options.encoder, 'h264');
   });
 
+  it('a picture delivered apart from its sound is copied, and the sound goes along as a second input', async () => {
+    const { b, bot, calls, probes } = remoteBot('vp9');
+    const AUDIO = 'https://cdn.example/audio.m4a';
+    const inspected: string[] = [];
+    b.sidecarHttp.probe = async (url: string) => { inspected.push(url); probes.count++; return COPYABLE.vp9; };
+    b.resolveStreamSource = async () => ({ path: REMOTE_WEBM, audioPath: AUDIO, loop: false });
+    await bot.seekVideo(5);
+    const last = calls.filter((c) => c.kind === 'source').at(-1)!;
+    assert.equal(last.options.passthrough, true);
+    assert.equal(last.options.encoder, 'vp9');
+    assert.equal(last.options.audioSource, AUDIO);
+    assert.deepEqual(inspected, [REMOTE_WEBM], 'only the picture is inspected');
+    assert.equal(bot.videoStreamStatus.direct, true);
+  });
+
+  it('a split picture that cannot be copied is re-encoded with its sound, and the reason is given', async () => {
+    const { b, bot, calls } = remoteBot('vp9');
+    const AUDIO = 'https://cdn.example/audio.m4a';
+    b.sidecarHttp.probe = async () => JSON.stringify({
+      streams: [{ codec_name: 'av1', pix_fmt: 'yuv420p' }], packets: [], format: { duration: '90' },
+    });
+    b.resolveStreamSource = async () => ({ path: REMOTE_WEBM, audioPath: AUDIO, loop: false });
+    await bot.seekVideo(5);
+    const last = calls.filter((c) => c.kind === 'source').at(-1)!;
+    assert.equal(last.options.passthrough, undefined);
+    assert.equal(last.options.audioSource, AUDIO);
+    assert.match(bot.videoStreamStatus.directFallback ?? '', /AV1/);
+  });
+
   it('a different file is judged on its own, not by the previous answer', async () => {
     const { b, probes } = remoteBot('vp9');
     b._videoActiveCodec = 'h264';

@@ -2506,10 +2506,10 @@ export class VoiceBot extends EventEmitter {
 
   /**
    * The codec to copy to viewers for this source, or null to re-encode it. Decided once per
-   * file: a seek or a volume change of the same file reuses the answer. Only a local file is
-   * inspected, because the check reads packets; a remote source is re-encoded.
+   * file: a seek or a volume change of the same file reuses the answer. A local file is read
+   * directly and a remote one through the sidecar, which reads its first packets.
    */
-  private async decideDirect(sourcePath: string, audioSource?: string): Promise<'h264' | 'vp9' | null> {
+  private async decideDirect(sourcePath: string): Promise<'h264' | 'vp9' | null> {
     if (!this._videoDirectRequested) {
       this._videoDirect = false;
       this._videoDirectCodec = null;
@@ -2525,16 +2525,12 @@ export class VoiceBot extends EventEmitter {
       }
       return cachedCodec;
     }
-    let codec: 'h264' | 'vp9' | null = null;
-    let reason: string | null = null;
-    if (audioSource) {
-      reason = 'the picture and the sound come as two separate downloads';
-    } else {
-      const remote = /^https?:\/\//i.test(sourcePath);
-      const check = remote ? await this.checkDirectRemote(sourcePath) : await checkDirectEligible(sourcePath);
-      codec = check.ok ? check.codec : null;
-      reason = check.reason;
-    }
+    // With a separate audio URL (YouTube above 720p) `sourcePath` is the video-only download:
+    // only the picture is inspected and copied, and the sidecar encodes the second input's sound.
+    const remote = /^https?:\/\//i.test(sourcePath);
+    const check = remote ? await this.checkDirectRemote(sourcePath) : await checkDirectEligible(sourcePath);
+    let codec: 'h264' | 'vp9' | null = check.ok ? check.codec : null;
+    let reason: string | null = check.reason;
     // Viewers who already joined negotiated a codec for the whole stream; a source in another
     // codec cannot be copied to them.
     if (codec && this._videoActiveCodec && this._videoActiveCodec !== codec) {
@@ -2592,7 +2588,7 @@ export class VoiceBot extends EventEmitter {
     const bitrate = effectiveBitrate(this._videoRequestedBitrate, presetBitrate(this._videoSettings, quality.actual), this._videoSettings.maxBitrateKbps);
 
     const volume = this._videoStreamVolume;
-    const directCodec = await this.decideDirect(sourcePath, audioSource);
+    const directCodec = await this.decideDirect(sourcePath);
     const encoderId: VideoEncoderId = directCodec ?? this.reencodeEncoderId();
     const session = await this.sidecarHttp.setSource(sourcePath, {
       width: quality.width,
