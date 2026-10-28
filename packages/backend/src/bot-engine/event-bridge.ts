@@ -538,11 +538,14 @@ export class EventBridge extends EventEmitter {
 
     client.on('ready', async () => {
       console.log(`[EventBridge] CMD listener SSH connected for ${key}`);
-      this.commandListenerRetryAttempts.delete(key);
       try {
         await client.registerCommandListener(sid, channelId);
+        // Reset the backoff only once the listener sits in its channel.
+        if (this.commandListeners.get(key) === client) this.commandListenerRetryAttempts.delete(key);
       } catch (err: any) {
+        // A listener outside its channel hears nothing: drop it and reopen after the backoff.
         console.error(`[EventBridge] CMD listener register failed for ${key}: ${err.message}`);
+        this.retireCommandListener(configId, sid, channelId, key, client);
       }
     });
 

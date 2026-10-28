@@ -69,6 +69,45 @@ export function formatFatalSshFailureMessage(detail: string): string {
 }
 
 /** True for permanent SSH connect failures (auth / host-key), not reconnectable disconnect. */
+/** Own client id and channel from a `whoami` reply. */
+export interface WhoamiIdentity {
+  clid: number;
+  cid: number;
+}
+
+/**
+ * Read the own client id from a `whoami` reply. The id is looked up on every line:
+ * a reply can carry another line ahead of the `client_id=` one, and reading only the
+ * first line left the CMD listener outside its channel (no textchannel events).
+ */
+export function parseWhoamiIdentity(raw: string): WhoamiIdentity | null {
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('error ')) continue;
+    for (const entry of parseQueryResponse(trimmed)) {
+      const clid = parseInt(String(entry.client_id ?? entry.clid ?? entry.clientid ?? '0'), 10);
+      if (!Number.isFinite(clid) || clid <= 0) continue;
+      const cid = parseInt(String(entry.client_channel_id ?? entry.cid ?? entry.client_cid ?? '0'), 10);
+      return { clid, cid: Number.isFinite(cid) && cid > 0 ? cid : 0 };
+    }
+    const m = trimmed.match(/(?:^|\s)(?:clid|client_id)=(\d+)/);
+    if (m) {
+      const cm = trimmed.match(/(?:^|\s)(?:client_channel_id|cid)=(\d+)/);
+      return { clid: parseInt(m[1], 10), cid: cm ? parseInt(cm[1], 10) : 0 };
+    }
+  }
+  return null;
+}
+
+/** Line count and key names of a Query reply, without values, for diagnostics. */
+function describeReplyShape(raw: string): string {
+  const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const keys = lines.map((l) =>
+    l.split(/\s+/).map((kv) => kv.split('=')[0]).filter(Boolean).slice(0, 6).join(','),
+  );
+  return `${lines.length} line(s)${keys.length ? `: ${keys.join(' | ')}` : ''}`;
+}
+
 export function isSshFatalConnectFailureMessage(message: string): boolean {
   return (
     /SSH authentication failed/i.test(message)
@@ -331,28 +370,16 @@ export class SshQueryClient extends EventEmitter {
       }
     }
 
-    // Move query client into the channel (required for channel chat notifications)
-    try {
-      const who = await this.executeCommand('whoami');
-      const first = (who.split('\n')[0] || '').trim();
-      const me = parseQueryResponse(first)[0] || {};
-      const clid =
-        me.clid ??
-        me.client_id ??
-        me.clientid ??
-        me.clientId ??
-        (() => {
-          const m = first.match(/(?:clid|client_id)=(\d+)/);
-          return m?.[1];
-        })();
-
-      if (clid) {
-        await this.executeCommand(`clientmove clid=${clid} cid=${channelId}`);
-      } else {
-        console.warn('[SshQueryClient] whoami did not return clid; cannot clientmove');
+    // Move query client into the channel (required for channel chat notifications).
+    // Without the move TeamSpeak sends this listener no textchannel events, so a
+    // failure here fails the registration and the bridge reopens the listener.
+    const me = await this.whoamiIdentity();
+    if (me.cid !== channelId) {
+      await this.executeCommand(`clientmove clid=${me.clid} cid=${channelId}`);
+      const after = await this.whoamiIdentity();
+      if (after.cid > 0 && after.cid !== channelId) {
+        throw new Error(`query client is in channel ${after.cid}, not ${channelId}, after clientmove`);
       }
-    } catch (err: any) {
-      console.warn(`[SshQueryClient] Failed to move query client to channel ${channelId}: ${err.message}`);
     }
 
     // Register ONLY textchannel for this channel
@@ -365,6 +392,18 @@ export class SshQueryClient extends EventEmitter {
     }
 
     console.log(`[SshQueryClient] Command listener ready for sid=${sid}, channelId=${channelId}`);
+  }
+
+  /** `whoami`, asked a second time if the first reply has no client id. */
+  private async whoamiIdentity(): Promise<WhoamiIdentity> {
+    let shape = '';
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const raw = await this.executeCommand('whoami');
+      const me = parseWhoamiIdentity(raw);
+      if (me) return me;
+      shape = describeReplyShape(raw);
+    }
+    throw new Error(`whoami reply has no client id (${shape})`);
   }
 
   get isConnected(): boolean {

@@ -232,8 +232,12 @@ A flow whose command trigger names a channel needs its own SSH command listener 
 - A listener whose connection fails or drops is reopened while a flow still needs it, after 2 s, 4 s, 8 s and so on,
   up to 60 s between attempts (longer during a TeamSpeak flood cooldown). Authentication and host-key failures are
   not retried.
-- Files: `packages/backend/src/bot-engine/event-bridge.ts`, `bot-engine/engine.ts`,
-  `voice/commands/channel-ownership.ts`.
+- A listener only hears chat in the channel it sits in. It read its own client id from the first line of the
+  `whoami` reply only, so when that line was something else it never moved into its channel yet logged itself as
+  ready, and the flow got no commands. The id is now read from any line (with one more `whoami` if needed), the
+  move is checked, and a listener that cannot join its channel is reopened with the same backoff.
+- Files: `packages/backend/src/bot-engine/event-bridge.ts`, `bot-engine/ssh-query-client.ts`,
+  `bot-engine/engine.ts`, `voice/commands/channel-ownership.ts`.
 
 ## Security
 

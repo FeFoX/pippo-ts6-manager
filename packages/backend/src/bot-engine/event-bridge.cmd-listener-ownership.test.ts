@@ -18,6 +18,7 @@ const FLOW_CHANNEL = 5;
 type ConnectStep = 'ok' | 'fail' | { gate: Promise<void> };
 
 let connectScript: ConnectStep[] = [];
+let registerScript: Array<'ok' | 'fail'> = [];
 let clients: SshQueryClient[] = [];
 const original = {
   connect: SshQueryClient.prototype.connect,
@@ -26,6 +27,7 @@ const original = {
 
 beforeEach(() => {
   connectScript = [];
+  registerScript = [];
   clients = [];
   SshQueryClient.prototype.connect = async function (this: any) {
     clients.push(this);
@@ -36,7 +38,9 @@ beforeEach(() => {
     this.connected = true;
     this.emit('ready');
   };
-  SshQueryClient.prototype.registerCommandListener = async () => {};
+  SshQueryClient.prototype.registerCommandListener = async () => {
+    if ((registerScript.shift() ?? 'ok') === 'fail') throw new Error('whoami reply has no client id (0 line(s))');
+  };
 });
 
 afterEach(() => {
@@ -200,6 +204,31 @@ test('a dropped listener is reopened while the flow still needs it', async () =>
   mock.timers.tick(commandListenerRetryDelayMs(1));
   await flush();
   assert.equal(clients.length, 2);
+  assert.equal(bridge.isCommandListenerConnected(CONFIG_ID, SID, FLOW_CHANNEL), true);
+});
+
+test('a listener that cannot join its channel is reopened with backoff', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const bridge = makeBridge();
+  registerScript = ['fail', 'fail', 'ok'];
+
+  await bridge.connectCommandListener(CONFIG_ID, SID, FLOW_CHANNEL);
+  await flush();
+  assert.equal((clients[0] as any).destroyed, true, 'a listener outside its channel is not kept');
+  assert.deepEqual(bridge.getCommandListenerChannelIds(CONFIG_ID, SID), [FLOW_CHANNEL]);
+
+  mock.timers.tick(commandListenerRetryDelayMs(1));
+  await flush();
+  assert.equal(clients.length, 2);
+  assert.equal((clients[1] as any).destroyed, true);
+
+  // The backoff keeps growing while registration fails.
+  mock.timers.tick(commandListenerRetryDelayMs(2) - 1);
+  await flush();
+  assert.equal(clients.length, 2);
+  mock.timers.tick(1);
+  await flush();
+  assert.equal(clients.length, 3);
   assert.equal(bridge.isCommandListenerConnected(CONFIG_ID, SID, FLOW_CHANNEL), true);
 });
 
