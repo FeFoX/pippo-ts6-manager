@@ -86,7 +86,8 @@ export async function refreshBotChannels(context: CommandContext, botId: number)
 
 /**
  * Music no longer opens per-channel CMD SSH listeners (Query flood on bot join).
- * Tear down leftovers from older tips and park the main SSH helper where humans are.
+ * Close any CMD listener music still holds (never a flow's) and park the main SSH
+ * helper where humans are.
  */
 export async function syncCommandListenersForPair(
   context: CommandContext,
@@ -108,7 +109,7 @@ export async function syncCommandListenersForPair(
   }
 }
 
-/** Remove leftover music listeners and park the roaming helper with humans. */
+/** Close music-held CMD listeners and park the roaming helper with humans. */
 export async function syncCommandListenersForPairOnce(
   context: CommandContext,
   configId: number,
@@ -122,28 +123,14 @@ export async function syncCommandListenersForPairOnce(
   }
 
   const pairKey = `${configId}:${sid}`;
-  const previousAuto = context.autoCommandChannels.get(pairKey) || [];
   context.autoCommandChannels.delete(pairKey);
 
-  const musicOwned = new Set<number>(previousAuto);
-  for (const cfg of context.botChannelConfig.values()) {
-    if (cfg.serverConfigId !== configId || cfg.virtualServerId !== sid) continue;
-    for (const cidStr of cfg.commandChannelIds) {
-      const n = parseInt(cidStr, 10);
-      if (n > 0) musicOwned.add(n);
-    }
-  }
-
-  const existing = context.eventBridge.getCommandListenerChannelIds(configId, sid);
-  // Empty commandChannelIds used to open occupied helpers — drop all leftovers for
-  // this pair. Explicit configs only drop music-owned cids (leave BotEngine flows).
-  const hasExplicit = context.pairHasExplicitCommandChannels(configId, sid);
-  const toDrop = hasExplicit
-    ? existing.filter((cid) => musicOwned.has(cid))
-    : existing.slice();
+  // Only listeners music itself holds. BotEngine flows open CMD listeners for
+  // channel-bound command triggers; those belong to the flow and must survive here.
+  const toDrop = context.eventBridge.getCommandListenerChannelIds(configId, sid, 'music');
   for (const channelId of toDrop) {
     try {
-      await context.eventBridge.disconnectCommandListener(configId, sid, channelId);
+      await context.eventBridge.disconnectCommandListener(configId, sid, channelId, 'music');
     } catch {
       /* ignore */
     }

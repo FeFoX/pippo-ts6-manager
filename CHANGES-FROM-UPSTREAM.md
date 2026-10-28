@@ -221,11 +221,19 @@ A deeper queue costs memory only while a stream runs (at most 512 compressed pac
 
 ### Command listener race (bot flows)
 
-Two concurrent calls could open two SSH command listeners for the same channel, so a chat command ran its flow
-twice. Listeners being set up are now tracked, and a listener whose first connection timed out (which never retries
-by itself) is replaced, up to three attempts.
+A flow whose command trigger names a channel needs its own SSH command listener in that channel.
 
-- File: `packages/backend/src/bot-engine/event-bridge.ts`.
+- Two concurrent calls could open two listeners for the same channel, so a chat command ran its flow twice.
+  Listeners being set up are now tracked.
+- The music bots' startup cleanup closed every command listener on the server when no music bot had command
+  channels set, including the flows' listeners, and nothing reopened them: the flow stopped answering until it was
+  disabled and enabled again. Each listener now records who opened it (a flow or music), and music closes only its
+  own.
+- A listener whose connection fails or drops is reopened while a flow still needs it, after 2 s, 4 s, 8 s and so on,
+  up to 60 s between attempts (longer during a TeamSpeak flood cooldown). Authentication and host-key failures are
+  not retried.
+- Files: `packages/backend/src/bot-engine/event-bridge.ts`, `bot-engine/engine.ts`,
+  `voice/commands/channel-ownership.ts`.
 
 ## Security
 

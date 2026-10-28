@@ -688,7 +688,7 @@ export class BotEngine {
       const channelId = Number(m[3]);
       const pairKey = `${configId}:${sid}`;
       if (!allNeeded.has(pairKey)) {
-        await this.eventBridge.disconnectCommandListener(configId, sid, channelId);
+        await this.eventBridge.disconnectCommandListener(configId, sid, channelId, 'flow');
       }
     }
   }
@@ -795,11 +795,11 @@ export class BotEngine {
 
   private syncCommandListenersForPair(configId: number, sid: number): void {
     const needed = new Set(this.getNeededCommandChannelIds(configId, sid));
-    const existing = new Set(this.eventBridge.getCommandListenerChannelIds(configId, sid));
+    const existing = new Set(this.eventBridge.getCommandListenerChannelIds(configId, sid, 'flow'));
 
     for (const cid of needed) {
       if (!existing.has(cid)) {
-        this.eventBridge.connectCommandListener(configId, sid, cid).catch(err => {
+        this.eventBridge.connectCommandListener(configId, sid, cid, 'flow').catch(err => {
           console.error(`[BotEngine] CMD listener connect failed for ${configId}:${sid}:${cid}: ${err.message}`);
         });
       }
@@ -807,7 +807,7 @@ export class BotEngine {
 
     for (const cid of existing) {
       if (!needed.has(cid)) {
-        this.eventBridge.disconnectCommandListener(configId, sid, cid).catch(() => { });
+        this.eventBridge.disconnectCommandListener(configId, sid, cid, 'flow').catch(() => { });
       }
     }
   }

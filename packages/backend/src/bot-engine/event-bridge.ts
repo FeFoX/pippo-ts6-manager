@@ -8,6 +8,22 @@ import { ClientMetadataCache } from './client-metadata-cache.js';
 /** Explicit multi-consumer ownership of main EventBridge SSH sessions. */
 export type SessionOwnerKind = 'flow' | 'music' | 'journal';
 
+/** Consumers that can hold a per-channel CMD listener. */
+export type CommandListenerOwner = 'flow' | 'music';
+
+type CommandListenerOpenOutcome = 'opened' | 'failed' | 'skipped' | 'superseded';
+
+const COMMAND_LISTENER_RETRY_BASE_MS = 2000;
+const COMMAND_LISTENER_RETRY_MAX_MS = 60000;
+
+/** Backoff before reopening a CMD listener: 2s, 4s, 8s … capped at 60s. */
+export function commandListenerRetryDelayMs(attempt: number): number {
+  return Math.min(
+    COMMAND_LISTENER_RETRY_BASE_MS * Math.pow(2, Math.max(0, attempt - 1)),
+    COMMAND_LISTENER_RETRY_MAX_MS,
+  );
+}
+
 export declare interface EventBridge {
   on(event: 'tsEvent', listener: (configId: number, sid: number, eventName: string, data: Record<string, string>) => void): this;
   on(event: 'sshConnected', listener: (configId: number, sid: number) => void): this;
@@ -315,7 +331,7 @@ export class EventBridge extends EventEmitter {
   async reconnectConfig(configId: number): Promise<void> {
     const prefix = `${configId}:`;
     const sidsToReconnect: number[] = [];
-    const cmdListenersToRestore: Array<{ sid: number; channelId: number }> = [];
+    const cmdListenersToRestore: Array<{ sid: number; channelId: number; owners: CommandListenerOwner[] }> = [];
 
     for (const key of [...this.connections.keys()]) {
       if (!key.startsWith(prefix)) continue;
@@ -326,19 +342,24 @@ export class EventBridge extends EventEmitter {
       await this.disconnectServer(configId, sid);
     }
 
-    for (const key of [...this.commandListeners.keys()]) {
+    for (const [key, owners] of [...this.commandListenerOwners]) {
       if (!key.startsWith(prefix)) continue;
       // key format: `${configId}:${sid}:cmd:${channelId}`
       const parts = key.split(':');
       const sid = parseInt(parts[1], 10);
       const channelId = parseInt(parts[3], 10);
       if (!Number.isNaN(sid) && !Number.isNaN(channelId)) {
-        cmdListenersToRestore.push({ sid, channelId });
+        cmdListenersToRestore.push({ sid, channelId, owners: [...owners] });
       }
+      const timer = this.commandListenerRetryTimers.get(key);
+      if (timer) clearTimeout(timer);
+      this.commandListenerRetryTimers.delete(key);
+      this.commandListenerRetryAttempts.delete(key);
+      this.commandListenerOwners.delete(key);
       const client = this.commandListeners.get(key);
       if (client) {
-        await client.destroy();
         this.commandListeners.delete(key);
+        await client.destroy();
       }
     }
 
@@ -350,9 +371,11 @@ export class EventBridge extends EventEmitter {
       }
     }
 
-    for (const { sid, channelId } of cmdListenersToRestore) {
+    for (const { sid, channelId, owners } of cmdListenersToRestore) {
       try {
-        await this.connectCommandListener(configId, sid, channelId);
+        for (const owner of owners) {
+          await this.connectCommandListener(configId, sid, channelId, owner);
+        }
       } catch (err: any) {
         console.error(`[EventBridge] CMD listener reconnect failed for ${configId}:${sid}:${channelId}: ${err.message}`);
       }
@@ -435,30 +458,73 @@ export class EventBridge extends EventEmitter {
   private commandListeners: Map<string, SshQueryClient> = new Map();
   /** Keys being set up: a second concurrent caller must not open a duplicate listener. */
   private pendingCommandListeners: Set<string> = new Set();
+  /**
+   * Who wants each CMD listener. A listener stays wanted (and is retried) until every
+   * owner has disconnected it, so music cleanup can never close a flow's listener.
+   */
+  private commandListenerOwners = new Map<string, Set<CommandListenerOwner>>();
+  /** Pending backoff reopen per CMD listener key. */
+  private commandListenerRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Consecutive failed opens per CMD listener key (reset once the listener is ready). */
+  private commandListenerRetryAttempts = new Map<string, number>();
 
   private makeCmdKey(configId: number, sid: number, channelId: number): string {
     return `${configId}:${sid}:cmd:${channelId}`;
   }
 
-  async connectCommandListener(configId: number, sid: number, channelId: number): Promise<void> {
+  async connectCommandListener(
+    configId: number,
+    sid: number,
+    channelId: number,
+    owner: CommandListenerOwner = 'flow',
+  ): Promise<void> {
     const key = this.makeCmdKey(configId, sid, channelId);
-    if (this.commandListeners.has(key) || this.pendingCommandListeners.has(key)) return;
+    let owners = this.commandListenerOwners.get(key);
+    if (!owners) {
+      owners = new Set();
+      this.commandListenerOwners.set(key, owners);
+    }
+    owners.add(owner);
+    if (
+      this.commandListeners.has(key) ||
+      this.pendingCommandListeners.has(key) ||
+      this.commandListenerRetryTimers.has(key)
+    ) {
+      return;
+    }
     this.pendingCommandListeners.add(key);
+    let outcome: CommandListenerOpenOutcome = 'opened';
     try {
-      await this.openCommandListener(configId, sid, channelId, key);
+      outcome = await this.openCommandListener(configId, sid, channelId, key);
     } finally {
       this.pendingCommandListeners.delete(key);
     }
+    // Closed and reopened while this open was in flight: the reopen returned early
+    // on the pending key, so start it now instead of leaving the listener dead.
+    if (
+      outcome === 'superseded' &&
+      this.commandListenerOwners.has(key) &&
+      !this.commandListeners.has(key)
+    ) {
+      this.scheduleCommandListenerRetry(configId, sid, channelId, key, 0);
+    }
   }
 
-  private async openCommandListener(configId: number, sid: number, channelId: number, key: string, attempt = 1): Promise<void> {
+  private async openCommandListener(
+    configId: number,
+    sid: number,
+    channelId: number,
+    key: string,
+  ): Promise<CommandListenerOpenOutcome> {
+    if (!this.commandListenerOwners.has(key)) return 'superseded';
     const serverConfig = await this.prisma.tsServerConfig.findUnique({ where: { id: configId } });
+    if (!this.commandListenerOwners.has(key)) return 'superseded';
     if (!serverConfig?.sshUsername || !serverConfig.sshPassword || !serverConfig.sshPort) {
       console.warn(
         `[EventBridge] CMD listener skipped for ${key}: server config missing SSH credentials ` +
           `(music !commands outside the bot's voice channel require SSH ServerQuery)`,
       );
-      return;
+      return 'skipped';
     }
 
     const client = new SshQueryClient(this.buildSshOptions({
@@ -472,6 +538,7 @@ export class EventBridge extends EventEmitter {
 
     client.on('ready', async () => {
       console.log(`[EventBridge] CMD listener SSH connected for ${key}`);
+      this.commandListenerRetryAttempts.delete(key);
       try {
         await client.registerCommandListener(sid, channelId);
       } catch (err: any) {
@@ -488,41 +555,120 @@ export class EventBridge extends EventEmitter {
     });
 
     client.on('error', (err: Error) => console.error(`[EventBridge] CMD listener SSH error for ${key}: ${err.message}`));
-    client.on('close', () => console.log(`[EventBridge] CMD listener SSH disconnected for ${key}`));
+    client.on('close', () => {
+      console.log(`[EventBridge] CMD listener SSH disconnected for ${key}`);
+      // The bridge owns the reconnect: a client whose connect timed out does not
+      // always retry by itself, so replace it with a fresh one after a backoff.
+      this.retireCommandListener(configId, sid, channelId, key, client);
+    });
 
     this.commandListeners.set(key, client);
-    try { await client.connect(); } catch (err: any) {
+    try {
+      await client.connect();
+    } catch (err: any) {
       console.error(`[EventBridge] CMD listener initial connect failed for ${key}: ${err.message}`);
+      if (this.commandListeners.get(key) !== client) return 'superseded';
       if (client.hasFatalError) {
+        console.error(`[EventBridge] CMD listener for ${key} not retried: permanent SSH failure`);
         this.commandListeners.delete(key);
-      } else if (attempt < 3 && this.commandListeners.get(key) === client) {
-        // A listener whose first connect timed out never retries by itself and would stay dead.
-        await client.destroy().catch(() => undefined);
-        this.commandListeners.delete(key);
-        await this.openCommandListener(configId, sid, channelId, key, attempt + 1);
+        return 'failed';
       }
+      this.retireCommandListener(configId, sid, channelId, key, client);
+      return 'failed';
     }
+    return this.commandListeners.get(key) === client ? 'opened' : 'superseded';
   }
 
-  async disconnectCommandListener(configId: number, sid: number, channelId: number): Promise<void> {
+  /** Drop a dead CMD listener client and, while an owner still wants it, reopen after a backoff. */
+  private retireCommandListener(
+    configId: number,
+    sid: number,
+    channelId: number,
+    key: string,
+    client: SshQueryClient,
+  ): void {
+    if (this.commandListeners.get(key) !== client) return;
+    this.commandListeners.delete(key);
+    const floodPauseMs = client.getReconnectPauseSeconds() * 1000;
+    void client.destroy().catch(() => undefined);
+    if (client.hasFatalError) {
+      console.error(`[EventBridge] CMD listener for ${key} not retried: permanent SSH failure`);
+      return;
+    }
+    this.scheduleCommandListenerRetry(configId, sid, channelId, key, floodPauseMs);
+  }
+
+  private scheduleCommandListenerRetry(
+    configId: number,
+    sid: number,
+    channelId: number,
+    key: string,
+    minDelayMs: number,
+  ): void {
+    if (!this.commandListenerOwners.has(key) || this.commandListenerRetryTimers.has(key)) return;
+    const attempt = (this.commandListenerRetryAttempts.get(key) || 0) + 1;
+    this.commandListenerRetryAttempts.set(key, attempt);
+    const delay = Math.max(commandListenerRetryDelayMs(attempt), minDelayMs);
+    console.log(`[EventBridge] CMD listener ${key} reconnect in ${delay}ms (attempt ${attempt})`);
+    const timer = setTimeout(() => {
+      this.commandListenerRetryTimers.delete(key);
+      if (!this.commandListenerOwners.has(key)) return;
+      const owners = [...this.commandListenerOwners.get(key)!];
+      void this.connectCommandListener(configId, sid, channelId, owners[0]).catch((err: any) => {
+        console.error(`[EventBridge] CMD listener reconnect failed for ${key}: ${err?.message || err}`);
+      });
+    }, delay);
+    timer.unref?.();
+    this.commandListenerRetryTimers.set(key, timer);
+  }
+
+  /**
+   * Release `owner`'s hold on a CMD listener. The SSH session closes only once no
+   * owner is left, so one consumer's cleanup cannot drop another consumer's listener.
+   */
+  async disconnectCommandListener(
+    configId: number,
+    sid: number,
+    channelId: number,
+    owner: CommandListenerOwner = 'flow',
+  ): Promise<void> {
     const key = this.makeCmdKey(configId, sid, channelId);
+    const owners = this.commandListenerOwners.get(key);
+    if (owners) {
+      owners.delete(owner);
+      if (owners.size > 0) return;
+      this.commandListenerOwners.delete(key);
+    }
+    const timer = this.commandListenerRetryTimers.get(key);
+    if (timer) clearTimeout(timer);
+    this.commandListenerRetryTimers.delete(key);
+    this.commandListenerRetryAttempts.delete(key);
     const client = this.commandListeners.get(key);
     if (client) {
-      await client.destroy();
       this.commandListeners.delete(key);
+      await client.destroy();
     }
   }
 
-  getCommandListenerChannelIds(configId: number, sid: number): number[] {
+  /**
+   * Channels with a wanted CMD listener on this pair (connected, connecting or waiting
+   * to reconnect). With `owner`, only the listeners that owner holds.
+   */
+  getCommandListenerChannelIds(configId: number, sid: number, owner?: CommandListenerOwner): number[] {
     const prefix = `${configId}:${sid}:cmd:`;
-    return Array.from(this.commandListeners.keys())
-      .filter(k => k.startsWith(prefix))
-      .map(k => parseInt(k.split(':').pop() || '0', 10))
+    return Array.from(this.commandListenerOwners.entries())
+      .filter(([k, owners]) => k.startsWith(prefix) && (!owner || owners.has(owner)))
+      .map(([k]) => parseInt(k.split(':').pop() || '0', 10))
       .filter(n => Number.isFinite(n) && n > 0);
   }
 
   getCommandListenerKeys(): string[] {
-    return Array.from(this.commandListeners.keys());
+    return Array.from(this.commandListenerOwners.keys());
+  }
+
+  /** True when the CMD listener for this channel has a live, connected SSH session. */
+  isCommandListenerConnected(configId: number, sid: number, channelId: number): boolean {
+    return this.commandListeners.get(this.makeCmdKey(configId, sid, channelId))?.isConnected ?? false;
   }
 
   /** Channel id the main SSH Query client is parked in for music chat (0 = unknown). */
@@ -729,6 +875,10 @@ export class EventBridge extends EventEmitter {
     this.sessionOwners.clear();
     this.clientCache.clearAll();
 
+    for (const timer of this.commandListenerRetryTimers.values()) clearTimeout(timer);
+    this.commandListenerRetryTimers.clear();
+    this.commandListenerRetryAttempts.clear();
+    this.commandListenerOwners.clear();
     for (const client of this.commandListeners.values()) {
       closing.push(client.destroy());
     }

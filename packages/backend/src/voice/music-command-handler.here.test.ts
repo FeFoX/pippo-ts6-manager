@@ -339,7 +339,7 @@ test('empty commandChannelIds parks main helper without connectCommandListener',
   assert.ok(f.handler.channelToBots.get('9:1:34')?.has(1));
 });
 
-test('sync disconnects leftover CMD listeners without reconnecting them', async () => {
+test('sync disconnects music CMD listeners and leaves flow listeners alone', async () => {
   const bot = makeBot(1, { channelId: 1, ts3ClientId: 101 });
   const f = fixture([bot]);
   f.handler.botChannelConfig.set(1, {
@@ -348,16 +348,17 @@ test('sync disconnects leftover CMD listeners without reconnecting them', async 
     defaultChannel: '1',
     commandChannelIds: [],
   });
-  const connected = [34, 99];
+  // cid 34 belongs to a BotEngine flow, cid 99 to music.
+  const connected = new Map<number, string>([[34, 'flow'], [99, 'music']]);
   const parked: number[] = [];
   f.handler.eventBridge = {
-    getCommandListenerChannelIds: () => [...connected],
+    getCommandListenerChannelIds: (_c: number, _s: number, owner?: string) =>
+      [...connected].filter(([, o]) => !owner || o === owner).map(([cid]) => cid),
     connectCommandListener: async () => {
       throw new Error('connectCommandListener must not be called');
     },
-    disconnectCommandListener: async (_c: number, _s: number, cid: number) => {
-      const i = connected.indexOf(cid);
-      if (i >= 0) connected.splice(i, 1);
+    disconnectCommandListener: async (_c: number, _s: number, cid: number, owner = 'flow') => {
+      if (connected.get(cid) === owner) connected.delete(cid);
     },
     ensureHelperInChannel: async (_c: number, _s: number, cid: number) => {
       parked.push(cid);
@@ -366,7 +367,7 @@ test('sync disconnects leftover CMD listeners without reconnecting them', async 
     executeCommand: async () => 'clid=2 cid=34 client_type=0|clid=101 cid=1 client_type=0',
   };
   await f.handler.syncCommandListenersForPair(9, 1);
-  assert.deepEqual(connected, []);
+  assert.deepEqual([...connected.keys()], [34]);
   assert.deepEqual(parked, [34]);
 });
 
