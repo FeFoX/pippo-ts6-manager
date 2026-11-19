@@ -5,9 +5,15 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git commit SHA to check out (prerelease publish path)
+        required: false
+        type: string
 
 concurrency:
-  group: pr-validation-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: pr-validation-${{ github.workflow }}-${{ inputs.ref || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -21,10 +27,23 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Set up Docker Compose
-        uses: docker/setup-compose-action@v2
+        uses: docker/setup-compose-action@54042514f505b273907334ae2b9cdbb9a0213c1a # v2.4.0
+
+      - name: Test release workflow boundaries
+        run: |
+          python3 -m venv "$RUNNER_TEMP/workflow-tests"
+          "$RUNNER_TEMP/workflow-tests/bin/pip" install --disable-pip-version-check PyYAML==6.0.3
+          "$RUNNER_TEMP/workflow-tests/bin/python" scripts/ci/test_release_workflows.py
+          "$RUNNER_TEMP/workflow-tests/bin/python" scripts/ci/test_prerelease_guards.py
+          "$RUNNER_TEMP/workflow-tests/bin/python" scripts/ci/test_private_beta_publish.py
+          "$RUNNER_TEMP/workflow-tests/bin/python" scripts/ci/test_semgrep_workflow.py
+          python3 scripts/ci/test_nginx_proxy.py
+          python3 scripts/ci/test_dockerhub_readme.py
 
       - name: Run repo hygiene checks
         run: ./scripts/ci/repo-hygiene.sh
@@ -37,6 +56,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Set up pnpm
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
@@ -45,7 +66,7 @@ jobs:
           run_install: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 20
           cache: pnpm
@@ -83,7 +104,7 @@ jobs:
       # Step cap is tighter than the job (15m) so a hung Playwright/Chromium run
       # fails fast instead of cancelling after the whole TypeScript job times out.
       - name: Test production PWA
-        timeout-minutes: 8
+        timeout-minutes: 12
         env:
           CI: true
         run: pnpm --filter @ts6/frontend test
@@ -100,10 +121,50 @@ jobs:
           printf 'Running %d backend test files\n' "${#tests[@]}"
           pnpm exec tsx --test "${tests[@]}"
 
+  # The media download cache relies on filesystem behaviour that differs by platform
+  # (letter case, renaming open files, links, locks), so its tests also run on
+  # Windows and macOS. The rest of the backend suite runs on Linux above.
+  media-cache:
+    name: Media cache tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 9
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build common package
+        run: pnpm --filter @ts6/common build
+
+      - name: Run media cache and library file tests
+        working-directory: packages/backend
+        run: pnpm exec tsx --test src/voice/audio/media-cache.test.ts src/voice/audio/library-files.test.ts src/routes/music-library.delete-song.test.ts
+
   sidecar:
     name: Go sidecar test and vet
     runs-on: ubuntu-latest
-    container: golang:1.25-bookworm
+    container: golang:1.26-bookworm
     timeout-minutes: 10
     defaults:
       run:
@@ -112,6 +173,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -122,10 +185,20 @@ jobs:
       - name: Install FFmpeg for playback regression tests
         run: apt-get update -qq && apt-get install -y --no-install-recommends ffmpeg
 
-      - name: Test
+      # The race detector needs cgo; the golang image has gcc for it.
+      - name: Test with the race detector
         env:
           SIDECAR_FFMPEG_IT: "1"
-        run: go test ./...
+          CGO_ENABLED: "1"
+        run: go test -race ./...
 
       - name: Vet
         run: go vet ./...
+
+      # Compile every native release target so a platform-specific break is
+      # caught here, not when a release is tagged. No archives are produced.
+      - name: Cross-compile native release targets
+        working-directory: .
+        env:
+          SIDECAR_SKIP_ARCHIVE: "1"
+        run: ./scripts/sidecar/build-release.sh 0.0.0-pr "$RUNNER_TEMP/sidecar"

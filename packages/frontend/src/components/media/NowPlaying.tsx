@@ -1,10 +1,12 @@
 import { useState } from 'react';
 import {
-  AlertTriangle, Music, Pause, Play, Radio, SkipForward, Square, Video,
+  AlertTriangle, Gauge, Music, Pause, Play, Radio, SkipForward, Square, Video,
 } from 'lucide-react';
+import { BotAutomationDialog } from '@/pages/bot-hub/BotAutomationDialog';
 import type { BotMediaOverview } from '@ts6/common';
 import { VideoPlayer } from '@/components/video/VideoPlayer';
 import { Badge } from '@/components/ui/badge';
+import { AutomationBadges } from './AutomationBadges';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Slider } from '@/components/ui/slider';
@@ -16,7 +18,7 @@ import { apiErrorMessage } from '@/lib/api-error';
 import {
   hubFacts, hubHeadline, hubLastStop, hubTone, queuePosition, videoDetails, type HubTone,
 } from '@/lib/bot-hub';
-import { formatClock } from '@/lib/video-streaming';
+import { formatClock, qualityAdaptationNote } from '@/lib/video-streaming';
 import { cn } from '@/lib/utils';
 
 const TONE_BADGE: Record<HubTone, { label: string; variant: 'destructive' | 'default' | 'secondary' | 'outline' }> = {
@@ -56,6 +58,7 @@ function CompactNowPlaying(props: NowPlayingProps): JSX.Element {
   const { data: musicState } = useMusicBotState(showVolume ? bot.botId : null);
   const badge = TONE_BADGE[tone];
   const facts = hubFacts(bot, now);
+  const adaptation = qualityAdaptationNote(bot.video?.quality, now);
   const lastStop = tone === 'idle' || tone === 'offline' ? hubLastStop(bot, now) : null;
   // One playback command at a time: repeat clicks would send duplicate skips.
   const playbackPending = pausePlayback.isPending || resumePlayback.isPending || skipTrack.isPending;
@@ -76,10 +79,13 @@ function CompactNowPlaying(props: NowPlayingProps): JSX.Element {
               </p>
             </div>
           </div>
-          <Badge variant={badge.variant} className="shrink-0 gap-1">
-            {tone === 'live' && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" aria-hidden="true" />}
-            {bot.session?.state === 'starting' ? 'Starting' : badge.label}
-          </Badge>
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+            <AutomationBadges bot={bot} />
+            <Badge variant={badge.variant} className="shrink-0 gap-1">
+              {tone === 'live' && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" aria-hidden="true" />}
+              {bot.session?.state === 'starting' ? 'Starting' : badge.label}
+            </Badge>
+          </div>
         </div>
 
         <div className="flex items-center gap-2">
@@ -102,10 +108,22 @@ function CompactNowPlaying(props: NowPlayingProps): JSX.Element {
             <span className="line-clamp-3">{bot.video.health.warning}</span>
           </p>
         )}
+        {adaptation && (
+          <p className={cn('flex items-start gap-1.5 text-xs', adaptation.reduced ? 'text-warning' : 'text-muted-foreground')}>
+            <Gauge className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <span className="line-clamp-3">{adaptation.text}</span>
+          </p>
+        )}
         {bot.video?.encoder?.fallbackReason && (
           <p className="flex items-start gap-1.5 text-xs text-warning">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
             <span className="line-clamp-2">Hardware encoder fell back to software: {bot.video.encoder.fallbackReason}</span>
+          </p>
+        )}
+        {bot.video?.encoder?.decoderFallbackReason && (
+          <p className="flex items-start gap-1.5 text-xs text-warning" role="status" aria-live="polite">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <span className="line-clamp-2">AV1 GPU decoding failed, decoding on the CPU: {bot.video.encoder.decoderFallbackReason}</span>
           </p>
         )}
 
@@ -233,6 +251,7 @@ function FullNowPlaying({ bot, now, footer }: NowPlayingProps): JSX.Element {
   const stopMusic = useStopPlayback();
   const stopVideo = useStopVideoStream();
   const [draggingVolume, setDraggingVolume] = useState<number | null>(null);
+  const [automationOpen, setAutomationOpen] = useState(false);
 
   const tone = hubTone(bot);
   const active = tone === 'music' || tone === 'live';
@@ -264,16 +283,22 @@ function FullNowPlaying({ bot, now, footer }: NowPlayingProps): JSX.Element {
     ? ['Live radio · plays until stopped', music?.position != null ? `up ${formatClock(music.position * 1000)}` : null]
     : [music?.artist, queuePosition(musicState)];
   const details = videoDetails(bot, now);
+  const adaptation = qualityAdaptationNote(bot.video?.quality, now);
 
   return (
     <Card className={cn(tone === 'offline' && 'opacity-70')}>
       <CardContent className="space-y-4 p-4 sm:p-5">
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 id="now-playing" className="text-base font-semibold">Now playing</h2>
-          <Badge variant={badge.variant} className="shrink-0 gap-1">
-            {tone === 'live' && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" aria-hidden="true" />}
-            {badgeLabel}
-          </Badge>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="button" variant="outline" size="sm" className="h-8" onClick={() => setAutomationOpen(true)}>
+              <Radio className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" /> Auto-DJ &amp; 24/7
+            </Button>
+            <Badge variant={badge.variant} className="shrink-0 gap-1">
+              {tone === 'live' && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" aria-hidden="true" />}
+              {badgeLabel}
+            </Badge>
+          </div>
         </div>
 
         {tone === 'music' && music && (
@@ -359,6 +384,12 @@ function FullNowPlaying({ bot, now, footer }: NowPlayingProps): JSX.Element {
                 <span className="line-clamp-3">{bot.video.health.warning}</span>
               </p>
             )}
+            {adaptation && (
+              <p className={cn('flex items-start gap-1.5 text-xs', adaptation.reduced ? 'text-warning' : 'text-muted-foreground')}>
+                <Gauge className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span className="line-clamp-3">{adaptation.text}</span>
+              </p>
+            )}
             {bot.session?.state === 'starting' && (
               <div className="space-y-2 rounded-md border bg-muted/30 p-3" role="status" aria-live="polite">
                 <p className="text-sm font-medium">
@@ -402,6 +433,12 @@ function FullNowPlaying({ bot, now, footer }: NowPlayingProps): JSX.Element {
                 <span className="line-clamp-2">Hardware encoder fell back to software: {bot.video.encoder.fallbackReason}</span>
               </p>
             )}
+            {bot.video?.encoder?.decoderFallbackReason && (
+              <p className="flex items-start gap-1.5 text-xs text-warning" role="status" aria-live="polite">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span className="line-clamp-2">AV1 GPU decoding failed, decoding on the CPU: {bot.video.encoder.decoderFallbackReason}</span>
+              </p>
+            )}
             {volumeControl}
             {bot.session?.state === 'active' && (
               <div className={cn('grid gap-2', canPauseVideo ? 'grid-cols-2' : 'grid-cols-1')}>
@@ -440,6 +477,9 @@ function FullNowPlaying({ bot, now, footer }: NowPlayingProps): JSX.Element {
         {lastStop && <p className="text-xs text-muted-foreground">{lastStop}</p>}
         {footer}
       </CardContent>
+      {automationOpen && (
+        <BotAutomationDialog botId={bot.botId} botName={bot.botName} onClose={() => setAutomationOpen(false)} />
+      )}
     </Card>
   );
 }

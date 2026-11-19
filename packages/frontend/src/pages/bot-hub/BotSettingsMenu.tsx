@@ -5,20 +5,21 @@
 
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
-import { Cpu, Link2, MoreHorizontal, Pencil, Power, PowerOff, Trash2 } from 'lucide-react';
+import { Cpu, Link2, MoreHorizontal, Pencil, Power, PowerOff, Radio, Trash2 } from 'lucide-react';
 import type { MusicBotSummary } from '@ts6/common';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { musicBotsApi } from '@/api/music.api';
 import { useDeleteMusicBot, useStartMusicBot, useStopMusicBot } from '@/hooks/use-music-bots';
 import { apiErrorMessage } from '@/lib/api-error';
 import { BotFormDialog } from './BotFormDialog';
 import { BotVideoResourcesDialog } from './BotVideoResourcesDialog';
 import { WidgetLinkDialog } from './WidgetLinkDialog';
+import { BotAutomationDialog } from './BotAutomationDialog';
 
 /** A bot counts as running unless it is stopped or failed. */
 export function isBotRunning(status: string): boolean {
@@ -33,11 +34,22 @@ export function BotSettingsMenu({ botId, botName, status, onDeleted, size = 'sm'
   size?: 'sm' | 'default';
 }) {
   const [editOpen, setEditOpen] = useState(false);
+  const [automationOpen, setAutomationOpen] = useState(false);
   // Full settings are only needed for Edit; no extra polling on the hub.
   const bots = useQuery({ queryKey: ['music-bots'], queryFn: musicBotsApi.list, enabled: editOpen });
   const summary = (Array.isArray(bots.data) ? bots.data as MusicBotSummary[] : []).find((b) => b.id === botId) ?? null;
   const startBot = useStartMusicBot();
   const stopBot = useStopMusicBot();
+  const queryClient = useQueryClient();
+  const homeBot = useMutation({
+    mutationFn: () => musicBotsApi.home(botId),
+    onSuccess: () => {
+      toast.success('Bot returned home; automation suspended until Start bot');
+      void queryClient.invalidateQueries({ queryKey: ['bot-media'] });
+      void queryClient.invalidateQueries({ queryKey: ['music-bots'] });
+    },
+    onError: (err) => toast.error(apiErrorMessage(err, 'Failed to return bot home')),
+  });
   const deleteBot = useDeleteMusicBot();
   const [widgetOpen, setWidgetOpen] = useState(false);
   const [resourcesOpen, setResourcesOpen] = useState(false);
@@ -71,6 +83,9 @@ export function BotSettingsMenu({ botId, botName, status, onDeleted, size = 'sm'
           <DropdownMenuItem onSelect={() => setEditOpen(true)}>
             <Pencil className="mr-2 h-4 w-4" aria-hidden="true" /> Edit bot
           </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => setAutomationOpen(true)}>
+            <Radio className="mr-2 h-4 w-4" aria-hidden="true" /> Auto-DJ &amp; 24/7
+          </DropdownMenuItem>
           {running ? (
             <DropdownMenuItem disabled={stopBot.isPending} onSelect={() => stopBot.mutate(botId, {
               onSuccess: () => toast.success('Bot stopped'),
@@ -92,6 +107,9 @@ export function BotSettingsMenu({ botId, botName, status, onDeleted, size = 'sm'
           <DropdownMenuItem onSelect={() => setResourcesOpen(true)}>
             <Cpu className="mr-2 h-4 w-4" aria-hidden="true" /> Video CPU settings
           </DropdownMenuItem>
+          {running && <DropdownMenuItem disabled={homeBot.isPending} onSelect={() => homeBot.mutate()}>
+            Return home (suspend automation)
+          </DropdownMenuItem>}
           <DropdownMenuSeparator />
           <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => setDeleteOpen(true)}>
             <Trash2 className="mr-2 h-4 w-4" aria-hidden="true" /> Delete bot
@@ -100,6 +118,7 @@ export function BotSettingsMenu({ botId, botName, status, onDeleted, size = 'sm'
       </DropdownMenu>
 
       <BotFormDialog open={editOpen && !!summary} bot={summary} onClose={() => setEditOpen(false)} />
+      {automationOpen && <BotAutomationDialog botId={botId} botName={botName} onClose={() => setAutomationOpen(false)} />}
       <WidgetLinkDialog botId={botId} botName={botName} open={widgetOpen} onOpenChange={setWidgetOpen} />
       <BotVideoResourcesDialog botId={botId} botName={botName} open={resourcesOpen} onOpenChange={setResourcesOpen} />
       <ConfirmDialog

@@ -1,0 +1,187 @@
+# Listener remote API — T04 / T05 contract
+
+This is the Slice 2 contract for roadmap #253. The phone UI is the frontend
+`/remote` route and uses this API. It depends on the merged Slice 1 (PR #393).
+
+## Browser lifecycle
+
+1. A human in the media bot's channel types `!remote` (optionally selecting a
+   bot using the normal chat targeting). The bot sends a **private** link to
+   `<Public URL>/remote#token=<one-time token>`. Never use a query parameter.
+2. T05 reads the fragment and immediately removes it with `history.replaceState`.
+   POST the token once to `/api/listener-remote/exchange` as JSON `{ "token": "…" }`.
+3. Response: `{ "session": "…", "expiresAt": "ISO timestamp", "botId": 12 }`.
+   Keep the session in memory and send `Authorization: Bearer <session>` on
+   every request below. Do not persist either secret in local/session storage,
+   analytics, logs, URLs, or the PWA cache. This session does not authenticate
+   the administrative API. No cookies, refresh tokens, or WebSocket access.
+4. On 401, clear the session and ask the listener to type `!remote` again.
+   On 403, refresh state (permissions may have changed). Respect 429 and avoid
+   automatic retries of mutations. Poll state at most every five seconds while
+   visible. Stop polling in the background.
+
+Use the same Public URL origin and any configured base path for frontend and
+API. Fetch with `cache: 'no-store'`; exclude these paths from service-worker
+caching. Responses carry `Cache-Control: no-store` and `Referrer-Policy:
+no-referrer`. Do not embed third-party assets on the token landing page.
+
+## Listener endpoints
+
+All endpoints use JSON. No caller-supplied bot, channel, server, UID, group or
+media settings are accepted. Bodies are strict: extra keys are rejected.
+
+| Method/path under `/api/listener-remote` | Request | Success |
+| --- | --- | --- |
+| POST `/exchange` | `{token: string}` | 200, session response above |
+| GET `/state` | Bearer session | 200, state below |
+| GET `/library?search=…&page=1` | search ≤200 characters; page 1–10000 | 200, `{songs: Song[], page: number, pageSize: 25}` |
+| POST `/queue` | `{songId: positive integer}` | 200, `{ok: true}`; appends a library song |
+| POST `/requests` | `{url: string}`; HTTP(S) URL ≤2048 characters | 200, `{ok: true}`; resolves and appends one track |
+| DELETE `/session` | Bearer session | 200, `{ok: true}`; invalidates this bot/identity's access |
+
+`Song = {id: number, title: string, artist: string|null, duration: number|null}`.
+State:
+
+```ts
+{
+  bot: { id: number; name: string; status: string };
+  nowPlaying: { id: string; title: string; artist: string|null; duration: number|null } | null;
+  upNext: Array<{ id: string; title: string; artist: string|null; duration: number|null }>;
+  upNextCount: number;
+  permissions: { searchLibrary: boolean; addToQueue: boolean; requestUrl: boolean };
+}
+```
+
+Up next is capped at 50 items. Metadata excludes file paths, source URLs,
+credentials, TeamSpeak identities and internal connection details. Appending
+does not interrupt playback or change streaming defaults. URL playlists add
+only their first item in this slice. No library management, arbitrary chat
+commands, playback controls, administrative actions or media switching.
+
+Every request verifies the current human UID/client ID and bot channel through
+TeamSpeak. `/state` uses `np`/read-only `queue` authorization; `/library` uses
+read-only `queue`. Both mutations use `add` with nonempty arguments through
+the shared Slice 1 authorization service. State permission flags are hints;
+the backend rechecks policy and identity before queue insertion, including
+after slow URL resolution and audit writes. An explicit music or video Stop,
+or a queue clear, on the bot (`VoiceBot.stopGeneration`) after the request
+arrived drops it with `cancelled` (409), so a slow link cannot restart music
+that was stopped. Stopping or restarting the bot drops it too (the bot instance
+is compared as well). Skips, track changes, Auto-DJ and automatic video stops
+do not drop it.
+Pasted URLs use the existing SSRF validator without the admin LAN allowlist,
+followed by the normal media URL pipeline. URLs containing userinfo are
+rejected.
+
+Order of checks for `/queue` and `/requests` (cheapest first): body schema and,
+for links, URL syntax plus blocked hosts and private or reserved literals (no
+I/O) → authentication → authorization (`add`) → queue room → the request's own
+check (song lookup; for links: link-request limit, a free resolving slot, the
+destination's DNS check) → audit attempt opened → authorization again →
+resolve → authorization again → stop check and queue room again → queue. A
+link request uses up one of the session's link requests even when the bot's
+resolving slot is taken. One 120-second deadline, the
+session checks and the client-disconnect check cover a link from its slot
+reservation to the end of its download. Refusals before the attempt are kept
+in `ListenerRemoteRefusalAudit` (bounded per-window totals; 401, 403, 429 and
+409 `queue_full`), routine 400/404 and unavailable or timed-out 503/504 refusals are
+only counted in the log, and refusals after the attempt is opened complete that
+attempt with a specific result code.
+
+## Administrative revocation
+
+`POST /api/listener-remote-admin/bots/:botId/revoke`, with the normal admin
+JWT, accepts `{uid?: string}`. Omit `uid` to revoke all grants and sessions for
+the bot; otherwise revoke that TeamSpeak unique identity. Response:
+`{revoked: number}`. A listener session cannot call this endpoint. Revocation
+also cancels exchanges and delayed queue insertions already in progress.
+
+## Errors and security limits
+
+Errors are `{error: string, code: string}` with static, credential-free text.
+Codes: `invalid_request` (400), `invalid_access` (401; missing, consumed,
+expired, revoked or departed access), `permission_denied` (403), `not_found`
+(404; song/bot), `cancelled` (409; stopped or cleared while resolving),
+`queue_full` (409; the bot's queue has no room), `rate_limited` (429),
+`unavailable` (503), `timeout` (504; a pasted link took
+longer than two minutes to load). The remote surface never returns resolver,
+Query, database or credential-bearing exception text.
+
+Tokens expire after five minutes; sessions expire absolutely after fifteen
+minutes, with no extension on activity. A new `!remote` replaces earlier
+access for that bot/identity. Leaving/moving channels, reused client IDs, bot
+movement/disconnection, or admin revocation invalidates access. Only SHA-256
+hashes of random 256-bit credentials are retained. Consumption happens before
+asynchronous validation so concurrent exchanges cannot both succeed.
+
+The store and rate windows are bounded and process-local. Restarting the
+backend invalidates all access. Run one backend replica for this slice; shared
+atomic storage is required before horizontal scaling. See the public reverse
+proxy guide for Public URL, HTTPS and trusted proxy configuration.
+
+One-minute limits: three issued links per bot/identity, sixty authentications
+per bot/identity (queue mutations check again at insertion), five URL
+resolutions per bot/identity, 120 requests per client address, and ten
+exchanges per client address. Identity limits survive a new `!remote`, so
+asking for a new link does not reset them. Identity windows are created only
+for sessions that exist. Unknown, expired, revoked and consumed credentials all
+get the same 401, keep no per-credential state, and count only against the
+caller's address; token guessing is bounded by the per-address exchange limit.
+
+A client address is an IPv4 address, or the /64 network of an IPv6 address;
+IPv4-mapped IPv6 counts as its IPv4 address. When `req.ip` (which honours
+`TRUST_PROXY`) is not a valid IP address, the connecting peer's address is used.
+A request carrying a live session is limited per listener instead of per
+address, so listeners behind one shared address do not use up each other's
+budget; exchanges and requests without a live session count against the
+address.
+
+Address windows and identity windows are kept in separate stores of 10,000
+entries each. One window per address holds both its request and exchange
+counts, and one window per listener holds its link, authentication and URL
+counts, so making room for one count never discards another. Capacity never
+refuses a key: when a store is full, a new key first frees expired windows,
+then replaces the oldest window still under all its limits. A window that has
+reached a limit is dropped only when every window has, oldest first. Windows
+run on a monotonic clock.
+
+This is an accepted trade-off. Under sustained saturation by very many distinct
+addresses, a partly used quota (and, in the extreme, an exhausted one) can
+restart early. Refusing new keys on a full store was rejected because it let a
+flood deny service to everyone. The grant store is still capped at 10,000 and
+answers 503 when full. Queue insertion is capped at 500 items.
+
+The app also applies two standard Express limiters after the bounded guard,
+before JSON parsing and authentication on every public remote endpoint: one per
+client address for requests without a live session, and one per listener for
+requests with one. The listener limiter's store can only be filled by verified
+sessions, so address traffic never affects a signed-in listener. These two
+limiters and the sign-in limiter use bounded stores with the same policy; the
+sign-in store holds 100,000 entries.
+
+A 429 from a rate limit carries `Retry-After` with the whole seconds left in
+that window (at least 1). A pending link resolution answers 429 with
+`Retry-After: 60`. A full queue is not a rate limit: it answers 409
+`queue_full`, with no `Retry-After`.
+
+**Change in 1.11.2:** a full queue answered 429 `rate_limited` with
+`Retry-After: 60` before. Clients that waited and retried on that 429 should
+treat 409 `queue_full` as "no room now" and let the listener try again later;
+it is not retried automatically. The bundled listener page already shows the
+message and keeps the session. A second pending link is still 429
+`rate_limited`.
+URL resolution permits one pending job per bot and four across the remote
+service. A pasted link has two minutes, including the URL check, to resolve
+and download; the work is cancelled when that deadline passes (504 `timeout`),
+when the client disconnects (also before the link step starts), or when the
+session ends (checked every two seconds; 401). A link whose client left during
+the final access check is not queued. Its slots are released once the work has
+stopped. Cancellation kills the yt-dlp processes the request started,
+including the YouTube searches behind Spotify and Apple Music links. yt-dlp
+runs in its own process group, and a cancellation or its three-minute timeout
+kills the whole group, so an ffmpeg conversion stops with it. Provider page fetches that take no signal keep their own
+three-minute timeout but no longer hold a slot: the Spotify playlist and album
+lookup and the Apple Music lookup. The Spotify track page fetch is cancelled. A cancelled request never
+enqueues.
+JSON request bodies are limited to 4 KiB. T05 should serialize mutations and
+disable the request button while resolution is pending.

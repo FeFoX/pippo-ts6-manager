@@ -5,7 +5,8 @@ name: Release Please
 # Release Please creates the immutable vX.Y.Z tag + GitHub Release, and this
 # workflow publishes GHCR images, and the Docker Hub mirror when both
 # DOCKERHUB_USERNAME and DOCKERHUB_TOKEN are set (GITHUB_TOKEN tag pushes
-# do not retrigger publish-images.yml on their own).
+# do not retrigger publish-images.yml on their own). It also attaches the
+# native media sidecar archives to that release.
 on:
   push:
     branches: [main]
@@ -46,6 +47,15 @@ jobs:
       tag: ${{ needs.release-please.outputs.tag_name }}
     secrets: inherit
 
+  # Native media sidecar archives, attached to the same GitHub Release.
+  publish-sidecar-binaries:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/publish-sidecar-binaries.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
 
   notify-docs:
     needs: release-please
@@ -64,12 +74,12 @@ jobs:
           fi
       - name: Create short-lived destination token
         id: docs_app
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           app-id: ${{ vars.DOCS_SYNC_APP_ID }}
           private-key: ${{ secrets.DOCS_SYNC_APP_PRIVATE_KEY }}
           owner: uniskela
-          repositories: .com
+          repositories: com
           permission-contents: write
       - name: Notify versioned documentation receiver
         env:
@@ -80,7 +90,7 @@ jobs:
         run: |
           jq -n --arg repository "$SOURCE_REPO" --arg sha "$SOURCE_SHA" --arg ref "refs/heads/main" --arg release "$RELEASE_TAG" \
             '{event_type:"docs-source-updated",client_payload:{repository:$repository,sha:$sha,ref:$ref,release:$release}}' > "$RUNNER_TEMP/docs-dispatch.json"
-          gh api --method POST repos/uniskela/.com/dispatches --input "$RUNNER_TEMP/docs-dispatch.json"
+          gh api --method POST repos/uniskela/com/dispatches --input "$RUNNER_TEMP/docs-dispatch.json"
 
   # Context7 docs indexing follows an actual Release Please release, not every push.
   refresh-context7:

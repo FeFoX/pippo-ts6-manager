@@ -4,6 +4,8 @@
  * Interactive pause/skip buttons are not available server-side — use command hints.
  */
 
+import type { BotAutomationOverview } from '@ts6/common';
+
 export interface TrackLine {
   title: string;
   artist?: string;
@@ -108,6 +110,7 @@ export function formatNowPlayingMessage(input: NowPlayingFormatInput): string {
 export function formatHelpMessage(
   builtin: HelpCommandLine[],
   custom: CustomHelpLine[],
+  automation?: BotAutomationOverview | null,
 ): string {
   const lines: string[] = ['## Music bot commands', '', '### Built-in'];
   for (const entry of builtin) {
@@ -122,6 +125,19 @@ export function formatHelpMessage(
     for (const c of custom) {
       const blurb = c.description?.trim() || 'Custom reply';
       lines.push(`- **!${c.name}** — ${blurb}`);
+    }
+  }
+
+  // Auto-DJ and 24/7 have no chat command, so say here when the answering bot has them on.
+  if (automation?.autoDj || automation?.stayInChannel) {
+    lines.push('');
+    lines.push('### This bot');
+    if (automation.autoDj) {
+      const source = automation.sourceKind === 'radio' ? 'a radio station' : 'a saved playlist';
+      lines.push(`- **Auto-DJ is on** — when nothing is queued it plays ${source}. Your requests always play first.`);
+    }
+    if (automation.stayInChannel) {
+      lines.push('- **24/7 is on** — the bot stays in its channel.');
     }
   }
 
@@ -149,22 +165,26 @@ export function formatQueueMessage(
   items: TrackLine[],
   currentIndex: number,
   maxLines = 15,
+  /** `start`: first position shown. `numberOffset`: added to every track number. */
+  { start = 0, numberOffset = 0 }: { start?: number; numberOffset?: number } = {},
 ): string {
   if (items.length === 0) return '_Queue is empty._';
 
   const lines: string[] = [`## Queue (${items.length} tracks)`, ''];
-  const shown = items.slice(0, maxLines);
-  shown.forEach((item, i) => {
+  if (start > 0) lines.push(`_… ${start} earlier_`);
+  const shown = items.slice(start, start + maxLines);
+  shown.forEach((item, offset) => {
+    const i = start + offset;
     const prefix = i === currentIndex ? '▶️' : '•';
     const artist = item.artist ? `${escapeMarkdownInline(item.artist)} — ` : '';
     lines.push(
-      `${prefix} **${i + 1}.** ${artist}${escapeMarkdownInline(item.title)}${trackDurationSuffix(item.duration)}`,
+      `${prefix} **${numberOffset + i + 1}.** ${artist}${escapeMarkdownInline(item.title)}${trackDurationSuffix(item.duration)}`,
     );
   });
 
-  if (items.length > maxLines) {
-    lines.push('');
-    lines.push(`_… and ${items.length - maxLines} more_`);
+  const after = items.length - start - shown.length;
+  if (after > 0) {
+    lines.push('', `_… and ${after} more_`);
   }
 
   return lines.join('\n');

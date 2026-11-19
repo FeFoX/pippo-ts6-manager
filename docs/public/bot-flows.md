@@ -1,0 +1,285 @@
+# Bot flows reference
+
+This document describes the **bot flow engine** in TS6 Manager: triggers, conditions, actions, variables, and common patterns. It was originally adapted from [uniplayer1/ts6-manager](https://github.com/uniplayer1/ts6-manager) (MIT) and is maintained here for this core-focused fork.
+
+## Overview
+
+Bot flows are visual workflows stored per TeamSpeak server connection. Each flow has:
+
+- **Triggers** — what starts execution
+- **Conditions** — optional expression gates
+- **Actions** — TeamSpeak, HTTP, music-bot, and utility operations
+- **Variables** — persistent per-flow values plus execution-local temporary values
+- **Delay / log nodes** — pacing and execution diagnostics
+
+Flows run in the backend **bot engine**, which maintains the relevant TeamSpeak connections and executes connected nodes in order. Flow management/read routes are admin-only because flow data can contain secrets such as webhook tokens and outbound request configuration.
+
+## Editor and templates
+
+Open **Automation → Bot Flows** (`/bots`). The **Flows** tab holds the visual workflows; **Chat commands** holds custom text replies for the selected server.
+
+The editor uses rounded orthogonal connections and labelled **True** / **False** condition paths. Its drawing surface grows from the actual node and route extents, so wider saved flows are not clipped by a fixed canvas. Keep flows readable rather than relying on extreme spacing.
+
+An unsaved editor draft is protected from normal in-app navigation, browser unload, and query refresh replacement. The saved baseline advances only after a successful save.
+
+![Bot Flow Editor with condition branches](flow-editor.png)
+
+**From Template** opens the maintained template gallery on the Bot Flows page. Choosing a template creates an ordinary editable flow after its required fields are configured; templates are not a separate route.
+
+![Flow Templates gallery](flow-templates.png)
+
+## Triggers
+
+| Trigger | Description |
+|---------|-------------|
+| TS3 event | Fires on registered ServerQuery notifications such as client/channel/text events |
+| Cron | Scheduled execution using the configured cron expression and optional timezone |
+| Webhook | Token-addressed HTTP webhook trigger |
+| Chat command | Text message matching the configured command prefix/name; command arguments are exposed to the flow event data |
+
+The exact event fields available under `event.*` depend on the trigger that started the run.
+
+## Chat commands
+
+Open **Bot Flows → Chat commands** (`/bots?tab=commands`) to add, edit, enable or delete custom `!name` replies. **Presets** offers editable starter replies. Custom replies are answered by media bots in their command channels; flow command triggers run in the flow engine. Commands are shared by bots on the same server.
+
+The read-only **Built-in commands** list shows names already handled by media bots: playback and queue controls such as `!play`, `!playlist`, `!queue` and `!stop`, radio and streaming commands such as `!radio`, `!stream` and `!tv`, request history (`!history`, `!again`), listener commands (`!voteskip`, `!remote`) and help commands. See [Media bots — Channel text commands](music-bots.md#channel-text-commands) for usage.
+
+**Built-in command permissions** controls who may change playback, queue/playlists, and video/IPTV. Each group defaults to **Everyone**, including existing installations after upgrading. Choose **Selected TeamSpeak server groups** and select one or more groups to restrict access. Membership in any selected group grants access; selecting no groups denies that command group to everyone. Saved groups that no longer exist appear as unavailable and can be removed.
+
+Permissions use the server connection and virtual server selected in the main server picker. TeamSpeak group IDs belong to that virtual server; settings are shared by its media bots. These controls apply to built-in media chat commands. Custom replies and flow triggers retain their existing behavior.
+
+Help and information commands remain available, including the read-only forms of commands such as `!queue` and `!vol`. A denied control sends a short private reply; repeated denials are throttled. Restricted commands require a resolved TeamSpeak identity and server-group membership.
+
+Each built-in command belongs to one group:
+
+| Group (as shown in the editor) | Commands |
+|---|---|
+| **Playback and music controls** | `!here`, `!come`, `!play`, `!again`, `!stop`, `!pause`, `!skip`, `!next`, `!prev`, `!seek`; `!radio <id>`, `!vol <n>` / `!volume <n>` and `!repeat <mode>` when they change something |
+| **Queue and playlist changes** | `!queue <args>` (anything except `show`), `!add`, `!shuffle`, `!remove`, `!playlist <name>` / `!pl <name>` |
+| **Video and IPTV controls** | `!stream`, `!stopstream`, `!tv`, `!iptv` |
+| Always available | `!help`, `!commands`, `!np` / `!nowplaying`, `!history`, `!viewers`, `!channels`, `!lyrics`, the read-only forms (`!queue`, `!queue show`, `!vol`, `!volume`, `!playlist`, `!pl`, `!radio`, `!repeat` with no argument), `!voteskip` and `!remote` |
+
+`!voteskip` lets human listeners in the bot's current channel vote to skip the current track even when direct skip is restricted. More than half of human listeners must vote; bots and ServerQuery clients do not count. Each identity gets one vote, and votes reset when the track changes.
+
+`!remote` is also open to everyone, but it only issues a link to a verified listener in the bot's channel. The page that link opens obeys these permissions: anyone can see the queue and search the library, while adding a song or pasting a link needs the **Queue and playlist changes** group. See [Media bots — Listener remote](music-bots.md#listener-remote).
+
+**Command name clashes** warns when a name is used by more than one source: a custom reply, a flow command trigger or a built-in command. Comparison ignores case, surrounding spaces and leading `!` characters, so `!Play` clashes with `play`. The flow editor also shows **Command name clash** beside a conflicting command trigger. Rename the custom reply or trigger to avoid overlap; the warning does not block saving or change command routing.
+
+Old `/media-bots?tab=commands` and `/music-bots?tab=commands` links redirect here.
+
+## Conditions
+
+Condition nodes use **expr-eval** expressions evaluated against a scoped data object. Available namespaces are:
+
+- `event.*` — trigger/event fields; numeric strings are converted to numbers when possible
+- `var.*` — persistent flow variables stored in the database
+- `temp.*` — values created during the current execution
+- `time.*` — time/date fields in the flow timezone
+
+Examples:
+
+```text
+event.client_idle_time > 300
+var.warningCount >= 3
+contains(event.msg, "help")
+time.dayOfWeek == 0
+```
+
+Custom expression helpers currently include `contains`, `startsWith`, `endsWith`, `lower`, `upper`, `length`, and `split`.
+
+> [!IMPORTANT]
+> Condition expressions do **not** use `{{...}}` template interpolation. Reference namespaces directly (`event.field`, `var.name`, `temp.value`, `time.hours`). This is intentional: interpolating untrusted event text into expression source would allow the incoming value to alter expression syntax.
+
+A failed or invalid condition evaluates false and follows the condition node's false branch when one is connected.
+
+## Actions
+
+The backend dispatcher currently supports these action families:
+
+| Action family | Current operations |
+|---------------|--------------------|
+| Client control | Kick, ban, move, poke |
+| Messaging | Send private/channel/server text messages |
+| Channel control | Create, edit, delete channels; temporary-channel cleanup; animated channel names |
+| Server groups | Add/remove a client from a server group; poke group; rank checks |
+| WebQuery | Run an allowed WebQuery command with resolved parameters |
+| HTTP/webhooks | Outbound webhook and HTTP request actions, with URL validation / SSRF protections |
+| Automation | AFK mover, idle kicker |
+| Music / voice bots | Play, stop, join channel, leave channel, volume, pause/resume, skip, seek, text-to-speech |
+| Utility | Generate a code/value for later nodes |
+
+There is **no generic run-sub-flow action** in the current dispatcher. If one is added in future, update this reference alongside the implementation.
+
+### WebQuery safety
+
+The raw WebQuery action is restricted by the backend command whitelist. Flow authors cannot use it as an unrestricted escape hatch for destructive ServerQuery/WebQuery commands.
+
+### Outbound requests
+
+HTTP and webhook actions resolve configured templates before sending. Outbound URLs pass through the backend URL validator and SSRF protections; do not document or design flows around bypassing those checks.
+
+## Variables, temporary values, and templates
+
+### Persistent flow variables
+
+Variable nodes write values to the database with **flow scope**. Supported operations are:
+
+- `set`
+- `increment`
+- `append`
+
+Persistent values are referenced as:
+
+```text
+{{var.name}}
+```
+
+or inside a condition expression as:
+
+```text
+var.name
+```
+
+### Execution-local temporary values
+
+Actions can place transient results into the current execution context. These are referenced as:
+
+```text
+{{temp.name}}
+{{temp.apiResult.someField}}
+```
+
+Temporary values disappear when that flow execution ends.
+
+### Event, time, and execution placeholders
+
+Templates support these namespaces:
+
+- `{{event.field}}` — event/trigger data
+- `{{var.name}}` — persistent flow variable
+- `{{temp.name}}` — current-run temporary value
+- `{{time.hours}}`, `{{time.time}}`, `{{time.date}}`, etc. — timezone-aware time values
+- `{{exec.flowId}}`, `{{exec.executionId}}`, `{{exec.configId}}`, `{{exec.sid}}`, `{{exec.triggerType}}` — execution metadata
+
+Nested JSON access is supported for applicable event/temp values. Template filters currently include `uptime`, `round`, `floor`, and `dropFirst` (everything after the first word), for example:
+
+```text
+{{event.client_idle_time|uptime}}
+{{temp.latency|round}}
+```
+
+**Client leave enrichment:** `notifyclientleftview` payloads from TeamSpeak often include only `clid` / channel / reason fields. EventBridge caches allow-listed identity fields (`client_nickname`, `client_type`, `client_unique_identifier`, `client_database_id`) from `notifycliententerview` and merges them into leave events before flows run. Cached fields never override values already present on the leave event. If the client was never observed joining (reconnect gap), the native leave event is still emitted without those fields.
+
+## Delays and execution limits
+
+Delay nodes are capped by the backend at **5 minutes per delay node**. The timed reminder template is the exception: it reads a duration from `!remind` (`30s`, `10m`, `2h`, `1d`) and will not wait longer than **24 hours**, so a run cannot sit for days. The flow runner also caps node visits at **100 per execution** to stop accidental infinite traversal/loops.
+
+Execution status and logs are persisted so admins can inspect recent runs and node-level messages from the UI/API.
+
+## Security notes
+
+- Flow CRUD, reads, execution history, and logs are admin-only.
+- Treat webhook trigger tokens and configured outbound secrets like passwords.
+- WebSocket live updates are scoped to servers the authenticated user may access.
+- Condition expressions are evaluated without template interpolation.
+- Outbound HTTP actions use URL validation / SSRF protections.
+- Raw WebQuery flow actions use an allowlist.
+
+## Example patterns
+
+### Welcome message
+
+1. Trigger: client-enter event
+2. Condition: ignore query/service clients if required
+3. Action: send a private or channel message with server rules
+
+### AFK mover
+
+1. Trigger: cron schedule
+2. Action: AFK mover with an idle threshold and exempt channel/group configuration
+
+### Temporary channel cleanup
+
+1. Trigger: suitable client/channel event or schedule
+2. Action: temporary-channel cleanup using the configured parent/protected channel IDs
+
+### Support ticket
+
+1. Trigger: chat command `!support` plus a topic
+2. Action: create a tracked semi-permanent channel under the configured parent, named for the requester, with the topic on the channel
+3. Action: move the requester into that channel
+4. Action: poke the configured staff server group
+5. Schedule: the existing temporary-channel cleanup deletes the ticket channel once it is empty
+
+Import the **Support Ticket** template and set the parent channel and staff group. A command with no topic does not create a channel. The command trigger permits one request per requester UID every 60 seconds; its in-memory cooldown also applies after reconnecting with a new client ID.
+
+### Timed reminder
+
+1. Trigger: chat command `!remind 10m <text>`
+2. Condition: the command includes both a duration and reminder text
+3. Delay: wait for the duration in the command (`30s`, `10m`, `2h`, or `1d`). Longer values wait 24 hours
+4. Action: private message to the requester with the text after the duration
+
+The template has no channel or group fields. An invalid duration or missing reminder text does not send the message. Each requester UID may have at most three pending reminders per flow, within the flow's 20 concurrent executions; requests beyond these limits are ignored. Pending reminders are held in memory and do not survive a backend restart. Disabling or reloading the flow cancels pending waits.
+
+The backend makes a best-effort UID check after the wait and immediately before sending, skipping known disconnected or changed recipients. TeamSpeak addresses private chat messages by a session client ID; verification and delivery are separate commands, so disconnects and client-ID reuse can still race with delivery. Avoid sensitive reminder text when that risk is unacceptable.
+
+### Scheduled announcement
+
+1. Trigger: cron schedule (daily, hourly, or Monday morning) with a timezone
+2. Action: post the configured message to the whole server or one channel
+
+The default message is `Announcement {{time.date}}`. Import the **Scheduled Announcement** template, keep or edit that placeholder, and pick a channel only when the audience is a single channel.
+
+### Chat command bot
+
+1. Trigger: chat command such as `!rules`
+2. Optional condition using `event.*` fields or persistent `var.*` values
+3. Action: send the response to the appropriate TeamSpeak text target
+
+### Music-bot automation
+
+1. Trigger: cron, webhook, chat command, or TeamSpeak event
+2. Action: choose a voice/music-bot operation such as play, volume, pause/resume, skip, or seek
+3. Optional log node to record the automation outcome
+
+## Music bots outside flows
+
+Music bots are a separate subsystem built on the TeamSpeak voice stack. They can also be controlled directly through:
+
+- **Bot Hub → Open console**
+- in-channel text commands (`!play`, `!skip`, `!vol`, etc.)
+
+See [Media bots](music-bots.md) for queue, YouTube, radio and local-library behavior. **Automation → Bot Hub** is the bot list and opens each bot's console. **Media Library** holds shared songs, playlists, radio stations, requests and streaming defaults (see [Media bots — Bot Hub](music-bots.md#bot-hub)).
+
+![Bot Hub](bot-hub.png)
+
+## Safe temporary-channel ownership (v1.6.0)
+
+The Temp Channel Creator template opts its Create Channel node into **Track for this
+flow’s temporary-channel cleanup**. It records each newly created semi-permanent
+channel in a persistent internal BotVariable registry scoped to flow, server
+connection and virtual server, and appends a random ownership marker to its description while preserving any description configured by the flow.
+Cleanup requires both the registry and the matching marker, the expected parent,
+semi-permanent status and an empty channel. Non-forced deletion lets TeamSpeak reject
+a client-join race. Unrelated siblings, lobby, parent and other flows’ channels are
+preserved. Missing IDs are removed from tracking; reused IDs without the marker are
+never deleted. Removing the ownership marker, moving the channel, or promoting it to permanent prevents cleanup; ordinary description edits are safe when the marker is retained.
+
+**Existing templates:** enable tracking on the Create Channel node (semi-permanent
+mode), or import the updated template. Only subsequently created channels are tracked.
+Previously created/untracked channels must be reviewed and removed manually; the
+manager never adopts channels by name or parent. Deleting a flow removes its registry
+without deleting its channels. Restoring TeamSpeak independently of the manager DB
+may leave orphan channels, which is preferable to deleting administrator-owned data.
+Tracking does not restrict an explicitly configured generic Delete Channel action.
+
+## Further reading
+
+- [Documentation index](index.md) — public guides and reference
+- [Music bots](music-bots.md) — queue, playback, downloads, and chat controls
+- [Security](security.md) — application and deployment security
+- [Architecture](architecture.md) — package and service layout
+- [Roadmap](roadmap.md) — public fork direction
+- [CREDITS.md](../../CREDITS.md) — upstream and fork attribution

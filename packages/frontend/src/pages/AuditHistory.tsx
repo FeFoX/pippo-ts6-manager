@@ -80,10 +80,24 @@ const ACTION_LABELS: Record<AdminAuditAction, string> = {
   'media.video.start': 'Start video stream',
   'media.video.stop': 'Stop video stream',
   'media.video.source_change': 'Change stream source',
+  'media.video.queue_add': 'Queue a video',
+  'media.video.queue_change': 'Change the video queue',
+  'media.video.skip': 'Skip to a queued video',
   'media.session.switch': 'Switch media (replace what was playing)',
+  'listener.remote.queue_add': 'Listener remote: add library song',
+  'listener.remote.issue': 'Issue listener remote link',
+  'listener.remote.request': 'Listener remote: request link',
+  'listener.remote.revoke': 'Revoke listener remote access',
+  'listener.remote.auth_failed': 'Listener remote: refused access (total for 5 minutes)',
+  'listener.remote.rate_limited': 'Listener remote: rate limited (total for 5 minutes)',
+  'listener.remote.denied': 'Listener remote: permission denied',
+  'listener.remote.capacity': 'Listener remote: queue full',
   'music_bot.avatar_update': 'Update bot avatar',
+  'music_bot.automation_update': 'Update bot automation',
   'channel_banner.upload': 'Upload channel banner',
   'channel_banner.delete': 'Delete channel banner',
+  'server_icon.upload': 'Upload server icon',
+  'server_icon.delete': 'Delete server icon',
   'settings.public_url_update': 'Update public URL',
 };
 
@@ -97,6 +111,13 @@ const RESULT_CODE_LABELS: Record<AdminAuditResultCode, string> = {
   not_found: 'Not found',
   validation_failed: 'Validation failed',
   storage_failed: 'Storage failed',
+  invalid_access: 'Invalid or expired access',
+  permission_denied: 'Permission denied',
+  rate_limited: 'Rate limited',
+  queue_full: 'Queue full',
+  invalid_request: 'Invalid request',
+  cancelled: 'Cancelled',
+  unavailable: 'Unavailable',
   unknown: 'Unknown',
 };
 
@@ -109,11 +130,13 @@ const TARGET_TYPE_LABELS: Record<string, string> = {
   privilege_key: 'Privilege key',
   virtual_server: 'Virtual server',
   connection: 'Connection',
+  listener_remote_refusals: 'Refusals',
   flow: 'Flow',
   user: 'User',
   settings: 'Settings',
   music_bot: 'Music bot',
   channel_banner: 'Channel banner',
+  server_icon: 'Server icon',
 };
 
 const AUDIT_GRID =

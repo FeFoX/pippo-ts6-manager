@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "child_process";
 import type { Readable } from "stream";
 import OpusScript from "opusscript";
 import { validateUrl } from "../../utils/url-validator.js";
+import { acquireMediaEgress, egressEnvironment, mediaEgressEnabled } from "../egress/media-egress.js";
 
 export const SAMPLE_RATE = 48000;
 export const CHANNELS = 2;
@@ -14,13 +15,31 @@ export function isRemoteInput(input: string): boolean {
   return /^https?:\/\//i.test(input);
 }
 
+/**
+ * Protocols ffmpeg may open for a resolved track URL: HTTP(S) to the media
+ * egress proxy only, so a playlist or redirect cannot open anything else.
+ */
+const REMOTE_PROTOCOLS = "http,https,tls,tcp,httpproxy,crypto";
+
+/**
+ * Containers a resolved track may be in. Playlist formats (HLS, DASH, concat)
+ * are refused, so ffmpeg never opens addresses named inside the response.
+ */
+const REMOTE_FORMATS = "matroska,webm,mov,mp4,m4a,mp3,ogg,aac,flac,wav";
+
+/** Longest a resolved track may stream through one proxy token. */
+const FILE_STREAM_EGRESS_TTL_MS = 12 * 60 * 60_000;
+
 export function buildPcmFileArgs(input: string, startSeconds = 0): string[] {
   const args: string[] = [];
   if (startSeconds > 0) {
     args.push("-ss", startSeconds.toFixed(3));
   }
   if (isRemoteInput(input)) {
-    args.push("-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5");
+    args.push(
+      "-protocol_whitelist", REMOTE_PROTOCOLS, "-format_whitelist", REMOTE_FORMATS,
+      "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+    );
   }
   args.push(
     "-re",
@@ -73,13 +92,22 @@ export class AudioPipeline {
     input: string,
     startSeconds = 0,
   ): Promise<{ stdout: Readable; process: ChildProcess; kill: () => void }> {
-    if (isRemoteInput(input)) {
+    const remote = isRemoteInput(input);
+    if (remote) {
       const urlCheck = await validateUrl(input, { allowedProtocols: ['http:', 'https:'] });
       if (!urlCheck.valid) {
         throw new Error(`Stream URL blocked: ${urlCheck.error}`);
       }
     }
-    const ffmpeg = spawn("ffmpeg", buildPcmFileArgs(input, startSeconds), { shell: false });
+    // A remote input is a URL yt-dlp resolved: ffmpeg reaches it through the media egress proxy.
+    const job = remote && mediaEgressEnabled() ? await acquireMediaEgress(input, FILE_STREAM_EGRESS_TTL_MS) : null;
+    // ffmpeg is found on PATH as before; the environment only replaces proxy variables.
+    const ffmpeg = spawn("ffmpeg", buildPcmFileArgs(input, startSeconds), { // NOSONAR: same PATH lookup as the other ffmpeg spawns
+      shell: false,
+      env: job ? egressEnvironment(job.proxyUrl) : process.env,
+    });
+    ffmpeg.once("close", () => job?.release());
+    ffmpeg.once("error", () => job?.release());
     return {
       stdout: ffmpeg.stdout,
       process: ffmpeg,

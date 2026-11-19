@@ -124,6 +124,72 @@ export interface RuntimeMediaDiagnosticReport {
   };
 }
 
+/** Read-only admin media diagnostics (#300). Status words match the screen. */
+export type MediaDiagnosticStatus = 'ok' | 'warning' | 'fail' | 'skipped';
+
+export interface MediaDiagnosticCheck {
+  id: string;
+  label: string;
+  status: MediaDiagnosticStatus;
+  message: string;
+  version?: string;
+  /** Resolved executable path, or the configured command when unavailable. */
+  path?: string;
+  remediation?: string;
+}
+
+export interface MediaDiagnosticSidecar {
+  mode: RuntimeMediaSidecarMode;
+  status: MediaDiagnosticStatus;
+  message: string;
+  /** Set only when GET /health already includes `version` (sidecar contract is unchanged). */
+  version?: string;
+  healthStatus?: string;
+  videoPort?: number;
+  audioPort?: number;
+}
+
+export interface MediaDiagnosticEncoderRow {
+  id: string;
+  codec: string;
+  hardware: boolean;
+  available: boolean;
+  detail?: string;
+}
+
+export interface MediaDiagnosticEncoders {
+  status: MediaDiagnosticStatus;
+  message: string;
+  checkedAt?: string;
+  items: MediaDiagnosticEncoderRow[];
+  /** Where AV1 sources decode; absent when the encoder report was not loaded. */
+  av1Decode?: MediaDiagnosticAV1Decode;
+}
+
+/** AV1 decoding, from the sidecar's AV1 test decodes (GET /encoders, sidecar 1.11+). Informational: no status. */
+export interface MediaDiagnosticAV1Decode {
+  /** `gpu`: AV1 sources decode on a GPU; `cpu`: on the CPU (libdav1d); `unknown`: the sidecar does not report it. */
+  decodesOn: 'gpu' | 'cpu' | 'unknown';
+  message: string;
+  items: MediaDiagnosticAV1DecodeRow[];
+}
+
+export interface MediaDiagnosticAV1DecodeRow {
+  /** `vaapi` or `cuda`. */
+  hwaccel: string;
+  available: boolean;
+  detail?: string;
+}
+
+export interface MediaAdminDiagnosticReport {
+  checkedAt: string;
+  overall: RuntimeMediaOverall;
+  checks: MediaDiagnosticCheck[];
+  sidecar: MediaDiagnosticSidecar;
+  encoders: MediaDiagnosticEncoders;
+  warnings: string[];
+}
+
 // Dashboard
 export type DashboardWebQuerySourceStatus = 'current' | 'unavailable';
 export type DashboardMetricsSourceStatus = 'disabled' | 'current' | 'unavailable';
@@ -443,6 +509,22 @@ export interface ClientActivityEntry {
 export interface ActivityJournalHistoryResponse {
   items: ClientActivityEntry[];
   nextCursor: string | null;
+}
+
+// === Server icons ===
+
+export interface ServerIcon {
+  /** Unsigned CRC32 of the image; the value channels and groups store as their icon id. */
+  id: number;
+  size: number;
+  uploadedAt: string | null;
+}
+
+export interface ServerIconList {
+  maxBytes: number;
+  /** True when the server holds more icons than the list returns. */
+  truncated: boolean;
+  icons: ServerIcon[];
 }
 
 // === Hosted channel banners ===

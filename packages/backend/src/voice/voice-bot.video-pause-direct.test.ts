@@ -81,7 +81,7 @@ describe('video pause', () => {
     await bot.resumeVideo();
     const last = calls.at(-1)!;
     assert.equal(last.kind, 'source');
-    assert.equal(last.options.startSeconds, 40);
+    assert.equal(last.options.startAtSecs, 40);
     assert.equal(bot.videoPaused, false);
     assert.equal(bot.videoStreamStatus.paused, false);
     mock.timers.tick(10_000);
@@ -124,7 +124,7 @@ describe('video pause', () => {
     const { calls } = fakeVideo(bot);
     await bot.pauseVideo();
     await bot.seekVideo(120);
-    assert.equal(calls.at(-1)!.options.startSeconds, 120);
+    assert.equal(calls.at(-1)!.options.startAtSecs, 120);
     assert.equal(bot.videoPaused, false);
   });
 

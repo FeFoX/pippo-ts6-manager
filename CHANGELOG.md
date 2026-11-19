@@ -2,6 +2,109 @@
 
 All notable changes to this opinionated fork of [clusterzx/ts6-manager](https://github.com/clusterzx/ts6-manager) are documented here. See [CREDITS.md](CREDITS.md) for upstream and fork attribution.
 
+## [1.11.4](https://github.com/uniskela/ts6-manager/compare/v1.11.3...v1.11.4) (2026-11-03)
+
+
+### Bug Fixes
+
+* **deps:** repair November Dependabot groups and patch follow-redirects ([#582](https://github.com/uniskela/ts6-manager/issues/582)) ([b48e6f1](https://github.com/uniskela/ts6-manager/commit/b48e6f16e9e48ecacf4910afc4f30ad1855263bb))
+* **deps:** update yt-dlp to 2026.10.26 ([#583](https://github.com/uniskela/ts6-manager/issues/583)) ([b7aaf52](https://github.com/uniskela/ts6-manager/commit/b7aaf524615450993fdaf699fe3ff5610d720304))
+* keep Deno installer downloads on HTTPS ([#558](https://github.com/uniskela/ts6-manager/issues/558)) ([e42a88a](https://github.com/uniskela/ts6-manager/commit/e42a88a0a00f27ca936204dab2ee935898f3c79a))
+* keep sidecar API logs on one record ([#559](https://github.com/uniskela/ts6-manager/issues/559)) ([6f305b9](https://github.com/uniskela/ts6-manager/commit/6f305b96bd2d93f2c6d219cdfdcd140096e383ba))
+* show and accept SVG server icons ([#588](https://github.com/uniskela/ts6-manager/issues/588)) ([eee19ce](https://github.com/uniskela/ts6-manager/commit/eee19ceb44ddfcde4e310a6cb9b9e33b18a3037c))
+
+## [1.11.3](https://github.com/uniskela/ts6-manager/compare/v1.11.2...v1.11.3) (2026-10-29)
+
+
+### Bug Fixes
+
+* **deps:** bump transitive qs to 6.16.2 ([#553](https://github.com/uniskela/ts6-manager/issues/553)) ([5b2ac8e](https://github.com/uniskela/ts6-manager/commit/5b2ac8e32c970b9f58b0c2925f1ff72d467fce6c))
+* **deps:** update yt-dlp to 2026.10.21 ([#525](https://github.com/uniskela/ts6-manager/issues/525)) ([c483acf](https://github.com/uniskela/ts6-manager/commit/c483acf8387e5f9195a3b4c01851da2f8e3439fd))
+* reject malformed hex in AES-GCM encrypted fields ([#549](https://github.com/uniskela/ts6-manager/issues/549)) ([1d58ebf](https://github.com/uniskela/ts6-manager/commit/1d58ebfddbfafb08d4366332d213aa74f075edda))
+* require 16-byte AES-GCM authentication tags ([#547](https://github.com/uniskela/ts6-manager/issues/547)) ([7735d99](https://github.com/uniskela/ts6-manager/commit/7735d99fb86aa6656877e6f8b1d68b00d9f9e331))
+* stop sending WebSocket upgrade headers on /api ([#548](https://github.com/uniskela/ts6-manager/issues/548)) ([030de0d](https://github.com/uniskela/ts6-manager/commit/030de0d54f74ea4ee34c7c2b1d7bf6b60b7d35cd))
+
+## [1.11.2](https://github.com/uniskela/ts6-manager/compare/v1.11.1...v1.11.2) (2026-10-25)
+
+
+### Bug Fixes
+
+* **deps:** bump body-parser 1.20.9 and multer 2.5.0 ([#513](https://github.com/uniskela/ts6-manager/issues/513)) ([c9aa0dc](https://github.com/uniskela/ts6-manager/commit/c9aa0dc42f68e7125ae47f09bfa225bf777d4147))
+* **docker:** stop the Prisma update check leaving a zombie in the backend container ([#470](https://github.com/uniskela/ts6-manager/issues/470)) ([07e11a7](https://github.com/uniskela/ts6-manager/commit/07e11a7e578bc8445e6c85fd6099a6112022a796)), closes [#466](https://github.com/uniskela/ts6-manager/issues/466)
+* **media:** do not treat TRUST_PROXY as an unused outbound proxy ([6fd23b6](https://github.com/uniskela/ts6-manager/commit/6fd23b6bb1bba030e9878276acbf2d6d403b5a6c))
+* **media:** check supported downloaded-media paths through an egress proxy, not every FFmpeg input or administrator-configured radio stream ([#479](https://github.com/uniskela/ts6-manager/issues/479)) ([ce58e77](https://github.com/uniskela/ts6-manager/commit/ce58e77b0e95aa7328a5d6a67e396ab94aa15dd0))
+* **music:** keep a removed song's file while anything else still uses it ([#483](https://github.com/uniskela/ts6-manager/issues/483)) ([bb43476](https://github.com/uniskela/ts6-manager/commit/bb4347606cda2ab156c5dd37a71b115364775c9b)), closes [#478](https://github.com/uniskela/ts6-manager/issues/478)
+* **music:** keep downloads in a verified, app-owned cache keyed by source ([#481](https://github.com/uniskela/ts6-manager/issues/481)) ([2c31922](https://github.com/uniskela/ts6-manager/commit/2c3192218aac342b1b280bd7b4fcb72c90802b69))
+* **music:** prune played tracks and cap every queue add ([#469](https://github.com/uniskela/ts6-manager/issues/469)) ([dd0f7b9](https://github.com/uniskela/ts6-manager/commit/dd0f7b9a3f9062aeee9ad449fe49eca955190f49)), closes [#445](https://github.com/uniskela/ts6-manager/issues/445)
+* **music:** remove a song only through its own server's library ([#487](https://github.com/uniskela/ts6-manager/issues/487)) ([6032e6e](https://github.com/uniskela/ts6-manager/commit/6032e6e7bcf42834c9562de306c1dda38aba1e46)), closes [#484](https://github.com/uniskela/ts6-manager/issues/484)
+* **remote:** cancel slow pasted-link requests and free their slots ([#473](https://github.com/uniskela/ts6-manager/issues/473)) ([1ad36b6](https://github.com/uniskela/ts6-manager/commit/1ad36b6c393eab08bc99041ebd47243585106525))
+* **remote:** drop media requests that finish resolving after Stop or a queue clear ([#474](https://github.com/uniskela/ts6-manager/issues/474)) ([161b80b](https://github.com/uniskela/ts6-manager/commit/161b80b9733bdb8c5b6f56bcf8dae1c1c0136a07))
+* **remote:** harden listener remote rate limits and key them by listener identity ([#471](https://github.com/uniskela/ts6-manager/issues/471)) ([46aae6b](https://github.com/uniskela/ts6-manager/commit/46aae6b5c6c02ee6139142d17253012d7122f0e8))
+* **remote:** record listener remote refusals as bounded audit totals and answer a full queue with 409 instead of 429 ([#480](https://github.com/uniskela/ts6-manager/issues/480)) ([c819615](https://github.com/uniskela/ts6-manager/commit/c8196158403d0b7d4d3ecc96ec395631912bf4b6))
+* **sidecar:** end the RTP readers without a data race on shutdown ([#459](https://github.com/uniskela/ts6-manager/issues/459)) ([2f383d3](https://github.com/uniskela/ts6-manager/commit/2f383d3f6e6075acf337d13413203d247d331e14))
+* **sidecar:** offer viewers send-only media so TeamSpeak 6.0.0-beta5 answers ([#491](https://github.com/uniskela/ts6-manager/issues/491)) ([cb43e5b](https://github.com/uniskela/ts6-manager/commit/cb43e5b5d86ad94784692f90cf8fac1dc0381136)), closes [#490](https://github.com/uniskela/ts6-manager/issues/490)
+
+## [1.11.1](https://github.com/uniskela/ts6-manager/compare/v1.11.0...v1.11.1) (2026-10-15)
+
+
+### Bug Fixes
+
+* **sidecar:** guard a viewer's active and gate state with its lock ([#456](https://github.com/uniskela/ts6-manager/issues/456)) ([d3bec6c](https://github.com/uniskela/ts6-manager/commit/d3bec6cd8f1e835fc5d36d9a6d2b2a86587a878c)), closes [#455](https://github.com/uniskela/ts6-manager/issues/455)
+
+## [1.11.0](https://github.com/uniskela/ts6-manager/compare/v1.10.2...v1.11.0) (2026-10-14)
+
+
+### ⚠ Upgrade notes
+
+Read [Upgrading](https://github.com/uniskela/ts6-manager/blob/v1.11.0/docs/public/upgrading.md) before updating. Some setups need a change:
+
+* **Reverse proxies:** the backend no longer trusts one proxy hop. It trusts only `TRUST_PROXY`, which the stock images set. Set it yourself behind an outer proxy or outside the stock images.
+* **Backend port:** the stock compose file now publishes port 3001 on `127.0.0.1` only. Set `BACKEND_BIND_IP` if another machine calls the API directly.
+* **Media sources on `100.64.0.0/10`** (Tailscale, carrier-grade NAT) are refused until an admin allows the host.
+* **Sidecar source builds** need Go 1.26.9 or newer.
+
+
+### Features
+
+* adapt Auto streaming quality to encoder health ([#418](https://github.com/uniskela/ts6-manager/issues/418)) ([a089e02](https://github.com/uniskela/ts6-manager/commit/a089e027b18497176a796493e3d873638cfc2e0d))
+* add admin media toolchain diagnostics ([#415](https://github.com/uniskela/ts6-manager/issues/415)) ([84d3b41](https://github.com/uniskela/ts6-manager/commit/84d3b4174805ba1cf9fdb8f4656f5a1800671b25))
+* add media request history and one-click replay ([#413](https://github.com/uniskela/ts6-manager/issues/413)) ([29da0af](https://github.com/uniskela/ts6-manager/commit/29da0af36b62ac88fdb023366f1e571fb9157aac))
+* add per-bot Auto-DJ and 24/7 channel mode, shown in !help, the Bot Hub and the now playing card ([#412](https://github.com/uniskela/ts6-manager/issues/412)) ([2f08767](https://github.com/uniskela/ts6-manager/commit/2f08767a4aceabaff31f125d6ab10a944d1a9d6d)) ([#436](https://github.com/uniskela/ts6-manager/issues/436)) ([8724d6f](https://github.com/uniskela/ts6-manager/commit/8724d6f4b225778d7fead244d98cdd306f1b4283)) ([#447](https://github.com/uniskela/ts6-manager/issues/447)) ([e440ead](https://github.com/uniskela/ts6-manager/commit/e440ead7a29d09d827d110847c3200d69c308eda))
+* add the listener remote: a secure backend API and a request page for phones and desktops ([#398](https://github.com/uniskela/ts6-manager/issues/398)) ([e6fbe35](https://github.com/uniskela/ts6-manager/commit/e6fbe355a6f26be235e1e74ce6b0089c9884426e)) ([#406](https://github.com/uniskela/ts6-manager/issues/406)) ([68e8666](https://github.com/uniskela/ts6-manager/commit/68e86665c9ec486d883ea6cc5f65d9726898045a)) ([#443](https://github.com/uniskela/ts6-manager/issues/443)) ([e9ff8f4](https://github.com/uniskela/ts6-manager/commit/e9ff8f43ea621864306cb709e979e112671dc880))
+* add shared media command permissions and vote-skip ([#393](https://github.com/uniskela/ts6-manager/issues/393)) ([0efbfd2](https://github.com/uniskela/ts6-manager/commit/0efbfd243f604a87f314e2e2d32b9204cecab188))
+* add support ticket, reminder, and announcement flow templates ([#414](https://github.com/uniskela/ts6-manager/issues/414)) ([2440e54](https://github.com/uniskela/ts6-manager/commit/2440e54311897af0a57239d6c5d7601e88535e23))
+* **console:** video Up next and Queue as video ([#405](https://github.com/uniskela/ts6-manager/issues/405)) ([14a86b5](https://github.com/uniskela/ts6-manager/commit/14a86b5a69b94254e7ae6fbdb121bf9cd9b74fe9))
+* pick, upload and delete server icons in the channel edit dialog ([#417](https://github.com/uniskela/ts6-manager/issues/417)) ([a128fdb](https://github.com/uniskela/ts6-manager/commit/a128fdbe9ffcce2c373a8fc997e3c39256fea13c))
+* **sidecar:** add H.264 VideoToolbox encoding for native macOS sidecars ([#421](https://github.com/uniskela/ts6-manager/issues/421)) ([3b3b5cc](https://github.com/uniskela/ts6-manager/commit/3b3b5ccfdfd5f37876554e6b6d58b5e71082915a))
+* **sidecar:** decode AV1 on the GPU where the driver supports it ([#446](https://github.com/uniskela/ts6-manager/issues/446)) ([4143c1b](https://github.com/uniskela/ts6-manager/commit/4143c1b35e5a6f4aa8b905bec90832a3b4f75a83))
+* **sidecar:** keep VAAPI-decoded frames on the GPU ([#396](https://github.com/uniskela/ts6-manager/issues/396)) ([69eeff8](https://github.com/uniskela/ts6-manager/commit/69eeff83eeb1c26ff686259ddf9bafbd25f65cbb))
+* **sidecar:** publish native media sidecar binaries with each release ([#399](https://github.com/uniskela/ts6-manager/issues/399)) ([e7769a9](https://github.com/uniskela/ts6-manager/commit/e7769a9f8c71cd925b0c0e917a7b086bbd4d5b88))
+* **ui:** use the page width on Appearance, YouTube and chat command permissions ([#441](https://github.com/uniskela/ts6-manager/issues/441)) ([c58b578](https://github.com/uniskela/ts6-manager/commit/c58b578ef03eb6f3ea59223fd6693e207f57f965))
+* **video:** queue videos and YouTube playlists on a running stream ([#404](https://github.com/uniskela/ts6-manager/issues/404)) ([6e826da](https://github.com/uniskela/ts6-manager/commit/6e826da002afb977d3abb927701b08c535ba4a79))
+
+
+### Bug Fixes
+
+* block cloud metadata bypasses in media egress ([#408](https://github.com/uniskela/ts6-manager/issues/408)) ([ce07b6a](https://github.com/uniskela/ts6-manager/commit/ce07b6ad4a4233ae124d42639a6518696915a3e4))
+* keep per-client rate limits behind the bundled nginx proxy without letting private clients choose their bucket ([#425](https://github.com/uniskela/ts6-manager/issues/425)) ([62c4ba0](https://github.com/uniskela/ts6-manager/commit/62c4ba0a1e194bae4ab9d283e1096a22d69e908a)) ([#435](https://github.com/uniskela/ts6-manager/issues/435)) ([501426a](https://github.com/uniskela/ts6-manager/commit/501426a18a06256dd856aa163d43ea207ada24e9))
+* publish the split-stack backend port on loopback only (set `BACKEND_BIND_IP` if another machine calls the API directly) ([#437](https://github.com/uniskela/ts6-manager/issues/437)) ([e756af0](https://github.com/uniskela/ts6-manager/commit/e756af08324ed7fe99bfab37e834e9d33d48b09d))
+* save only changed channel fields and reject image links as the public URL ([#416](https://github.com/uniskela/ts6-manager/issues/416)) ([78b5456](https://github.com/uniskela/ts6-manager/commit/78b545680123709bbf7783ec913000373643b8ba))
+* **sidecar:** build with Go 1.26.9 and golang.org/x/net 0.61.0 ([#401](https://github.com/uniskela/ts6-manager/issues/401)) ([83b2b80](https://github.com/uniskela/ts6-manager/commit/83b2b8053cebb3fd0b1324edb429c0e09f422b77))
+* **sidecar:** hold a viewer's video gate until DTLS is up and keep packet loss visible ([#394](https://github.com/uniskela/ts6-manager/issues/394)) ([3ecae0b](https://github.com/uniskela/ts6-manager/commit/3ecae0b48980c42d60887bc87c9e3674d7bf470a))
+* **sidecar:** quote viewer signaling errors in logs ([#409](https://github.com/uniskela/ts6-manager/issues/409)) ([d1eb540](https://github.com/uniskela/ts6-manager/commit/d1eb54042cd946c1fb5389d697f90959f377c8eb))
+* **sidecar:** say when FFmpeg has no hardware encoder instead of a raw option error ([#440](https://github.com/uniskela/ts6-manager/issues/440)) ([02f69da](https://github.com/uniskela/ts6-manager/commit/02f69dadfedd4a4186ce44eb4b85d1acd96aa406))
+* **sidecar:** stream sources without an audio track, with silence ([#397](https://github.com/uniskela/ts6-manager/issues/397)) ([2585a69](https://github.com/uniskela/ts6-manager/commit/2585a6983c2f1ab57192d159cab010ebaa97ac01))
+* **ui:** hide the sidebar scroll hint at the end of the list when zoomed ([#439](https://github.com/uniskela/ts6-manager/issues/439)) ([c5154dc](https://github.com/uniskela/ts6-manager/commit/c5154dcc27ad4335a29f9aec2c27b428d928d16d))
+* **ui:** keep connection pickers readable below the desktop header ([#392](https://github.com/uniskela/ts6-manager/issues/392)) ([0efbbef](https://github.com/uniskela/ts6-manager/commit/0efbbefbe26e9375687da80f0cf5d8d9152dfd1a))
+* **ui:** recover from an expired proxy session instead of showing Server unavailable ([#450](https://github.com/uniskela/ts6-manager/issues/450)) ([30096bf](https://github.com/uniskela/ts6-manager/commit/30096bf8c26e42985612478451c81a5ce3471d31))
+
+## [1.10.2](https://github.com/uniskela/ts6-manager/compare/v1.10.1...v1.10.2) (2026-10-09)
+
+
+### Bug Fixes
+
+* **ci:** repair docs dispatch and frontend Trivy security gate ([#390](https://github.com/uniskela/ts6-manager/issues/390)) ([4160244](https://github.com/uniskela/ts6-manager/commit/416024405d0f1b2baa41c9c98920b97a088348c1))
+
 ## [1.10.1](https://github.com/uniskela/ts6-manager/compare/v1.10.0...v1.10.1) (2026-10-06)
 
 

@@ -55,15 +55,30 @@ export const ADMIN_AUDIT_ACTIONS = [
   'settings.video_streaming_update',
   'settings.iptv_network_update',
   'music_bot.avatar_update',
+  'music_bot.automation_update',
   'channel_banner.upload',
   'channel_banner.delete',
+  'server_icon.upload',
+  'server_icon.delete',
   'settings.public_url_update',
   'media.music.start',
   'media.music.stop',
   'media.video.start',
   'media.video.stop',
   'media.video.source_change',
+  'media.video.queue_add',
+  'media.video.queue_change',
+  'media.video.skip',
   'media.session.switch',
+  'listener.remote.queue_add',
+  'listener.remote.issue',
+  'listener.remote.request',
+  'listener.remote.revoke',
+  // Refusals recorded as bounded per-window totals (listener remote audit policy).
+  'listener.remote.auth_failed',
+  'listener.remote.rate_limited',
+  'listener.remote.denied',
+  'listener.remote.capacity',
 ] as const;
 
 export type AdminAuditAction = (typeof ADMIN_AUDIT_ACTIONS)[number];
@@ -89,6 +104,13 @@ export const ADMIN_AUDIT_RESULT_CODES = [
   'not_found',
   'validation_failed',
   'storage_failed',
+  'invalid_access',
+  'permission_denied',
+  'rate_limited',
+  'queue_full',
+  'invalid_request',
+  'cancelled',
+  'unavailable',
   'unknown',
 ] as const;
 
@@ -108,6 +130,9 @@ export const ADMIN_AUDIT_TARGET_TYPES = [
   'settings',
   'music_bot',
   'channel_banner',
+  'server_icon',
+  /** A window's total of refusals; the id holds the count (`n=12`) and context. */
+  'listener_remote_refusals',
 ] as const;
 
 export type AdminAuditTargetType = (typeof ADMIN_AUDIT_TARGET_TYPES)[number];

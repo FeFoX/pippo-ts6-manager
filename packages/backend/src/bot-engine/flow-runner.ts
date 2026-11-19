@@ -21,9 +21,10 @@ import { ALLOWED_WEBQUERY_COMMANDS } from './command-whitelist.js';
 import { webQueryChannelEditPacer } from './channel-edit-pacer.js';
 import crypto from 'crypto';
 import { createOwnedTempChannel, cleanupOwnedTempChannels } from './temp-channel-ownership.js';
+import { MAX_DELAY_MS, parseDurationMs, REMINDER_DELAY_CAP_MS } from './delay-limit.js';
+import { TSApiError } from '../middleware/error-handler.js';
 
 const MAX_NODE_VISITS = 100;
-const MAX_DELAY_MS = 300000; // 5 minutes
 
 interface FlowInfo {
   id: number;
@@ -34,6 +35,9 @@ interface FlowInfo {
 }
 
 export class FlowRunner {
+  private activeRuns = new Map<number, Set<AbortController>>();
+  private pendingReminders = new Map<string, number>();
+  private channelMessageChains = new Map<string, Promise<void>>();
   private voiceBotManager: VoiceBotManager | null = null;
   /** Optional EventBridge/Query readiness probe (injected by BotEngine). */
   private channelEditReadyCheck: ((configId: number, sid: number) => boolean) | null = null;
@@ -52,12 +56,40 @@ export class FlowRunner {
     this.channelEditReadyCheck = check;
   }
 
+  cancelFlow(flowId: number): void {
+    for (const controller of this.activeRuns.get(flowId) ?? []) controller.abort();
+  }
+
+  cancelAll(): void {
+    for (const flowId of this.activeRuns.keys()) this.cancelFlow(flowId);
+  }
+
   async execute(
     flow: FlowInfo,
     triggerNodeId: string,
     triggerType: string,
     eventData: Record<string, string>,
     timezone?: string,
+  ): Promise<void> {
+    const controller = new AbortController();
+    const runs = this.activeRuns.get(flow.id) ?? new Set<AbortController>();
+    this.activeRuns.set(flow.id, runs);
+    runs.add(controller);
+    try {
+      await this.executeRun(flow, triggerNodeId, triggerType, eventData, timezone, controller.signal);
+    } finally {
+      runs.delete(controller);
+      if (runs.size === 0) this.activeRuns.delete(flow.id);
+    }
+  }
+
+  private async executeRun(
+    flow: FlowInfo,
+    triggerNodeId: string,
+    triggerType: string,
+    eventData: Record<string, string>,
+    timezone: string | undefined,
+    signal: AbortSignal,
   ): Promise<void> {
     const execution = await this.prisma.botExecution.create({
       data: {
@@ -100,14 +132,16 @@ export class FlowRunner {
 
       let nodeVisits = 0;
       const visitNode = async (node: FlowNode): Promise<void> => {
+        signal.throwIfAborted();
         nodeVisits++;
         if (nodeVisits > MAX_NODE_VISITS) {
           throw new Error(`Max node visits (${MAX_NODE_VISITS}) exceeded — possible infinite loop`);
         }
-        await this.processNode(node, flow.flowData, ctx, client, visitNode);
+        await this.processNode(node, flow.flowData, ctx, client, visitNode, signal);
       };
 
       await visitNode(triggerNode);
+      signal.throwIfAborted();
 
       await this.prisma.botExecution.update({
         where: { id: execution.id },
@@ -121,6 +155,16 @@ export class FlowRunner {
         serverConfigId: flow.serverConfigId,
       });
     } catch (err: any) {
+      if (signal.aborted) {
+        await this.prisma.botExecution.update({
+          where: { id: execution.id },
+          data: { status: 'cancelled', endedAt: new Date() },
+        });
+        this.broadcast('bot:execution:complete', {
+          flowId: flow.id, executionId: execution.id, status: 'cancelled', serverConfigId: flow.serverConfigId,
+        });
+        return;
+      }
       await this.log(ctx, null, 'error', `Flow execution failed: ${err.message}`);
 
       await this.prisma.botExecution.update({
@@ -143,6 +187,7 @@ export class FlowRunner {
     ctx: ExecutionContext,
     client: WebQueryClient,
     visitNode: (node: FlowNode) => Promise<void>,
+    signal: AbortSignal,
   ): Promise<void> {
     await this.log(ctx, node, 'debug', `Processing node '${node.data.label}' (type=${node.type})`);
 
@@ -177,7 +222,7 @@ export class FlowRunner {
       }
 
       case 'action': {
-        await this.executeAction(node, ctx, client);
+        await this.executeAction(node, ctx, client, signal);
         const edges = this.getOutgoingEdges(node.id, flowDef);
         for (const edge of edges) {
           const target = this.findNode(edge.target, flowDef);
@@ -187,16 +232,73 @@ export class FlowRunner {
       }
 
       case 'delay': {
-        const delayData = node.data as DelayNodeData;
-        const delayMs = Math.min(delayData.delayMs, MAX_DELAY_MS);
-        await this.log(ctx, node, 'info', `Delaying ${delayMs}ms`);
-        await new Promise(resolve => setTimeout(resolve, delayMs));
-        const edges = this.getOutgoingEdges(node.id, flowDef);
-        for (const edge of edges) {
-          const target = this.findNode(edge.target, flowDef);
-          if (target) await visitNode(target);
+        let reminderKey: string | undefined;
+        try {
+          const delayData = node.data as DelayNodeData;
+          let delayMs: number;
+          let requesterUid: string | undefined;
+          if (delayData.delayFromCommand) {
+            const token = String(ctx.eventData.command_args ?? '').trim().split(/\s+/)[0] ?? '';
+            const requested = parseDurationMs(token);
+            if (requested == null) {
+              await this.log(ctx, node, 'warn', 'Reminder delay is missing or invalid');
+              break;
+            }
+            delayMs = Math.min(requested, REMINDER_DELAY_CAP_MS);
+            // Keep a stable identity for best-effort checks after the wait.
+            requesterUid = ctx.eventData.client_unique_identifier;
+            if (!requesterUid && ctx.eventData.clid) {
+              requesterUid = await this.getReminderRequesterUid(ctx, client);
+            }
+            if (!ctx.eventData.clid || !requesterUid) {
+              await this.log(ctx, node, 'warn', 'Reminder requester identity is unavailable');
+              break;
+            }
+            const key = `${ctx.flowId}:${requesterUid}`;
+            const pending = this.pendingReminders.get(key) ?? 0;
+            if (pending >= 3) {
+              await this.log(ctx, node, 'warn', 'Requester already has 3 pending reminders');
+              break;
+            }
+            reminderKey = key;
+            this.pendingReminders.set(key, pending + 1);
+          } else {
+            delayMs = Math.min(delayData.delayMs, MAX_DELAY_MS);
+          }
+          await this.log(ctx, node, 'info', `Delaying ${delayMs}ms`);
+          await new Promise<void>((resolve, reject) => {
+            signal.throwIfAborted();
+            const onAbort = () => {
+              clearTimeout(timer);
+              reject(signal.reason);
+            };
+            const timer = setTimeout(() => {
+              signal.removeEventListener('abort', onAbort);
+              resolve();
+            }, delayMs);
+            signal.addEventListener('abort', onAbort, { once: true });
+          });
+          signal.throwIfAborted();
+          if (requesterUid) {
+            if (await this.getReminderRequesterUid(ctx, client) !== requesterUid) {
+              await this.log(ctx, node, 'warn', 'Reminder requester is no longer connected; skipping delivery');
+              break;
+            }
+            ctx.setTemp('reminderRequesterUid', requesterUid);
+          }
+          const edges = this.getOutgoingEdges(node.id, flowDef);
+          for (const edge of edges) {
+            const target = this.findNode(edge.target, flowDef);
+            if (target) await visitNode(target);
+          }
+          break;
+        } finally {
+          if (reminderKey) {
+            const remaining = (this.pendingReminders.get(reminderKey) ?? 1) - 1;
+            if (remaining) this.pendingReminders.set(reminderKey, remaining);
+            else this.pendingReminders.delete(reminderKey);
+          }
         }
-        break;
       }
 
       case 'variable': {
@@ -237,18 +339,20 @@ export class FlowRunner {
     node: FlowNode,
     ctx: ExecutionContext,
     client: WebQueryClient,
+    signal: AbortSignal,
   ): Promise<void> {
     const data = node.data as any;
     const actionType = data.actionType as string;
 
     await this.log(ctx, node, 'info', `Executing action: ${actionType}`);
+    signal.throwIfAborted();
 
     try {
       switch (actionType) {
         case 'kick': await this.executeKick(data as KickActionData, ctx, client); break;
         case 'ban': await this.executeBan(data as BanActionData, ctx, client); break;
         case 'move': await this.executeMove(data as MoveActionData, ctx, client); break;
-        case 'message': await this.executeMessage(data as MessageActionData, ctx, client); break;
+        case 'message': await this.executeMessage(data as MessageActionData, ctx, client, signal); break;
         case 'poke': await this.executePoke(data as PokeActionData, ctx, client); break;
         case 'channelCreate': await this.executeChannelCreate(data as ChannelCreateActionData, ctx, client); break;
         case 'groupAddClient': await this.executeGroupAddClient(data as GroupAddClientActionData, ctx, client); break;
@@ -312,32 +416,88 @@ export class FlowRunner {
     await client.executePost(ctx.sid, 'clientmove', { clid, cid });
   }
 
-  private async executeMessage(data: MessageActionData, ctx: ExecutionContext, client: WebQueryClient): Promise<void> {
+  private async executeMessage(data: MessageActionData, ctx: ExecutionContext, client: WebQueryClient, signal: AbortSignal): Promise<void> {
     const msg = await ctx.resolveTemplate(data.message);
     const target = data.target ? await ctx.resolveTemplate(data.target) : ctx.eventData.clid;
+    signal.throwIfAborted();
 
-    // TS3 channel messages always go to the query client's current channel.
-    // If a specific channel is targeted, move the query client there first, then move back.
-    if (data.targetMode === 2 && target) {
-      const whoami = await client.execute(ctx.sid, 'whoami');
-      const myClid = whoami?.[0]?.client_id;
-      const myCid = whoami?.[0]?.client_channel_id;
-      if (myClid) {
-        await client.executePost(ctx.sid, 'clientmove', { clid: myClid, cid: target });
-        await client.executePost(ctx.sid, 'sendtextmessage', { targetmode: 2, msg });
-        // Move back to original channel
-        if (myCid && String(myCid) !== String(target)) {
-          await client.executePost(ctx.sid, 'clientmove', { clid: myClid, cid: myCid });
+    if (data.targetMode === 2) {
+      // Serialize the whole move/send/restore sequence, including current-channel sends.
+      const key = `${ctx.configId}:${ctx.sid}`;
+      const previous = this.channelMessageChains.get(key) ?? Promise.resolve();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const next = previous.then(() => gate);
+      this.channelMessageChains.set(key, next);
+      // A cancelled waiter must retain its place until the predecessor settles.
+      // The predecessor rejection is already delivered to the waiter below.
+      const dropChain = () => {
+        if (this.channelMessageChains.get(key) === next) this.channelMessageChains.delete(key);
+      };
+      void next.then(dropChain, dropChain);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => {
+            signal.removeEventListener('abort', onAbort);
+            reject(signal.reason);
+          };
+          signal.addEventListener('abort', onAbort);
+          previous.then(() => {
+            signal.removeEventListener('abort', onAbort);
+            if (signal.aborted) reject(signal.reason);
+            else resolve();
+          }, (err) => {
+            signal.removeEventListener('abort', onAbort);
+            reject(err);
+          });
+        });
+        signal.throwIfAborted();
+        if (!target) {
+          await client.executePost(ctx.sid, 'sendtextmessage', { targetmode: 2, msg });
+          return;
         }
-        return;
+        const whoami = await client.execute(ctx.sid, 'whoami');
+        signal.throwIfAborted();
+        const myClid = whoami?.[0]?.client_id;
+        const myCid = whoami?.[0]?.client_channel_id;
+        if (!myClid || !myCid) throw new Error('Channel message requires the query client and original channel IDs');
+        await client.executePost(ctx.sid, 'clientmove', { clid: myClid, cid: target });
+        try {
+          signal.throwIfAborted();
+          await client.executePost(ctx.sid, 'sendtextmessage', { targetmode: 2, msg });
+        } finally {
+          if (String(myCid) !== String(target)) {
+            await client.executePost(ctx.sid, 'clientmove', { clid: myClid, cid: myCid });
+          }
+        }
+      } finally {
+        release();
       }
+      return;
     }
 
+    const reminderUid = ctx.getTemp('reminderRequesterUid');
+    if (data.targetMode === 1 && reminderUid) {
+      if (target !== ctx.eventData.clid || await this.getReminderRequesterUid(ctx, client) !== reminderUid) return;
+      // sendtextmessage can only target a session clid. This check skips a known mismatch; a reuse before the send can still receive it.
+    }
+
+    signal.throwIfAborted();
     await client.executePost(ctx.sid, 'sendtextmessage', {
       targetmode: data.targetMode,
       target,
       msg,
     });
+  }
+
+  private async getReminderRequesterUid(ctx: ExecutionContext, client: WebQueryClient): Promise<string | undefined> {
+    try {
+      const info = await client.execute(ctx.sid, 'clientinfo', { clid: ctx.eventData.clid });
+      return info?.[0]?.client_unique_identifier;
+    } catch (err) {
+      if (err instanceof TSApiError && (err.code === 512 || /invalid client\s?id/i.test(err.message))) return undefined;
+      throw err;
+    }
   }
 
   private async executePoke(data: PokeActionData, ctx: ExecutionContext, client: WebQueryClient): Promise<void> {
@@ -669,17 +829,16 @@ export class FlowRunner {
         if (playlist) {
           const bot = mgr.getBot(botId);
           if (bot) {
-            for (const ps of playlist.songs) {
-              bot.queue.add({
-                id: `song_${ps.song.id}`,
-                title: ps.song.title,
-                artist: ps.song.artist || undefined,
-                duration: ps.song.duration || undefined,
-                filePath: ps.song.filePath,
-                source: (ps.song.source as 'local' | 'youtube' | 'url') || 'local',
-                sourceUrl: ps.song.sourceUrl || undefined,
-              });
-            }
+            // All or nothing: a playlist that does not fit throws QueueFullError and queues nothing.
+            bot.queue.addMany(playlist.songs.map((ps) => ({
+              id: `song_${ps.song.id}`,
+              title: ps.song.title,
+              artist: ps.song.artist || undefined,
+              duration: ps.song.duration || undefined,
+              filePath: ps.song.filePath,
+              source: (ps.song.source as 'local' | 'youtube' | 'url') || 'local',
+              sourceUrl: ps.song.sourceUrl || undefined,
+            })));
             if (bot.status === 'connected') {
               const first = bot.queue.next();
               if (first) bot.play(first);

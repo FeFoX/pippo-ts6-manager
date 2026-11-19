@@ -1,0 +1,69 @@
+# #91 Slice 4 — Administrative audit: remaining route inventory
+
+Prefer the same patterns:
+
+- **Remote TeamSpeak writes:** `beginRemoteAttempt` → dispatch → `completeRemoteAttempt`
+  (fail-closed on attempt insert; `unknown` on timeout / ambiguous completion).
+- **Local DB writes:** `recordLocalSuccess` inside `$transaction`.
+- **DB + engine/pool:** success then `markPartial` on reload/pool failure.
+- **Never** audit request bodies, free-text reasons/messages, flow JSON, credentials,
+  cookie contents, token path values, or exception text.
+
+## Instrumented (core + channel/group/permission follow-up)
+
+| Action | Route(s) |
+|--------|----------|
+| `client.kick` / `client.ban` | `POST .../clients/:clid/kick\|ban` |
+| `client.move` / `client.poke` / `client.message` | `POST .../clients/:clid/move\|poke\|message` (omit msg / cpw) |
+| `client.permission_add` / `client.permission_delete` | `PUT/DELETE .../clients/:cldbid/permissions` |
+| `ban.create` / `ban.delete` / `ban.delete_all` | `POST/DELETE .../bans` |
+| `channel.create` / `update` / `delete` / `move` / permission add\|delete | `.../channels` |
+| `server_group.*` (CRUD, copy, members, permissions) | `.../server-groups` |
+| `channel_group.*` (CRUD, assign, permissions) | `.../channel-groups` |
+| `privilege_key.create` / `privilege_key.delete` | `.../tokens` (**never** store token string) |
+| `virtual_server.edit` / `start` / `stop` | `PUT .../vs/:sid`, `POST .../:sid/start\|stop` |
+| `connection.create` / `update` / `credentials_changed` / `delete` | `POST/PUT/DELETE /api/servers` |
+| `flow.create` / `update` / `delete` / `enable` / `disable` | `/api/bots` mutations |
+| `user.create` / `update` / `delete` | `/api/users` mutations |
+| `settings.yt_cookies_*` / `settings.limits_update` / `settings.bot_access_update` / `settings.video_streaming_update` / `settings.iptv_network_update` / `settings.public_url_update` | `/api/settings` mutations |
+| `channel_banner.upload` / `channel_banner.delete` | `POST /api/channel-banners` and `DELETE /api/channel-banners/:name` (target: `channel_banner`, id is the server-generated file name; no image bytes or original filenames) |
+| `server_icon.upload` / `server_icon.delete` | `POST /api/servers/:configId/vs/:sid/icons` and `DELETE /api/servers/:configId/vs/:sid/icons/:id` (target: `server_icon`, id is the icon's CRC32 number; no image bytes or original filenames) |
+| `music_bot.avatar_update` | `PUT /api/music-bots/:id/avatar` and `PUT /api/music-bots/:id/avatar/mode` (target: `music_bot`; records saving the selected image or mode, even if TeamSpeak refuses its application; the refusal is exposed as runtime `avatarError`; no image bytes, filenames or paths) |
+| `media.music.start` / `media.music.stop` / `media.video.start` / `media.video.stop` / `media.video.source_change` / `media.session.switch` | Music Bot and IPTV media routes (target: `music_bot`; no source URLs or titles). Confirm prompts (409 conflicts) are not audited; confirmed replacements record `media.session.switch` on the starting bot plus a `media.music.stop` / `media.video.stop` row for each replaced session (targeting the bot that lost it), all under the same operation ID |
+| `media.video.queue_add` / `media.video.queue_change` / `media.video.skip` | Video queue routes under `/api/music-bots/:id/stream/queue` (target: `music_bot`; no source URLs or titles). `POST /` records `media.video.queue_add` when it appends to a running stream and `media.video.start` (or `media.session.switch`) when it starts one; `POST /play` records `media.video.start`; `POST /skip` records `media.video.skip`; `POST /:index/play` records `media.video.skip` on a running stream and `media.video.start` when it starts one; `DELETE /:index`, `PUT /move` and `DELETE /` record `media.video.queue_change`. `GET /` is read-only and not audited |
+
+## Remaining (not yet instrumented)
+
+### Moderation / clients
+
+- `POST/DELETE .../complaints...`
+
+### Virtual server / instance
+
+- `POST .../virtual-servers` (`servercreate`)
+- `DELETE .../:sid`
+- `POST .../:sid/snapshot` / `snapshot/deploy` (no snapshot body)
+- `PUT .../instance` (`instanceedit`)
+
+### Connections (lower priority)
+
+- `POST /api/servers/demo`
+- Draft/persisted WebQuery & SSH tests (`test-webquery`, `test-ssh`, `/:id/test`) — audit “tested” fact only, never credentials
+
+### Settings / auth
+
+- `PUT /api/auth/password` (self password change — fact only)
+- `POST /api/setup/init` (bootstrap — special case)
+
+### Media / automation / content (after core coverage)
+
+- Music bot CRUD + start/stop/play/queue/stream
+- Playlist / music library / radio / chat-command / IPTV / widget mutations
+- Messages / files mkdir/delete
+
+### Explicitly out of scope for admin audit
+
+- Auth login/refresh/logout (session lifecycle)
+- Bot webhook triggers
+- Public widget routes
+- Read-only routes (`logs`, `dashboard`, `permissions` list, music-requests GET)

@@ -64,7 +64,7 @@ function matchesCommandTrigger(
  *   variable:        { operation, name, value } → { nodeType:'variable', operation, variableName: name, value }
  *   log:             { level, message } → { nodeType:'log', level, message }
  */
-function normalizeFlowData(raw: any): FlowDefinition {
+export function normalizeFlowData(raw: any): FlowDefinition {
   const targetModeMap: Record<string, number> = { client: 1, channel: 2, server: 3 };
 
   const nodes: FlowNode[] = (raw.nodes || []).map((n: any) => {
@@ -95,7 +95,7 @@ function normalizeFlowData(raw: any): FlowDefinition {
       const cmd = config.command || '';
       const prefix = cmd.startsWith('!') ? '!' : config.commandPrefix || '!';
       const name = cmd.startsWith('!') ? cmd.substring(1) : cmd;
-      data = { triggerType: 'command', label, commandPrefix: prefix, commandName: name, channelId: config.channelId ? String(config.channelId) : undefined, };
+      data = { triggerType: 'command', label, commandPrefix: prefix, commandName: name, channelId: config.channelId ? String(config.channelId) : undefined, cooldownSeconds: Number(config.cooldownSeconds) || undefined };
     } else if (nodeType === 'action_kick') {
       type = 'action';
       data = { actionType: 'kick', label, reasonId: parseInt(config.reasonid) || 5, reasonMsg: config.reason || '' };
@@ -213,7 +213,13 @@ function normalizeFlowData(raw: any): FlowDefinition {
       data = { nodeType: 'condition', label, expression: config.expression || '' };
     } else if (nodeType === 'delay') {
       type = 'delay';
-      data = { nodeType: 'delay', label, delayMs: config.delay || config.delayMs || 1000 };
+      const delayFromCommand = config.delayFromCommand === true || config.delayFromCommand === 'true';
+      data = {
+        nodeType: 'delay',
+        label,
+        delayMs: config.delay || config.delayMs || 1000,
+        ...(delayFromCommand ? { delayFromCommand: true } : {}),
+      };
     } else if (nodeType === 'variable') {
       type = 'variable';
       data = { nodeType: 'variable', label, operation: config.operation || 'set', variableName: config.name || '', value: config.value || '' };
@@ -276,7 +282,8 @@ export class BotEngine {
   private cronJobs: CronEntry[] = [];
   private webhookEntries: WebhookEntry[] = [];
   private warnedQuerySecret = false;
-  private executionCounts: Map<number, number> = new Map();
+  private executionCounts: Map<number, { active: number }> = new Map();
+  private commandCooldowns = new Map<string, number>();
   private running: boolean = false;
   private musicCommandHandler: MusicCommandHandler | null = null;
   /** Stable listener so stop() does not wipe journal/music tsEvent subscribers. */
@@ -403,6 +410,7 @@ export class BotEngine {
 
   async stop(): Promise<void> {
     this.running = false;
+    this.flowRunner.cancelAll();
     this.animationManager.stopAll();
     this.teardownCronJobs();
     this.clearBotArmFallbacks();
@@ -488,6 +496,7 @@ export class BotEngine {
   }
 
   async disableFlow(flowId: number): Promise<void> {
+    this.flowRunner.cancelFlow(flowId);
     this.animationManager.stopAnimation(flowId);
     this.teardownCronJobs(flowId);
     this.webhookEntries = this.webhookEntries.filter(w => w.flowId !== flowId);
@@ -746,6 +755,8 @@ export class BotEngine {
           const argsParts = args.length > 0 ? args.split(/\s+/).filter(Boolean) : [];
           const enrichedData = {
             ...data,
+            client_nickname: data.client_nickname || data.invokername || '',
+            client_unique_identifier: data.client_unique_identifier || data.invokeruid || '',
             command_args: args,
             command_args_list: JSON.stringify(argsParts),
             command_name: cmdTrigger.commandName,
@@ -816,17 +827,31 @@ export class BotEngine {
   private executeFlow(flow: LoadedFlow, triggerNodeId: string, triggerType: string, eventData: Record<string, string>): void {
     console.log(`[BotEngine] Executing flow ${flow.id} ('${flow.name}') triggered by ${triggerType}`);
 
-    // Rate limiting
-    const current = this.executionCounts.get(flow.id) || 0;
-    if (current >= MAX_CONCURRENT_PER_FLOW) {
-      console.warn(`[BotEngine] Flow ${flow.id} rate limited (${current} concurrent executions)`);
+    // Reject saturated flows before consuming the requester's cooldown.
+    const counts = this.executionCounts.get(flow.id) ?? { active: 0 };
+    if (counts.active >= MAX_CONCURRENT_PER_FLOW) {
+      console.warn(`[BotEngine] Flow ${flow.id} rate limited (${counts.active} concurrent executions)`);
       return;
     }
-    this.executionCounts.set(flow.id, current + 1);
 
-    // Extract timezone from the trigger node (if cron trigger has one)
     const triggerNode = flow.flowData.nodes.find(n => n.id === triggerNodeId);
     const triggerData = triggerNode?.data as any;
+    if (triggerType === 'command' && triggerData?.cooldownSeconds > 0) {
+      const uid = eventData.client_unique_identifier;
+      if (!uid) return;
+      const now = Date.now();
+      for (const [key, expires] of this.commandCooldowns) {
+        if (expires <= now) this.commandCooldowns.delete(key);
+      }
+      const key = `${flow.id}:${triggerNodeId}:${uid}`;
+      if (this.commandCooldowns.has(key)) return;
+      this.commandCooldowns.set(key, now + triggerData.cooldownSeconds * 1000);
+    }
+
+    counts.active++;
+    this.executionCounts.set(flow.id, counts);
+
+    // Extract timezone from the trigger node (if cron trigger has one)
     const timezone = triggerData?.timezone as string | undefined;
 
     this.flowRunner.execute(flow, triggerNodeId, triggerType, eventData, timezone)
@@ -834,8 +859,9 @@ export class BotEngine {
         console.error(`[BotEngine] Flow ${flow.id} execution error: ${err.message}`);
       })
       .finally(() => {
-        const count = this.executionCounts.get(flow.id) || 1;
-        this.executionCounts.set(flow.id, count - 1);
+        // A disabled/reloaded flow has a new counter. Old runs must not
+        // release slots belonging to the replacement flow.
+        counts.active--;
       });
   }
 

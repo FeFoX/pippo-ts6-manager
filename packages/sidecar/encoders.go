@@ -27,12 +27,17 @@ const h264ConstrainedHighFmtp = "level-asymmetry-allowed=1;packetization-mode=1;
 
 // GPU backends a hardware encoder can run on. VAAPI (Intel, AMD) opens a DRM
 // render node and takes frames uploaded to it; NVENC (NVIDIA) and AMF (AMD,
-// native Windows) open the GPU through driver libraries and take system-memory frames.
+// native Windows) open the GPU through driver libraries and take system-memory
+// frames, as does VideoToolbox (Apple, native macOS) through the OS framework.
 const (
-	backendVAAPI = "vaapi"
-	backendNVENC = "nvenc"
-	backendAMF   = "amf"
+	backendVAAPI        = "vaapi"
+	backendNVENC        = "nvenc"
+	backendAMF          = "amf"
+	backendVideoToolbox = "videotoolbox"
 )
+
+// amfMaxHeaderSpacing is the largest -header_spacing h264_amf accepts.
+const amfMaxHeaderSpacing = 1000
 
 // Browsers do not list Constrained High, so a browser answers an offer of
 // h264ConstrainedHighFmtp alone with no video codec at all. These are the
@@ -88,6 +93,7 @@ var encoderOrder = []EncoderSpec{
 	{ID: "h264_vaapi", Codec: codecH264, FFmpeg: "h264_vaapi", Hardware: true, Backend: backendVAAPI},
 	{ID: "h264_nvenc", Codec: codecH264, FFmpeg: "h264_nvenc", Hardware: true, Backend: backendNVENC},
 	{ID: "h264_amf", Codec: codecH264, FFmpeg: "h264_amf", Hardware: true, Backend: backendAMF},
+	{ID: "h264_videotoolbox", Codec: codecH264, FFmpeg: "h264_videotoolbox", Hardware: true, Backend: backendVideoToolbox},
 }
 
 func lookupEncoder(id string) (EncoderSpec, bool) {
@@ -145,6 +151,22 @@ func hwDecodeEnabled() bool {
 	return os.Getenv("VIDEO_HW_DECODE") == "1"
 }
 
+// framesStayOnGPU reports whether frames decoded on the GPU stay in GPU memory
+// and are scaled there (gpuVideoFilter), instead of being copied back for the
+// CPU's fps, scale and pad filters and uploaded again for the encoder.
+//
+// VAAPI only, and only when the source is decoded on the GPU
+// (VIDEO_HW_DECODE=1). The copy is what makes GPU decoding slow today: on an
+// Intel Pentium Gold 8505 (UHD Graphics), 4K60 VP9 to 1080p30 h264_vaapi
+// ran at 1.13x real time and 165 % CPU with the copy, 6.1x and 62-70 % without
+// it. Decoding on the CPU (the default) was 3.0x at 384 %. AV1 is decoded on
+// the CPU here either way (FFmpeg 5.1 opens it with libdav1d); its frames are
+// uploaded by gpuVideoFilter. VIDEO_GPU_FILTERS=0 goes back to the copy.
+func framesStayOnGPU(spec EncoderSpec, withDecode bool) bool {
+	return spec.Backend == backendVAAPI && withDecode && hwDecodeEnabled() &&
+		os.Getenv("VIDEO_GPU_FILTERS") != "0"
+}
+
 // hwInitArgs are global ffmpeg options a hardware encoder needs before the
 // input: for VAAPI, the device that filters (hwupload) run on. When
 // VIDEO_HW_DECODE=1 they also turn on input decoding on the same GPU (VAAPI,
@@ -155,6 +177,9 @@ func hwInitArgs(spec EncoderSpec, withDecode bool) []string {
 	case backendVAAPI:
 		args := []string{"-init_hw_device", "vaapi=va:" + getVaapiDevice(), "-filter_hw_device", "va"}
 		if withDecode && hwDecodeEnabled() {
+			if framesStayOnGPU(spec, withDecode) {
+				args = append(args, "-hwaccel_output_format", "vaapi")
+			}
 			args = append(args, "-hwaccel", "vaapi", "-hwaccel_device", "va")
 		}
 		return args
@@ -169,14 +194,35 @@ func hwInitArgs(spec EncoderSpec, withDecode bool) []string {
 	return nil
 }
 
+// gpuVideoFilter is the video filter chain for frames that stay on the GPU
+// (framesStayOnGPU).
+//
+// format=nv12|vaapi,hwupload passes GPU frames through untouched and uploads
+// CPU ones, so a source the GPU cannot decode (ffmpeg then falls back to
+// software frames) still streams; so does AV1 decoded by libdav1d. fps works on
+// GPU frames as they are.
+//
+// There is no padding: FFmpeg 5.1 has no pad_vaapi, and overlay_vaapi places
+// the picture at a fixed position, which needs the source's size before the
+// stream starts. A source of another shape keeps its aspect ratio inside the
+// preset (a 4:3 source as 1440x1080 at 1080p), and the TeamSpeak client draws
+// the bars beside it.
+func gpuVideoFilter(fps, w, h int) string {
+	return fmt.Sprintf(
+		"fps=%d,format=nv12|vaapi,hwupload,scale_vaapi=w=%d:h=%d:force_original_aspect_ratio=decrease:force_divisible_by=2:format=nv12",
+		fps, w, h,
+	)
+}
+
 // uploadFilter ends the software filter chain with the frame format the
 // encoder takes.
 func uploadFilter(spec EncoderSpec) string {
 	switch spec.Backend {
 	case backendVAAPI:
 		return "format=nv12,hwupload"
-	case backendNVENC, backendAMF:
-		// NVENC and AMF upload system-memory frames themselves, without hwupload.
+	case backendNVENC, backendAMF, backendVideoToolbox:
+		// NVENC, AMF and VideoToolbox upload system-memory frames themselves,
+		// without hwupload.
 		// The 4:2:0 format is not optional: handed anything else, h264_nvenc
 		// switches to High 4:4:4 Predictive and ignores -profile:v, a profile
 		// the TeamSpeak client cannot decode.
@@ -261,14 +307,41 @@ func encoderArgs(spec EncoderSpec, vBitrate string, lowPower bool, cpuUsed, thre
 		args = []string{"-c:v", "h264_vaapi", "-profile:v", "high", "-bf", "0"}
 	case "h264_amf":
 		// AMF distinguishes Constrained High from High, even without B-frames.
-		// Default header_spacing is off (SPS/PPS once at start). Match -g /
-		// IDR period so every IDR carries fresh parameter sets for late joiners.
 		args = []string{
 			"-c:v", "h264_amf",
 			"-profile:v", "constrained_high",
 			"-bf", "0",
-			"-header_spacing", gop,
 		}
+		// Default header_spacing is off (SPS/PPS once at start). Match -g /
+		// IDR period so every IDR carries fresh parameter sets for late joiners.
+		// FFmpeg rejects a spacing above amfMaxHeaderSpacing and the encoder
+		// then fails to start; a longer GOP goes without, and the sidecar puts
+		// its cached SPS/PPS in front of a late joiner's IDR instead.
+		if n, err := strconv.Atoi(gop); err == nil && n >= 1 && n <= amfMaxHeaderSpacing {
+			args = append(args, "-header_spacing", gop)
+		}
+	case "h264_videotoolbox":
+		args = []string{
+			"-c:v", "h264_videotoolbox",
+			// Constrained High, as for the other H.264 encoders: High without
+			// frame reordering, which is what -bf 0 turns off here.
+			"-profile:v", "high",
+			"-bf", "0",
+			// Low-latency rate control for a live stream.
+			"-realtime", "1",
+			// Hardware only (FFmpeg's default, stated so it does not depend on
+			// the build). Allowed to, VideoToolbox encodes on the CPU where it
+			// has no hardware encoder; failing instead lets the sidecar fall
+			// back to libx264 and report it.
+			"-allow_sw", "0",
+		}
+		// No option for repeating SPS/PPS: FFmpeg's videotoolboxenc puts them
+		// in front of every keyframe whenever the muxer does not ask for
+		// global headers, and the RTP muxer does not. An IDR that comes without
+		// them still reaches a late joiner behind the sidecar's cached SPS/PPS,
+		// as for AMF with a long GOP; that cache is filled from the stream, so
+		// it needs them in-band at least once. Read from FFmpeg's source, not
+		// observed on a Mac.
 	case "h264_nvenc":
 		args = []string{
 			"-c:v", "h264_nvenc",
@@ -310,7 +383,8 @@ type EncoderProbeResult struct {
 	Detail string `json:"detail,omitempty"`
 	// Attempts are the test encodes run, in order, so the UI can show the
 	// exact ffmpeg command and what it printed. Empty when the probe was
-	// skipped without running ffmpeg (e.g. no VAAPI device).
+	// skipped without running ffmpeg (no VAAPI device, or a backend this
+	// operating system does not have).
 	Attempts []EncoderProbeAttempt `json:"attempts,omitempty"`
 	// Skipped is why ffmpeg was not run at all; empty when it ran.
 	Skipped string `json:"skipped,omitempty"`
@@ -359,6 +433,10 @@ type EncoderCapabilities struct {
 	VaapiDevicePresent bool                 `json:"vaapiDevicePresent"`
 	HwDecode           bool                 `json:"hwDecode"`
 	Encoders           []EncoderProbeResult `json:"encoders"`
+	// AV1HwDecode is whether FFmpeg decodes AV1 on a GPU here (any entry of
+	// AV1Decode). Streams use it only with VIDEO_HW_DECODE=1.
+	AV1HwDecode bool             `json:"av1HwDecode"`
+	AV1Decode   []AV1DecodeProbe `json:"av1Decode"`
 }
 
 func (c *EncoderCapabilities) find(id string) (EncoderProbeResult, bool) {
@@ -400,10 +478,28 @@ func encoderProbeArgs(spec EncoderSpec, lowPower bool) []string {
 }
 
 func probeOneEncoder(spec EncoderSpec, devicePresent bool, run probeRunner) EncoderProbeResult {
+	return probeOneEncoderIn(spec, devicePresent, nil, run)
+}
+
+// probeOneEncoderIn is probeOneEncoder given the encoders the FFmpeg build has
+// (nil when unknown). A hardware encoder the build lacks is not test-encoded:
+// ffmpeg would only answer "Unknown encoder", or reject one of the encoder's
+// private options with a message that does not say so.
+func probeOneEncoderIn(spec EncoderSpec, devicePresent bool, list ffmpegEncoderList, run probeRunner) EncoderProbeResult {
 	res := EncoderProbeResult{EncoderSpec: spec}
+	if reason := backendUnsupportedReason(spec.Backend); reason != "" {
+		res.Error = reason
+		res.Skipped = reason
+		return res
+	}
 	if spec.Backend == backendVAAPI && !devicePresent {
 		res.Error = "VAAPI device not present"
 		res.Skipped = fmt.Sprintf("VAAPI device %s not present", getVaapiDevice())
+		return res
+	}
+	if reason := missingEncoderReason(spec, list); reason != "" {
+		res.Error = reason
+		res.Skipped = fmt.Sprintf("`ffmpeg %s` does not list %s", strings.Join(encoderListArgs, " "), spec.FFmpeg)
 		return res
 	}
 	attempts := []bool{false}
@@ -481,6 +577,11 @@ func nvencMissingReason(spec EncoderSpec, out string) string {
 
 // probeEncoders test-encodes every registered encoder concurrently.
 func probeEncoders(run probeRunner) *EncoderCapabilities {
+	return probeEncodersIn(run, queryEncoderList(run))
+}
+
+// probeEncodersIn is probeEncoders given the encoders the FFmpeg build has.
+func probeEncodersIn(run probeRunner, list ffmpegEncoderList) *EncoderCapabilities {
 	devicePresent := vaapiDevicePresent()
 	results := make([]EncoderProbeResult, len(encoderOrder))
 	var wg sync.WaitGroup
@@ -488,7 +589,7 @@ func probeEncoders(run probeRunner) *EncoderCapabilities {
 		wg.Add(1)
 		go func(i int, spec EncoderSpec) {
 			defer wg.Done()
-			results[i] = probeOneEncoder(spec, devicePresent, run)
+			results[i] = probeOneEncoderIn(spec, devicePresent, list, run)
 		}(i, spec)
 	}
 	wg.Wait()
@@ -503,22 +604,90 @@ func probeEncoders(run probeRunner) *EncoderCapabilities {
 
 // capabilityCache holds the last probe so routine requests never re-probe.
 type capabilityCache struct {
-	mu   sync.Mutex
-	caps *EncoderCapabilities
-	run  probeRunner
+	// probeMu serializes refreshes without blocking reads of published capabilities.
+	probeMu sync.Mutex
+	mu      sync.Mutex
+	caps    *EncoderCapabilities
+	run     probeRunner
+	// list is the encoder list of the ffmpeg at listPath, asked for once.
+	// listAsked is set even when the answer was unusable, so a broken ffmpeg
+	// is not run again for every stream start. A refresh asks again.
+	list        ffmpegEncoderList
+	listPath    string
+	listAsked   bool
+	av1         av1DecodeCache
+	av1Software av1SoftwareDecoderCache
+}
+
+func (c *capabilityCache) runner() probeRunner {
+	if c.run == nil {
+		return runFFmpegProbe
+	}
+	return c.run
+}
+
+// encoderListLocked returns the cached encoder list, asking ffmpeg when it has
+// not been asked yet (or when force is set, or the ffmpeg path changed).
+func (c *capabilityCache) encoderListLocked(force bool) ffmpegEncoderList {
+	if path := getFfmpegPath(); force || !c.listAsked || c.listPath != path {
+		c.list, c.listPath, c.listAsked = queryEncoderList(c.runner()), path, true
+	}
+	return c.list
+}
+
+// missingReason is why spec cannot run because this FFmpeg build lacks its
+// encoder, or "" when the build has it or that is not known.
+func (c *capabilityCache) missingReason(spec EncoderSpec) string {
+	if !spec.Hardware {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return missingEncoderReason(spec, c.encoderListLocked(false))
 }
 
 func (c *capabilityCache) get(refresh bool) *EncoderCapabilities {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.caps == nil || refresh {
-		run := c.run
-		if run == nil {
-			run = runFFmpegProbe
-		}
-		c.caps = probeEncoders(run)
+	cached := c.caps
+	c.mu.Unlock()
+	if cached != nil && !refresh {
+		return cached
 	}
-	return c.caps
+
+	c.probeMu.Lock()
+	defer c.probeMu.Unlock()
+	c.mu.Lock()
+	if c.caps != nil && !refresh {
+		cached = c.caps
+		c.mu.Unlock()
+		return cached
+	}
+	run := c.runner()
+	list := c.encoderListLocked(refresh)
+	c.mu.Unlock()
+
+	caps := probeEncodersIn(run, list)
+	// Decode probes can crash faulty drivers. They are unnecessary when GPU
+	// decoding is disabled, and must not hold the lock used by stream startup.
+	// An empty list (not null) tells the backend this sidecar does report AV1
+	// decoding and simply tested no GPU; hwDecode says why.
+	caps.AV1Decode = []AV1DecodeProbe{}
+	if caps.HwDecode {
+		caps.AV1Decode = c.av1.probeAll(run, caps, refresh)
+	}
+	for _, r := range caps.AV1Decode {
+		caps.AV1HwDecode = caps.AV1HwDecode || r.Available
+	}
+	c.mu.Lock()
+	c.caps = caps
+	c.mu.Unlock()
+	return caps
+}
+
+// av1Decode is the cached AV1 test decode for hwaccel and device, run on first
+// use.
+func (c *capabilityCache) av1Decode(hwaccel, device string) AV1DecodeProbe {
+	return c.av1.get(c.runner(), hwaccel, device, false)
 }
 
 func (c *capabilityCache) peek() *EncoderCapabilities {

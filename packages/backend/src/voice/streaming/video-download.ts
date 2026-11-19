@@ -2,6 +2,9 @@ import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
 import { getCookieArgs } from '../audio/youtube.js';
+import { spawnYtDlp, type YtDlpRun } from '../audio/yt-dlp-process.js';
+import { MediaEgressError } from '../egress/media-egress.js';
+import { MEDIA_EGRESS_PORTS } from '../egress/egress-policy.js';
 import { validateUrl, parseLocalHostAllowlist } from '../../utils/url-validator.js';
 import { describeDuration } from './lifecycle.js';
 import { AppError } from '../../middleware/error-handler.js';
@@ -91,6 +94,27 @@ export class VideoSourceFailedError extends AppError {
  * a slow resolve comes back as a readable error instead of a client timeout.
  */
 const RESOLVE_TIMEOUT_MS = 90_000;
+
+/**
+ * A URL yt-dlp resolved for the sidecar to play keeps to the ports every media
+ * download is limited to. The sidecar's own proxy checks the addresses it connects to.
+ */
+export function assertResolvedMediaPort(url: string, site: string): void {
+  const parsed = new URL(url);
+  const defaultPort = parsed.protocol === 'https:' ? 443 : 80;
+  const port = parsed.port ? Number(parsed.port) : defaultPort;
+  if (!MEDIA_EGRESS_PORTS.has(port)) throw new VideoSourceFailedError(`${site} media URL blocked: port ${port} is not allowed`);
+}
+
+/** Start yt-dlp through the media egress proxy; a proxy failure is a source failure with a fixed message. */
+async function startYtDlp(args: string[], url: string, timeoutMs: number): Promise<YtDlpRun> {
+  try {
+    return await spawnYtDlp(args, { target: url, timeoutMs });
+  } catch (err) {
+    if (err instanceof MediaEgressError) throw new VideoSourceFailedError(err.message);
+    throw err;
+  }
+}
 
 /**
  * The user-facing reason from yt-dlp's stderr: its last "ERROR:" line (e.g.
@@ -238,6 +262,28 @@ export interface DownloadedStreamVideo {
   audioPath?: string;
   /** The chosen format's picture size when the extractor reports it, so Auto quality needs no probe. */
   resolution?: { width: number; height: number };
+  /**
+   * The chosen format's video codec when the extractor reports it (YouTube
+   * direct). The sidecar decodes AV1 on the GPU only when it knows the source
+   * is AV1; it reads local files itself.
+   */
+  videoCodec?: SourceVideoCodec;
+}
+
+/** Video codec families the sidecar's POST /source accepts as `videoCodec`. */
+export type SourceVideoCodec = 'av1' | 'vp9' | 'h264';
+
+/**
+ * The codec family of a yt-dlp `vcodec` ("av01.0.08M.08", "vp09.00.50.08",
+ * "vp9", "avc1.640028"), or undefined for anything else.
+ */
+export function videoCodecFamily(vcodec: unknown): SourceVideoCodec | undefined {
+  if (typeof vcodec !== 'string') return undefined;
+  const v = vcodec.trim().toLowerCase();
+  if (v === 'av1' || v.startsWith('av01')) return 'av1';
+  if (v === 'vp9' || v.startsWith('vp09')) return 'vp9';
+  if (v === 'h264' || v.startsWith('avc1') || v.startsWith('avc3')) return 'h264';
+  return undefined;
 }
 
 /**
@@ -267,22 +313,22 @@ async function resolveWithYtDlp(
   formatArgs: string[],
   site: string,
 ): Promise<Record<string, unknown>> {
+  const args = [
+    ...getCookieArgs(),
+    ...formatArgs,
+    '--dump-single-json',
+    '--no-download',
+    '--no-playlist',
+    '--no-warnings',
+    '--',
+    url,
+  ];
+  const { proc, redact } = await startYtDlp(args, url, RESOLVE_TIMEOUT_MS);
   const { stdout, stderr, code } = await new Promise<{
     stdout: string;
     stderr: string;
     code: number | null;
   }>((resolve, reject) => {
-    const args = [
-      ...getCookieArgs(),
-      ...formatArgs,
-      '--dump-single-json',
-      '--no-download',
-      '--no-playlist',
-      '--no-warnings',
-      '--',
-      url,
-    ];
-    const proc = spawn('yt-dlp', args, { shell: false });
     let out = '';
     let err = '';
     proc.stdout.on('data', (chunk: Buffer) => { out += chunk.toString(); });
@@ -293,7 +339,7 @@ async function resolveWithYtDlp(
     }, RESOLVE_TIMEOUT_MS);
     proc.on('close', (exitCode) => {
       clearTimeout(timer);
-      resolve({ stdout: out, stderr: err, code: exitCode });
+      resolve({ stdout: out, stderr: redact(err), code: exitCode });
     });
     proc.on('error', (spawnErr: NodeJS.ErrnoException) => {
       clearTimeout(timer);
@@ -341,6 +387,7 @@ async function resolveTwitchStreamUrl(
   if (!mediaCheck.valid) {
     throw new Error(`Twitch media URL blocked: ${mediaCheck.error}`);
   }
+  assertResolvedMediaPort(resolved.path, 'Twitch');
   // Keep the same duration ceiling YouTube downloads used to enforce for Twitch VODs.
   if (
     !resolved.live &&
@@ -394,12 +441,14 @@ export function parseYoutubeResolve(data: Record<string, unknown>): DownloadedSt
   const video = formats.find((f) => f.vcodec !== 'none' && mediaUrl(f.url));
   const audio = formats.find((f) => f !== video && f.acodec !== 'none' && mediaUrl(f.url));
   if (video && audio) {
+    const videoCodec = videoCodecFamily(video.vcodec);
     return {
       path: mediaUrl(video.url),
       audioPath: mediaUrl(audio.url),
       durationSec,
       live: isLive,
       resolution: pictureSize(video) ?? pictureSize(data),
+      ...(videoCodec ? { videoCodec } : {}),
     };
   }
 
@@ -407,7 +456,8 @@ export function parseYoutubeResolve(data: Record<string, unknown>): DownloadedSt
   if (!combined) {
     throw new VideoSourceFailedError('yt-dlp did not return a playable YouTube stream URL');
   }
-  return { path: combined, durationSec, live: isLive, resolution: pictureSize(data) };
+  const videoCodec = videoCodecFamily(data.vcodec);
+  return { path: combined, durationSec, live: isLive, resolution: pictureSize(data), ...(videoCodec ? { videoCodec } : {}) };
 }
 
 /**
@@ -428,6 +478,7 @@ async function resolveYoutubeStreamUrl(url: string, maxHeight: number, forDirect
     if (!check.valid) {
       throw new Error(`YouTube media URL blocked: ${check.error}`);
     }
+    assertResolvedMediaPort(media, 'YouTube');
   }
   console.log(
     `[VideoDownload] Resolved YouTube ${resolved.live ? 'live' : 'VOD'} for direct streaming` +
@@ -524,7 +575,7 @@ export async function downloadVideoForStream(
 
   if (!isYoutubeStreamHost(url)) {
     // Redirects and HLS segment URLs are checked by the sidecar's egress
-    // proxy, with the same localHosts allowance (see docs/video-streaming.md).
+    // proxy, with the same localHosts allowance (see docs/public/video-streaming.md).
     return { path: url, durationSec: null };
   }
 
@@ -537,20 +588,19 @@ export async function downloadVideoForStream(
   const tempName = `.stream-${Date.now()}.mp4`;
   const tempPath = path.join(musicRoot, tempName);
 
+  const args = [
+    ...getCookieArgs(),
+    ...youtubeVideoFormatArgs(maxHeight, options.forDirect),
+    '--merge-output-format', 'mp4',
+    '--no-playlist',
+    '--no-progress',
+    '-o', tempPath,
+    '--match-filter', maxDurationSec > 0 ? `duration <= ${maxDurationSec}` : 'duration >= 0',
+    '--',
+    url,
+  ];
+  const { proc, redact } = await startYtDlp(args, url, 10 * 60_000);
   await new Promise<void>((resolve, reject) => {
-    const args = [
-      ...getCookieArgs(),
-      ...youtubeVideoFormatArgs(maxHeight, options.forDirect),
-      '--merge-output-format', 'mp4',
-      '--no-playlist',
-      '--no-progress',
-      '-o', tempPath,
-      '--match-filter', maxDurationSec > 0 ? `duration <= ${maxDurationSec}` : 'duration >= 0',
-      '--',
-      url,
-    ];
-
-    const proc = spawn('yt-dlp', args, { shell: false });
     let stderr = '';
     let stdout = '';
     proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
@@ -563,7 +613,7 @@ export async function downloadVideoForStream(
     proc.on('close', (code) => {
       clearTimeout(timer);
       if (code !== 0) {
-        reject(ytDlpFailure('yt-dlp could not download the video', code, stderr));
+        reject(ytDlpFailure('yt-dlp could not download the video', code, redact(stderr)));
         return;
       }
       const skipped = durationFilterSkipMessage(stdout, maxDurationSec);

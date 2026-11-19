@@ -3,7 +3,7 @@ import type { QueueItem } from '../playlist/queue.js';
 import { formatRadioListMessage } from '../ts6-chat-format.js';
 import type { CommandContext } from './context.js';
 import { invalidatePlaylistExpansion } from '../playlist-expansion.js';
-import { beginChatMediaRequest, invalidateChatPlaylistExpansion } from './queue.js';
+import { beginChatMediaRequest, getChatMediaGeneration, invalidateChatPlaylistExpansion } from './queue.js';
 
 // ─── Command Handlers ───────────────────────────────────────
 /** List configured radio stations or play a selected station in the requesting channel. */
@@ -14,8 +14,15 @@ export async function handleRadio(
   userClid: number,
   args: string,
 ): Promise<void> {
+  const generation = getChatMediaGeneration(botId);
+  const serverConfigId = bot.currentConfig.serverConfigId;
+  const virtualServerId = context.virtualServerIdForBot(botId);
+  const isSameBot = () => context.voiceBotManager.getBot(botId) === bot
+    && bot.currentConfig.serverConfigId === serverConfigId
+    && context.virtualServerIdForBot(botId) === virtualServerId;
   // Get serverConfigId for this bot from DB
   const dbBot = await context.prisma.musicBot.findUnique({ where: { id: botId }, select: { serverConfigId: true } });
+  if (!isSameBot()) return;
   if (!dbBot) {
     context.reply(bot, userClid, 'Bot config not found.');
     return;
@@ -25,6 +32,7 @@ export async function handleRadio(
     where: { serverConfigId: dbBot.serverConfigId },
     orderBy: { name: 'asc' },
   });
+  if (!isSameBot()) return;
 
   if (stations.length === 0) {
     context.reply(bot, userClid, 'No radio stations configured.');
@@ -44,8 +52,8 @@ export async function handleRadio(
   }
 
   // Argument — play station by ID
-  const stationId = parseInt(args);
-  if (isNaN(stationId)) {
+  const stationId = Number(args);
+  if (!/^[1-9]\d*$/.test(args) || !Number.isSafeInteger(stationId)) {
     context.reply(bot, userClid, 'Usage: !radio <id> — Use !radio to list stations.');
     return;
   }
@@ -56,7 +64,11 @@ export async function handleRadio(
     return;
   }
 
+  if (getChatMediaGeneration(botId) !== generation) return;
+  const request = beginChatMediaRequest(botId);
+  const isCurrent = () => !request.isCancelled() && isSameBot();
   await context.joinChannelForCommand(botId, bot, userClid);
+  if (!isCurrent()) return;
 
   const queueItem: QueueItem = {
     id: `radio_${station.id}`,
@@ -68,6 +80,8 @@ export async function handleRadio(
   };
 
   await bot.playStream(queueItem, context.chatMusicSwitch(bot));
+  if (!isCurrent() || bot.nowPlaying !== queueItem) return;
+  context.saveMusicRequest(bot, queueItem);
   context.reply(bot, userClid, `Now playing: ${station.name}`);
 }
 
@@ -219,7 +233,8 @@ export async function handleSkip(context: CommandContext, bot: VoiceBot, userCli
     }
     context.reply(bot, userClid, `Skipped to: ${next.title}`);
   } else {
-    bot.stopAudio();
+    // A skip is not a Stop: requests still loading are kept.
+    bot.stopAudio({ keepPendingRequests: true });
     context.reply(bot, userClid, 'Queue empty — playback stopped.');
   }
 }

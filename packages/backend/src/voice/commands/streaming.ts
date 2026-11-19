@@ -126,7 +126,7 @@ export async function handleStopStream(
     context.reply(bot, userClid, 'No active video stream.');
     return;
   }
-  await bot.stopVideoStream('manual', 'Stopped by chat command');
+  await bot.stopVideoStream('manual', 'Stopped by chat command', { cancelPendingRequests: true });
   context.reply(bot, userClid, 'Video stream stopped.');
 }
 

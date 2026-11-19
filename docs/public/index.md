@@ -1,0 +1,39 @@
+# TS6 Manager documentation
+
+TS6 Manager is a web-based management interface for TeamSpeak servers. This fork is an opinionated continuation of `clusterzx/ts6-manager`, focused on core TeamSpeak administration, reliability, security, music/video features, and automation.
+
+The application uses TeamSpeak **WebQuery HTTP** for management operations. Optional authenticated SSH Query is used for features that need event or file-transfer access.
+
+## Start here
+
+- [Installation](installation.md) — deploy the split stack or all-in-one image
+- [Install as an app](pwa.md) — iPhone/iPad, Android and desktop installation, updates and offline limits
+- [Configuration](configuration.md) — required secrets, TeamSpeak connection setup, and application settings
+- [Environment variables](environment-variables.md) — backend, frontend, and sidecar settings
+- [Native media sidecar](native-sidecar.md) — optional release binaries for host GPU encoders
+- [Upgrading](upgrading.md) — update containers without losing credentials or database state
+- [Beta releases](beta.md) — prerelease images, tester compose, and rollback (not production)
+- [Switching from clusterzx](migrating-from-clusterzx.md) — move an existing clusterzx/ts6-manager install to these images and keep its data
+
+## Use TS6 Manager
+
+- [Server management](server-management.md) — virtual servers, channels, clients, permissions, files, logs, and widgets
+- [Media bots](music-bots.md) — Bot Hub, Requests, queues, radio, local media, yt-dlp, chat commands, and one media session (music or video)
+- [Bot flows](bot-flows.md) — triggers, conditions, actions, variables, and temporary-channel ownership
+- [Video streaming](video-streaming.md) — Auto quality up to 2160p, VAAPI with software fallback, live source health, no-viewer auto-stop, and LAN IPTV local-network sources
+
+## Deploy and operate
+
+- [Reverse proxy](reverse-proxy.md) — Coolify and reverse-proxy deployment notes
+- [Security](security.md) — security controls and deployment expectations
+- [TeamSpeak compatibility](teamspeak-compatibility.md) — beta13 Query settings and compatibility testing
+- [Troubleshooting](troubleshooting.md) — common connection, media, sidecar, and upgrade problems
+- [Discord bridge](discord-bridge.md) — laboratory status only; not a released product
+
+## Project
+
+- [Architecture](architecture.md) — service and package layout
+- [API errors](api-errors.md) — user-facing error contract and reason codes
+- [Roadmap](roadmap.md) — implemented phases and public follow-up direction
+
+The source repository remains the canonical implementation. Hosted docs at [www.uniskela.com/docs/ts6-manager](https://www.uniskela.com/docs/ts6-manager/) are generated from these reviewed pages. `docs/manifest.json` lists them; the `public` directory is not part of the URL.

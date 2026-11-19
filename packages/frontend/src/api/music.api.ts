@@ -1,5 +1,13 @@
 import api from './client';
-import type { BotMediaOverview, StartVideoStreamRequest, VideoStreamStatus } from '@ts6/common';
+import type {
+  BotMediaOverview,
+  BotAutomationSettings,
+  MediaCommandPermissions,
+  QueueVideoResponse,
+  StartVideoStreamRequest,
+  VideoQueueState,
+  VideoStreamStatus,
+} from '@ts6/common';
 import type { VideoResources } from '@/lib/video-resources';
 
 // === Music Bot API ===
@@ -25,9 +33,12 @@ export const musicBotsApi = {
   get: (id: number) => api.get(`/music-bots/${id}`).then((r) => r.data),
   create: (data: any) => api.post('/music-bots', data).then((r) => r.data),
   update: (id: number, data: any) => api.put(`/music-bots/${id}`, data).then((r) => r.data),
+  automation: (id: number, settings: BotAutomationSettings): Promise<BotAutomationSettings> =>
+    api.put(`/music-bots/${id}/automation`, settings).then((r) => r.data),
   delete: (id: number) => api.delete(`/music-bots/${id}`),
   start: (id: number) => api.post(`/music-bots/${id}/start`).then((r) => r.data),
   stop: (id: number) => api.post(`/music-bots/${id}/stop`).then((r) => r.data),
+  home: (id: number) => api.post(`/music-bots/${id}/home`).then((r) => r.data),
   restart: (id: number) => api.post(`/music-bots/${id}/restart`).then((r) => r.data),
 
   // The authenticated client supplies the bearer header; <img src> cannot.
@@ -64,12 +75,16 @@ export const musicBotsApi = {
   enqueue: (id: number, songId: number) => api.post(`/music-bots/${id}/queue`, { songId }).then((r) => r.data),
   loadPlaylist: (id: number, playlistId: number, clearFirst?: boolean) =>
     api.post(`/music-bots/${id}/queue/playlist`, { playlistId, clearFirst }).then((r) => r.data),
-  removeFromQueue: (id: number, index: number) => api.delete(`/music-bots/${id}/queue/${index}`).then((r) => r.data),
+  // `itemId` is the queue item shown at `index`; the server refuses the edit if the queue moved since.
+  removeFromQueue: (id: number, index: number, itemId?: string) =>
+    api.delete(`/music-bots/${id}/queue/${index}`, { params: itemId === undefined ? undefined : { id: itemId } }).then((r) => r.data),
   clearQueue: (id: number) => api.delete(`/music-bots/${id}/queue`).then((r) => r.data),
   shuffle: (id: number, enabled: boolean) => api.post(`/music-bots/${id}/queue/shuffle`, { enabled }).then((r) => r.data),
   repeat: (id: number, mode: string) => api.post(`/music-bots/${id}/queue/repeat`, { mode }).then((r) => r.data),
-  playFromQueue: (id: number, index: number) => api.post(`/music-bots/${id}/queue/${index}/play`).then((r) => r.data),
-  moveQueueItem: (id: number, from: number, to: number) => api.put(`/music-bots/${id}/queue/move`, { from, to }).then((r) => r.data),
+  playFromQueue: (id: number, index: number, itemId?: string) =>
+    api.post(`/music-bots/${id}/queue/${index}/play`, itemId === undefined ? undefined : { id: itemId }).then((r) => r.data),
+  moveQueueItem: (id: number, from: number, to: number, itemId?: string) =>
+    api.put(`/music-bots/${id}/queue/move`, { from, to, id: itemId }).then((r) => r.data),
   playerWidgetToken: (id: number) => api.get(`/music-bots/${id}/player-widget-token`).then((r) => r.data),
 
   // Video Streaming
@@ -81,6 +96,24 @@ export const musicBotsApi = {
   startStream: (id: number, request: StartVideoStreamRequest) =>
     api.post(`/music-bots/${id}/stream/start`, request, { timeout: 120000 }).then((r) => r.data),
   stopStream: (id: number) => api.post(`/music-bots/${id}/stream/stop`).then((r) => r.data),
+
+  // Video queue. Adding or playing can start a stream (and expand a playlist),
+  // so those share the long start timeout; so does a skip, which loads the next video.
+  videoQueue: (id: number): Promise<VideoQueueState> =>
+    api.get(`/music-bots/${id}/stream/queue`).then((r) => r.data),
+  queueVideo: (id: number, body: StartVideoStreamRequest): Promise<QueueVideoResponse> =>
+    api.post(`/music-bots/${id}/stream/queue`, body, { timeout: 120000 }).then((r) => r.data),
+  playVideoQueue: (id: number, body: Partial<StartVideoStreamRequest> = {}) =>
+    api.post(`/music-bots/${id}/stream/queue/play`, body, { timeout: 120000 }).then((r) => r.data),
+  skipVideo: (id: number) =>
+    api.post(`/music-bots/${id}/stream/queue/skip`, undefined, { timeout: 120000 }).then((r) => r.data),
+  playQueuedVideo: (id: number, index: number, body: Partial<StartVideoStreamRequest> = {}) =>
+    api.post(`/music-bots/${id}/stream/queue/${index}/play`, body, { timeout: 120000 }).then((r) => r.data),
+  removeQueuedVideo: (id: number, index: number) =>
+    api.delete(`/music-bots/${id}/stream/queue/${index}`).then((r) => r.data),
+  moveQueuedVideo: (id: number, from: number, to: number) =>
+    api.put(`/music-bots/${id}/stream/queue/move`, { from, to }).then((r) => r.data),
+  clearVideoQueue: (id: number) => api.delete(`/music-bots/${id}/stream/queue`).then((r) => r.data),
   setStreamSource: (id: number, source: string, volume?: number) =>
     api.post(`/music-bots/${id}/stream/source`, { source, volume }, { timeout: 120000 }).then((r) => r.data),
   setStreamVolume: (id: number, volume: number) =>
@@ -188,6 +221,10 @@ export const radioStationsApi = {
 // === Custom chat commands (!name → reply) ===
 
 export const chatCommandsApi = {
+  permissions: (configId: number, sid: number): Promise<MediaCommandPermissions> =>
+    api.get(`/servers/${configId}/chat-commands/permissions/${sid}`).then((r) => r.data),
+  savePermissions: (configId: number, sid: number, policy: MediaCommandPermissions): Promise<MediaCommandPermissions> =>
+    api.put(`/servers/${configId}/chat-commands/permissions/${sid}`, policy).then((r) => r.data),
   list: (configId: number) => api.get(`/servers/${configId}/chat-commands`).then((r) => r.data),
   presets: (configId: number) =>
     api.get(`/servers/${configId}/chat-commands/presets`).then((r) => r.data),

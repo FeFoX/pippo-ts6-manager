@@ -102,7 +102,7 @@ describe('video seek', () => {
 
     assert.equal(sources.length, 1);
     assert.equal(sources[0].source, 'https://rr1.googlevideo.example/video');
-    assert.equal(sources[0].options.startSeconds, 1800);
+    assert.equal(sources[0].options.startAtSecs, 1800);
     assert.equal(sources[0].options.mode, 'vod');
     assert.equal(bot.videoPositionSec, 1800);
     mock.timers.tick(5_000);
@@ -117,8 +117,8 @@ describe('video seek', () => {
     const { sources } = fakeVideo(bot, { duration: 100 });
     await bot.seek(-50);
     await bot.seek(9_999);
-    assert.equal(sources[0].options.startSeconds, undefined, 'a seek to the start sends no offset');
-    assert.equal(sources[1].options.startSeconds, 98);
+    assert.equal(sources[0].options.startAtSecs, undefined, 'a seek to the start sends no offset');
+    assert.equal(sources[1].options.startAtSecs, 98);
     (bot as any).clearVideoEndTimer();
   });
 
@@ -128,7 +128,7 @@ describe('video seek', () => {
     const first = bot.seek(60);
     const second = bot.seek(120);
     await Promise.all([first, second]);
-    assert.deepEqual(sources.map((s) => s.options.startSeconds), [60, 120]);
+    assert.deepEqual(sources.map((s) => s.options.startAtSecs), [60, 120]);
     (bot as any).clearVideoEndTimer();
   });
 
@@ -139,7 +139,7 @@ describe('video seek', () => {
 
     await bot.seek(9_999);
 
-    assert.equal(sources[0].options.startSeconds, 598);
+    assert.equal(sources[0].options.startAtSecs, 598);
     assert.deepEqual(bot.playbackProgress, { position: 598, duration: 600 });
     assert.equal(b._videoEndTimer, null, 'a stream that had no end-stop clock does not get one');
   });
@@ -150,7 +150,7 @@ describe('video seek', () => {
 
     await bot.seek(300);
 
-    assert.equal(sources[0].options.startSeconds, 300);
+    assert.equal(sources[0].options.startAtSecs, 300);
     assert.equal(bot.videoPositionSec, 300);
     assert.equal(bot.playbackProgress?.duration, 0, 'length unknown');
     assert.equal(b._videoEndTimer, null);
@@ -165,7 +165,7 @@ describe('video seek', () => {
 
     await b.pushVideoStreamVolume();
 
-    assert.equal(sources[0].options.startSeconds, 120);
+    assert.equal(sources[0].options.startAtSecs, 120);
     assert.equal(bot.videoPositionSec, 120);
   });
 
@@ -184,7 +184,7 @@ describe('video seek', () => {
     await b.pushVideoStreamVolume();
 
     assert.equal(sources.length, 1);
-    assert.equal(sources[0].options.startSeconds, 100);
+    assert.equal(sources[0].options.startAtSecs, 100);
     assert.equal(bot.videoPositionSec, 100);
     b.clearVideoEndTimer();
   });
@@ -213,7 +213,7 @@ describe('seek rate limit on remote sources', () => {
 
     mock.timers.tick(20_000);
     await bot.seek(2400);
-    assert.deepEqual(sources.map((x) => x.options.startSeconds), [1800, 2400]);
+    assert.deepEqual(sources.map((x) => x.options.startAtSecs), [1800, 2400]);
     b.clearVideoEndTimer();
   });
 
@@ -226,7 +226,7 @@ describe('seek rate limit on remote sources', () => {
     await bot.pauseVideo();
     await bot.resumeVideo();
     assert.equal(bot.videoPaused, false);
-    assert.deepEqual(sources.map((x) => x.options.startSeconds), [1800, 1810], 'resumed at the paused position');
+    assert.deepEqual(sources.map((x) => x.options.startAtSecs), [1800, 1810], 'resumed at the paused position');
 
     // The resume left the clock where the seek set it: 10 s later a seek is still refused for the rest.
     await assert.rejects(() => bot.seek(2400), (err: unknown) =>
@@ -288,7 +288,7 @@ describe('seek rate limit on remote sources', () => {
     await bot.seek(120);
     await bot.seek(180);
 
-    assert.deepEqual(sources.map((x) => x.options.startSeconds), [60, 120, 180]);
+    assert.deepEqual(sources.map((x) => x.options.startAtSecs), [60, 120, 180]);
     assert.match(sources[0].source, /\.stream-1\.mp4$/);
     b.clearVideoEndTimer();
   });

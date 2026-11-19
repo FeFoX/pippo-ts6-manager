@@ -50,6 +50,7 @@ async function setup(page: Page, request: APIRequestContext, initialPublicUrl: s
 test('uploading a banner selects its public link and saving sends it as the channel banner', async ({ page, request }) => {
   const { calls, dialog } = await setup(page, request, 'https://ts.example.com');
   await expect(dialog.getByText('https://ts.example.com', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('Public URL of this manager', { exact: true })).toHaveCount(0);
   await dialog.getByLabel('Upload banner').setInputFiles({ name: 'backrooms.png', mimeType: 'image/png', buffer: png });
   const link = `https://ts.example.com/api/banners/${uploaded}`;
   await expect(dialog.getByPlaceholder('https://… or ts3image://…')).toHaveValue(link);
@@ -58,8 +59,9 @@ test('uploading a banner selects its public link and saving sends it as the chan
   await dialog.getByRole('button', { name: 'Use this hosted banner' }).click();
   await expect(dialog.getByPlaceholder('https://… or ts3image://…')).toHaveValue(`https://ts.example.com/api/banners/${existing}`);
   await dialog.getByRole('button', { name: 'Save' }).click();
-  await expect.poll(() => calls.filter((c) => c.method === 'PUT').map((c) => JSON.parse(c.body ?? '{}').channel_banner_gfx_url))
-    .toContain(`https://ts.example.com/api/banners/${existing}`);
+  // Only the changed field goes to TeamSpeak; untouched ones are not resent.
+  await expect.poll(() => calls.filter((c) => c.method === 'PUT').map((c) => JSON.parse(c.body ?? '{}')))
+    .toEqual([{ channel_banner_gfx_url: `https://ts.example.com/api/banners/${existing}` }]);
 });
 
 test('without a public URL the picker asks for one before banners can be chosen', async ({ page, request }) => {
@@ -89,4 +91,14 @@ test('changing the public URL updates a selected hosted banner link', async ({ p
   await dialog.getByRole('button', { name: 'Save', exact: true }).first().click();
   await expect(dialog.getByPlaceholder('https://… or ts3image://…')).toHaveValue(`https://new.example.com/api/banners/${existing}`);
   await expect(dialog.getByRole('button', { name: 'Selected hosted banner' })).toBeVisible();
+});
+
+test('a saved public URL can be cleared by saving it empty', async ({ page, request }) => {
+  const { calls, dialog } = await setup(page, request, 'https://wrong.example.com');
+  await dialog.getByRole('button', { name: 'Change' }).click();
+  await dialog.getByLabel('Public URL').fill('');
+  await dialog.getByRole('button', { name: 'Save', exact: true }).first().click();
+  await expect.poll(() => calls.find((c) => c.url.endsWith('/api/settings/public-url'))?.body).toBe(JSON.stringify({ publicUrl: '' }));
+  await expect(dialog.getByLabel('Public URL')).toHaveValue(new URL(page.url()).origin);
+  await expect(dialog.getByRole('button', { name: 'Use this hosted banner' })).toBeDisabled();
 });

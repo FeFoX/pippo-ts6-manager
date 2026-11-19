@@ -1,9 +1,8 @@
-import express, { type Express } from 'express';
+import express, { type Express, type ErrorRequestHandler } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { config } from './config.js';
-import { applyTrustProxy, forwardedHeaderWarning } from './trust-proxy.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { authMiddleware } from './middleware/auth.js';
 import { authRoutes } from './routes/auth.routes.js';
@@ -17,6 +16,7 @@ import { permissionRoutes } from './routes/permissions.routes.js';
 import { banRoutes } from './routes/bans.routes.js';
 import { tokenRoutes } from './routes/tokens.routes.js';
 import { fileRoutes } from './routes/files.routes.js';
+import { iconRoutes } from './routes/icons.routes.js';
 import { complaintRoutes } from './routes/complaints.routes.js';
 import { messageRoutes } from './routes/messages.routes.js';
 import { logRoutes } from './routes/logs.routes.js';
@@ -38,7 +38,12 @@ import { setupRoutes } from './routes/setup.routes.js';
 import { settingsRoutes } from './routes/settings.routes.js';
 import { auditRoutes } from './routes/audit.routes.js';
 import { activityJournalRoutes } from './routes/activity-journal.routes.js';
+import { listenerRemoteRoutes, listenerRemoteAdminRoutes, listenerRemoteIpGuard, listenerRemoteListenerKey, recordRefusal } from './routes/listener-remote.routes.js';
+import { ListenerRemoteError } from './voice/listener-remote.js';
+import { clientRateKey } from './utils/client-address.js';
+import { BoundedRateLimitStore } from './utils/rate-windows.js';
 
+import { applyTrustProxy, forwardedHeaderWarning } from './trust-proxy.js';
 import { requireServerAccess } from './middleware/server-access.js';
 import { createRequire } from 'module';
 
@@ -54,6 +59,43 @@ export function createApp(): Express {
 
   app.use(helmet());
   app.use(cors({ origin: config.frontendUrl, credentials: true }));
+  // Parse remote requests separately so body-parser errors cannot echo token material.
+  // Bounded stores: a flood of new addresses cannot grow limiter memory without limit.
+  // Live listeners have their own store, which only verified sessions can fill,
+  // so address traffic can never crowd out a signed-in listener.
+  const remoteAddressStore = new BoundedRateLimitStore();
+  const remoteListenerStore = new BoundedRateLimitStore();
+  const remoteLimit = {
+    windowMs: 60_000,
+    max: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many remote requests', code: 'rate_limited' },
+    // Counted in the bounded listener remote audit totals; the response is unchanged.
+    handler: (req: express.Request, res: express.Response, _next: express.NextFunction, options: { statusCode: number; message: unknown }) => {
+      recordRefusal(req, res, new ListenerRemoteError(429, 'rate_limited', 'Too many remote requests'), 'limiter');
+      res.status(options.statusCode).send(options.message);
+    },
+  } as const;
+  const remoteAddressLimiter = rateLimit({
+    ...remoteLimit,
+    store: remoteAddressStore,
+    skip: (_req, res) => listenerRemoteListenerKey(res) !== undefined,
+    keyGenerator: req => clientRateKey(req),
+  });
+  const remoteListenerLimiter = rateLimit({
+    ...remoteLimit,
+    store: remoteListenerStore,
+    skip: (_req, res) => listenerRemoteListenerKey(res) === undefined,
+    keyGenerator: (_req, res) => listenerRemoteListenerKey(res) ?? '',
+  });
+  // Keep the bounded guard first; it also enforces the stricter exchange quota.
+  app.use('/api/listener-remote', listenerRemoteIpGuard, remoteAddressLimiter, remoteListenerLimiter, listenerRemoteRoutes);
+  const remoteParseError: ErrorRequestHandler = (_err, _req, res, _next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(400).json({ error: 'Invalid listener request.', code: 'invalid_request' });
+  };
+  app.use('/api/listener-remote', remoteParseError);
   app.use(express.json({ limit: '10mb' }));
 
   // Health check (includes version so deploys can verify backend image matches UI)
@@ -67,16 +109,22 @@ export function createApp(): Express {
   });
 
   // H1: Rate limiting on auth endpoints
+  // Entries are small, so the sign-in store is large; when full it makes room and never refuses.
+  const authStore = new BoundedRateLimitStore({ capacity: 100_000 });
   const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 15,
+    store: authStore,
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'Too many attempts, please try again later' },
+    keyGenerator: req => clientRateKey(req),
   });
   app.use('/api/auth/login', authLimiter);
   app.use('/api/auth/refresh', authLimiter);
   app.use('/api/auth/password', authLimiter);
+  // Exposed so tests can check the stores stay bounded.
+  app.locals.rateLimitStores = { remoteAddress: remoteAddressStore, remoteListener: remoteListenerStore, auth: authStore };
 
   // Public routes
   app.use('/api/setup', setupRoutes);
@@ -97,6 +145,7 @@ export function createApp(): Express {
 
   // Protected routes
   app.use('/api', authMiddleware);
+  app.use('/api/listener-remote-admin', listenerRemoteAdminRoutes);
   app.use('/api/servers', serverRoutes);
 
   // H9: Server access control on all :configId routes
@@ -110,6 +159,7 @@ export function createApp(): Express {
   app.use('/api/servers/:configId/vs/:sid/bans', serverAccess, banRoutes);
   app.use('/api/servers/:configId/vs/:sid/tokens', serverAccess, tokenRoutes);
   app.use('/api/servers/:configId/vs/:sid/files', serverAccess, fileRoutes);
+  app.use('/api/servers/:configId/vs/:sid/icons', serverAccess, iconRoutes);
   app.use('/api/servers/:configId/vs/:sid/complaints', serverAccess, complaintRoutes);
   app.use('/api/servers/:configId/vs/:sid/messages', serverAccess, messageRoutes);
   app.use('/api/servers/:configId/vs/:sid/logs', serverAccess, logRoutes);

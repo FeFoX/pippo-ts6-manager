@@ -187,8 +187,31 @@ func debugLogsEnabled() bool {
 
 func debugf(format string, args ...any) {
 	if debugLogsEnabled() {
-		log.Printf(format, args...)
+		log.Printf(format, quoteLogArgs(args)...)
 	}
+}
+
+func quoteLogArgs(args []any) []any {
+	out := make([]any, len(args))
+	for i, arg := range args {
+		if s, ok := arg.(string); ok {
+			out[i] = quoteLog(s)
+			continue
+		}
+		out[i] = arg
+	}
+	return out
+}
+
+// quoteLog keeps one log record. Nested newline replacement is what Sonar
+// treats as sanitizing; Quote also escapes other control characters.
+func quoteLog(s string) string {
+	quoted := strconv.Quote(s)
+	return strings.ReplaceAll(strings.ReplaceAll(quoted, "\n", "_"), "\r", "_")
+}
+
+func quoteErr(err error) string {
+	return quoteLog(err.Error())
 }
 
 // NTP epoch offset: seconds between 1900-01-01 and 1970-01-01
@@ -570,10 +593,14 @@ type Peer struct {
 	PC         *webrtc.PeerConnection
 	VideoTrack *webrtc.TrackLocalStaticRTP
 	AudioTrack *webrtc.TrackLocalStaticRTP
-	VideoSSRC  uint32
-	AudioSSRC  uint32
-	Active     bool
-	Started    bool
+	// The SSRCs are resolved when ICE connects. Active is set while ICE is
+	// connected, and Started once the video gate has opened on a keyframe.
+	// All four are guarded by mu: the ICE callback, the media loops, the
+	// sender reports and ClosePeer touch them from different goroutines.
+	VideoSSRC uint32
+	AudioSSRC uint32
+	Active    bool
+	Started   bool
 	// checking and connected record how far ICE got, so a viewer that
 	// answered but never connected can be told apart from one that played
 	// and then left. Guarded by mu.
@@ -586,10 +613,12 @@ type Peer struct {
 	// pendingICE holds candidates that arrived before the viewer's answer;
 	// SetAnswer flushes them. Guarded by mu.
 	pendingICE []webrtc.ICECandidateInit
-	// videoOutSeq is the next RTP sequence number to write on VideoTrack.
-	// Guarded by mu. Survives stream-gate resets so an H.264 SPS/PPS prefix
-	// cannot reuse a sequence SRTP already accepted from this peer.
+	// videoOutSeq is the RTP sequence number last written on VideoTrack and
+	// videoInSeq the stream's own number for that packet. Guarded by mu. They
+	// survive stream-gate resets so an H.264 SPS/PPS prefix cannot reuse a
+	// sequence SRTP already accepted from this peer.
 	videoOutSeq   uint16
+	videoInSeq    uint16
 	videoOutSeqOK bool
 }
 
@@ -629,10 +658,12 @@ type Sidecar struct {
 	iceAdvertiseIPs []string
 
 	ffmpeg     *exec.Cmd
+	ffmpegDone <-chan struct{}
 	ffmpegLock sync.Mutex
 	ffmpegGen  uint64
 	source     string
-	running    bool
+	// running is cleared by Stop while the RTP readers loop on it.
+	running atomic.Bool
 	// egress is the current remote source's connection proxy (nil for local
 	// files or with SIDECAR_EGRESS_PROXY=off); guarded by ffmpegLock.
 	egress *egressProxy
@@ -730,7 +761,7 @@ func (s *Sidecar) StartRTP() error {
 	s.audioPort = s.audioConn.LocalAddr().(*net.UDPAddr).Port
 
 	log.Printf("[RTP] Video port: %d, Audio port: %d", s.videoPort, s.audioPort)
-	s.running = true
+	s.running.Store(true)
 
 	go s.readVideoRTP()
 	go s.readAudioRTP()
@@ -745,11 +776,11 @@ func (s *Sidecar) readVideoRTP() {
 	pkt := &rtp.Packet{}
 	count := 0
 
-	for s.running {
+	for s.running.Load() {
 		n, err := s.videoConn.Read(buf)
 		arrived := time.Now()
 		if err != nil {
-			if s.running {
+			if s.running.Load() {
 				log.Printf("[RTP] Video read error: %v", err)
 			}
 			return
@@ -790,11 +821,11 @@ func (s *Sidecar) readAudioRTP() {
 	pkt := &rtp.Packet{}
 	count := 0
 
-	for s.running {
+	for s.running.Load() {
 		n, err := s.audioConn.Read(buf)
 		arrived := time.Now()
 		if err != nil {
-			if s.running {
+			if s.running.Load() {
 				log.Printf("[RTP] Audio read error: %v", err)
 			}
 			return
@@ -844,69 +875,119 @@ func (s *Sidecar) processVideoRTP() {
 				time.Sleep(d)
 			}
 		}
-		codec := s.currentCodec()
-		if codec == codecH264 {
-			s.h264Params.observe(pkt.Payload)
-		}
-		if codec == codecVP9 && s.vp9Rewrite.Load() {
-			pkt.Payload = s.vp9Desc.rewrite(pkt.Payload, pkt.Marker)
-		}
-
-		s.peersLock.RLock()
-		for _, peer := range s.peers {
-			peer.mu.Lock()
-			// A peer negotiated for another codec cannot decode this stream.
-			active := peer.Active && peer.Codec == codec
-			started := peer.Started
-			track := peer.VideoTrack
-			opening := false
-
-			if active && !started && isKeyframeStart(codec, pkt.Payload) {
-				peer.Started = true
-				started = true
-				opening = true
-				log.Printf("[Peer %s] First %s keyframe seen at ts=%d - opening stream gate", peer.ID, codec, pkt.Timestamp)
-			}
-
-			peer.mu.Unlock()
-
-			if active && started && track != nil {
-				var batch []*rtp.Packet
-				if opening && codec == codecH264 {
-					prefix := s.h264Params.prefixBefore(pkt)
-					batch = append(batch, prefix...)
-					debugf("[Peer %s] h264 gate open: %s", peer.ID, h264GateOpenInfo(pkt.Payload, len(prefix)))
-				}
-				batch = append(batch, pkt)
-				for _, p := range batch {
-					peer.mu.Lock()
-					out := peer.nextVideoRTP(p)
-					peer.mu.Unlock()
-					if out != nil {
-						_ = track.WriteRTP(out)
-					}
-				}
-			}
-		}
-		s.peersLock.RUnlock()
+		s.forwardVideoRTP(pkt)
 	}
 }
 
-// nextVideoRTP clones pkt with a per-peer sequence number. Caller holds p.mu.
-// The first packet keeps its sequence; later packets increment from the last
-// one actually written, including injected H.264 parameter-set prefixes.
-func (p *Peer) nextVideoRTP(pkt *rtp.Packet) *rtp.Packet {
+// forwardVideoRTP writes one video packet to every viewer whose stream gate is
+// open, and opens the gate of a waiting viewer when pkt starts a keyframe.
+func (s *Sidecar) forwardVideoRTP(pkt *rtp.Packet) {
+	codec := s.currentCodec()
+	if codec == codecH264 {
+		s.h264Params.observe(pkt.Payload)
+	}
+	if codec == codecVP9 && s.vp9Rewrite.Load() {
+		pkt.Payload = s.vp9Desc.rewrite(pkt.Payload, pkt.Marker)
+	}
+
+	s.peersLock.RLock()
+	defer s.peersLock.RUnlock()
+	for _, peer := range s.peers {
+		track, opening := peer.videoGate(codec, pkt)
+		if track == nil {
+			continue
+		}
+		for _, p := range s.videoBatch(peer, codec, pkt, opening) {
+			peer.mu.Lock()
+			out := peer.nextVideoRTP(p, opening)
+			peer.mu.Unlock()
+			if out != nil {
+				_ = track.WriteRTP(out)
+			}
+		}
+	}
+}
+
+// videoGate returns the track pkt goes out on, or nil when the peer is not
+// sent it: its gate is closed, or it has no video track. A waiting peer's gate
+// opens when pkt starts a keyframe and media can be sent; opening reports
+// that pkt is the one that opened it.
+func (p *Peer) videoGate(codec string, pkt *rtp.Packet) (track *webrtc.TrackLocalStaticRTP, opening bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// A peer negotiated for another codec cannot decode this stream.
+	if !p.Active || p.Codec != codec {
+		return nil, false
+	}
+	if !p.Started {
+		if !isKeyframeStart(codec, pkt.Payload) || !p.canSendMedia() {
+			return nil, false
+		}
+		p.Started = true
+		opening = true
+		log.Printf("[Peer %s] First %s keyframe seen at ts=%d - opening stream gate", quoteLog(p.ID), codec, pkt.Timestamp)
+	}
+	return p.VideoTrack, opening
+}
+
+// videoBatch returns the packets to write to peer for pkt: pkt itself, with
+// the H.264 parameter sets in front of it when it opens the peer's gate.
+func (s *Sidecar) videoBatch(peer *Peer, codec string, pkt *rtp.Packet, opening bool) []*rtp.Packet {
+	if !opening || codec != codecH264 {
+		return []*rtp.Packet{pkt}
+	}
+	prefix := s.h264Params.prefixBefore(pkt)
+	debugf("[Peer %s] h264 gate open: %s", peer.ID, h264GateOpenInfo(pkt.Payload, len(prefix)))
+	return append(prefix, pkt)
+}
+
+// canSendMedia reports whether packets written to the peer's tracks are sent.
+// ICE connects first and the DTLS handshake follows; until that is done Pion
+// has no SRTP session and drops what is written without an error. A gate
+// opened in between would spend the viewer's keyframe, and any SPS/PPS put in
+// front of it, on nothing.
+func (p *Peer) canSendMedia() bool {
+	return p.PC != nil && p.PC.ConnectionState() == webrtc.PeerConnectionStateConnected
+}
+
+// deactivate closes the peer's media gates. The caller may hold peersLock,
+// which is always taken before p.mu, but not p.mu. Nothing holds p.mu across
+// PC.Close: Pion reports the closed ICE state to a callback that takes p.mu.
+func (p *Peer) deactivate() {
+	p.mu.Lock()
+	p.Active = false
+	p.mu.Unlock()
+}
+
+func (p *Peer) isActive() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.Active
+}
+
+// nextVideoRTP clones pkt with this peer's sequence number. Caller holds p.mu.
+// The first packet keeps its sequence. follow numbers a packet straight after
+// the last one written: it is set for the packets that open the gate (injected
+// H.264 parameter sets and the keyframe), so that neither the injected packets
+// nor what the peer missed while its gate was closed show as a loss or a
+// replay. Every other packet keeps its distance from the one before it, so a
+// packet lost on the way to the sidecar stays a gap the viewer can see.
+func (p *Peer) nextVideoRTP(pkt *rtp.Packet, follow bool) *rtp.Packet {
 	out := cloneRTPPacket(pkt)
 	if out == nil {
 		return nil
 	}
-	if !p.videoOutSeqOK {
-		p.videoOutSeq = out.SequenceNumber
+	switch {
+	case !p.videoOutSeqOK:
+		p.videoOutSeq = pkt.SequenceNumber
 		p.videoOutSeqOK = true
-	} else {
+	case follow:
 		p.videoOutSeq++
-		out.SequenceNumber = p.videoOutSeq
+	default:
+		p.videoOutSeq += pkt.SequenceNumber - p.videoInSeq
 	}
+	p.videoInSeq = pkt.SequenceNumber
+	out.SequenceNumber = p.videoOutSeq
 	return out
 }
 
@@ -980,7 +1061,7 @@ func (s *Sidecar) CreatePeerFor(id string, codec string, browser bool) (sdp stri
 	s.creating[id] = inflight
 	s.peersLock.Unlock()
 
-	log.Printf("[API] Creating NEW peer: %s", id)
+	log.Printf("[API] Creating NEW peer: %s", quoteLog(id))
 
 	defer func() {
 		s.peersLock.Lock()
@@ -1097,32 +1178,42 @@ func (s *Sidecar) CreatePeerFor(id string, codec string, browser bool) (sdp stri
 	}
 
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		log.Printf("[Peer %s] ICE: %s", id, state.String())
+		log.Printf("[Peer %s] ICE: %s", quoteLog(id), state.String())
 		switch state {
 		case webrtc.ICEConnectionStateChecking:
 			peer.mu.Lock()
 			peer.checking = true
 			peer.mu.Unlock()
 		case webrtc.ICEConnectionStateConnected:
-			peer.mu.Lock()
-			peer.Active = true
-			peer.Started = false
-			peer.connected = true
-			peer.mu.Unlock()
-			// Resolve SSRCs NOW — they are only valid after negotiation
+			// Resolve SSRCs NOW — they are only valid after negotiation.
+			// Pion is asked outside peer.mu; the result is stored with Active,
+			// so the sender reports never see an active peer without them.
+			var videoSSRC, audioSSRC uint32
+			var videoFound, audioFound bool
 			for _, sender := range pc.GetSenders() {
 				params := sender.GetParameters()
 				if len(params.Encodings) > 0 {
 					ssrc := uint32(params.Encodings[0].SSRC)
 					if sender.Track() == videoTrack {
-						peer.VideoSSRC = ssrc
-						log.Printf("[Peer %s] Video SSRC resolved: %d", id, ssrc)
+						videoSSRC, videoFound = ssrc, true
+						log.Printf("[Peer %s] Video SSRC resolved: %d", quoteLog(id), ssrc)
 					} else if sender.Track() == audioTrack {
-						peer.AudioSSRC = ssrc
-						log.Printf("[Peer %s] Audio SSRC resolved: %d", id, ssrc)
+						audioSSRC, audioFound = ssrc, true
+						log.Printf("[Peer %s] Audio SSRC resolved: %d", quoteLog(id), ssrc)
 					}
 				}
 			}
+			peer.mu.Lock()
+			if videoFound {
+				peer.VideoSSRC = videoSSRC
+			}
+			if audioFound {
+				peer.AudioSSRC = audioSSRC
+			}
+			peer.Active = true
+			peer.Started = false
+			peer.connected = true
+			peer.mu.Unlock()
 		case webrtc.ICEConnectionStateDisconnected, webrtc.ICEConnectionStateFailed, webrtc.ICEConnectionStateClosed:
 			peer.mu.Lock()
 			peer.Active = false
@@ -1137,9 +1228,9 @@ func (s *Sidecar) CreatePeerFor(id string, codec string, browser bool) (sdp stri
 			// "Connecting..." and asks to reconnect, which closes this peer.
 			// The browser preview reports its own ICE timeout.
 			if neverConnected && !browser {
-				log.Printf("[Peer %s] TeamSpeak viewer never connected: none of the offered addresses worked for it (%s)", id, offeredAddresses(offerSDP))
+				log.Printf("[Peer %s] TeamSpeak viewer never connected: none of the offered addresses worked for it (%s)", quoteLog(id), offeredAddresses(offerSDP))
 				if advertisesOnlyLoopback(s.iceAdvertiseIPs) {
-					log.Printf("[Peer %s] %s", id, teamSpeakReachHint)
+					log.Printf("[Peer %s] %s", quoteLog(id), teamSpeakReachHint)
 				}
 			}
 		}
@@ -1161,7 +1252,7 @@ func (s *Sidecar) CreatePeerFor(id string, codec string, browser bool) (sdp stri
 
 	s.peersLock.Lock()
 	if old, exists := s.peers[id]; exists {
-		old.Active = false
+		old.deactivate()
 		close(old.stopSR)
 		old.PC.Close()
 	}
@@ -1187,7 +1278,10 @@ func (s *Sidecar) sendSenderReports(peer *Peer) {
 		case <-peer.stopSR:
 			return
 		case <-ticker.C:
-			if !peer.Active {
+			peer.mu.Lock()
+			active, videoSSRC, audioSSRC := peer.Active, peer.VideoSSRC, peer.AudioSSRC
+			peer.mu.Unlock()
+			if !active {
 				continue
 			}
 
@@ -1208,10 +1302,10 @@ func (s *Sidecar) sendSenderReports(peer *Peer) {
 			srCount++
 
 			// Send video SR + SDES
-			if peer.VideoSSRC != 0 && videoOK {
+			if videoSSRC != 0 && videoOK {
 				err := peer.PC.WriteRTCP([]rtcp.Packet{
 					&rtcp.SenderReport{
-						SSRC:        peer.VideoSSRC,
+						SSRC:        videoSSRC,
 						NTPTime:     ntpNow,
 						RTPTime:     videoTs,
 						PacketCount: vidPkts,
@@ -1219,7 +1313,7 @@ func (s *Sidecar) sendSenderReports(peer *Peer) {
 					},
 					&rtcp.SourceDescription{
 						Chunks: []rtcp.SourceDescriptionChunk{{
-							Source: peer.VideoSSRC,
+							Source: videoSSRC,
 							Items: []rtcp.SourceDescriptionItem{{
 								Type: rtcp.SDESCNAME,
 								Text: cname,
@@ -1228,17 +1322,17 @@ func (s *Sidecar) sendSenderReports(peer *Peer) {
 					},
 				})
 				if srCount <= 5 || srCount%30 == 0 {
-					log.Printf("[SR] Peer %s video SR #%d ssrc=%d rtpTs=%d err=%v", peer.ID, srCount, peer.VideoSSRC, videoTs, err)
+					log.Printf("[SR] Peer %s video SR #%d ssrc=%d rtpTs=%d err=%v", quoteLog(peer.ID), srCount, videoSSRC, videoTs, err)
 				}
-			} else if peer.VideoSSRC == 0 && srCount <= 5 {
-				log.Printf("[SR] Peer %s video SSRC still 0 — skipping SR", peer.ID)
+			} else if videoSSRC == 0 && srCount <= 5 {
+				log.Printf("[SR] Peer %s video SSRC still 0 — skipping SR", quoteLog(peer.ID))
 			}
 
 			// Send audio SR + SDES with SAME NTP time and SAME CNAME
-			if peer.AudioSSRC != 0 && audioOK {
+			if audioSSRC != 0 && audioOK {
 				err := peer.PC.WriteRTCP([]rtcp.Packet{
 					&rtcp.SenderReport{
-						SSRC:        peer.AudioSSRC,
+						SSRC:        audioSSRC,
 						NTPTime:     ntpNow,
 						RTPTime:     audioTs,
 						PacketCount: audPkts,
@@ -1246,7 +1340,7 @@ func (s *Sidecar) sendSenderReports(peer *Peer) {
 					},
 					&rtcp.SourceDescription{
 						Chunks: []rtcp.SourceDescriptionChunk{{
-							Source: peer.AudioSSRC,
+							Source: audioSSRC,
 							Items: []rtcp.SourceDescriptionItem{{
 								Type: rtcp.SDESCNAME,
 								Text: cname,
@@ -1255,10 +1349,10 @@ func (s *Sidecar) sendSenderReports(peer *Peer) {
 					},
 				})
 				if srCount <= 5 || srCount%30 == 0 {
-					log.Printf("[SR] Peer %s audio SR #%d ssrc=%d rtpTs=%d err=%v", peer.ID, srCount, peer.AudioSSRC, audioTs, err)
+					log.Printf("[SR] Peer %s audio SR #%d ssrc=%d rtpTs=%d err=%v", quoteLog(peer.ID), srCount, audioSSRC, audioTs, err)
 				}
-			} else if peer.AudioSSRC == 0 && srCount <= 5 {
-				log.Printf("[SR] Peer %s audio SSRC still 0 — skipping SR", peer.ID)
+			} else if audioSSRC == 0 && srCount <= 5 {
+				log.Printf("[SR] Peer %s audio SSRC still 0 — skipping SR", quoteLog(peer.ID))
 			}
 		}
 	}
@@ -1278,13 +1372,13 @@ func (s *Sidecar) SetAnswer(id, sdp string) error {
 	if peer.PC.RemoteDescription() != nil {
 		if peer.PC.RemoteDescription().Type == webrtc.SDPTypeAnswer &&
 			peer.PC.SignalingState() == webrtc.SignalingStateStable {
-			log.Printf("[API] Ignoring duplicate answer for peer: %s", id)
+			log.Printf("[API] Ignoring duplicate answer for peer: %s", quoteLog(id))
 			return nil
 		}
 	}
 
 	if peer.PC.SignalingState() != webrtc.SignalingStateHaveLocalOffer {
-		log.Printf("[API] Ignoring answer in signaling state %s for peer: %s", peer.PC.SignalingState(), id)
+		log.Printf("[API] Ignoring answer in signaling state %s for peer: %s", quoteLog(peer.PC.SignalingState().String()), quoteLog(id))
 		return nil
 	}
 
@@ -1299,7 +1393,7 @@ func (s *Sidecar) SetAnswer(id, sdp string) error {
 	peer.pendingICE = nil
 	for _, c := range pending {
 		if err := peer.PC.AddICECandidate(c); err != nil {
-			log.Printf("[API] Dropping early ICE candidate for peer %s: %v", id, err)
+			log.Printf("[API] Dropping early ICE candidate for peer %s: %s", quoteLog(id), quoteErr(err))
 		}
 	}
 	if len(pending) > 0 {
@@ -1343,7 +1437,7 @@ func (s *Sidecar) AddICECandidate(id string, candidate string, sdpMid string, sd
 func (s *Sidecar) ClosePeer(id string) {
 	s.peersLock.Lock()
 	if peer, exists := s.peers[id]; exists {
-		peer.Active = false
+		peer.deactivate()
 		close(peer.stopSR)
 		peer.PC.Close()
 		delete(s.peers, id)
@@ -1400,9 +1494,6 @@ type SourceRequest struct {
 	Threads int
 	// CPUPriority is normal, low or lowest (a nice value on ffmpeg); "" = VIDEO_CPU_PRIORITY, else normal.
 	CPUPriority string
-	// StartSeconds starts a VOD or file source at this offset (a seek). Zero
-	// starts at the beginning; a live source has no timeline and ignores it.
-	StartSeconds float64
 	// Passthrough sends the source's own video to viewers without re-encoding
 	// it (-c:v copy). The encoder names the codec the source really is: h264
 	// (the caller has checked 4:2:0 and no B-frames) or vp9 (profile 0, 4:2:0).
@@ -1411,6 +1502,35 @@ type SourceRequest struct {
 	// PacingFactor spreads the packets of a direct stream over time at this multiple of the
 	// video's own bitrate (see pacer.go). 0 sends them as ffmpeg writes them.
 	PacingFactor float64
+	// SilentAudio adds a silent input in place of the source's audio. Set by
+	// the sidecar itself when the source turns out to have none
+	// (restartWithSilenceIfNoAudio), never by a request.
+	SilentAudio bool
+	// VideoCodec is the codec family of the source's video when the backend
+	// knows it (av1, vp9, h264; "" = unknown). See av1GPUDecoder.
+	VideoCodec string
+	// av1Hwaccel forces FFmpeg's own AV1 decoder on the video input, decoding
+	// on this hwaccel. Set per launch from encoderAttempt, never by a request.
+	av1Hwaccel         string
+	av1SoftwareDecoder string
+	// av1FallbackReason starts an AV1 source on a software decoder because the GPU
+	// failed to decode it (restartOnLibdav1dIfAV1Fails). Never set by a request.
+	av1FallbackReason string
+	// StartAtSecs starts an on-demand source at this offset: a seek or resume
+	// asked by the backend, or a restart for a quality change that must not
+	// replay it from the beginning. Ignored for live.
+	StartAtSecs float64
+}
+
+// maxStartAtSecs bounds a requested start offset (a week of video).
+const maxStartAtSecs = 7 * 24 * 3600
+
+// clampStartAt keeps a requested start offset finite and non-negative.
+func clampStartAt(secs float64) float64 {
+	if math.IsNaN(secs) || secs <= 0 {
+		return 0
+	}
+	return math.Min(secs, maxStartAtSecs)
 }
 
 // EncoderSession reports which encoder is actually running, so a hardware
@@ -1424,7 +1544,14 @@ type EncoderSession struct {
 	State          string     `json:"state"`
 	ExitError      string     `json:"exitError,omitempty"`
 	StartedAt      *time.Time `json:"startedAt,omitempty"`
-	gen            uint64
+	// Decoder names the video decoder for an AV1 source: "av1 (vaapi)" or
+	// "av1 (cuda)" on the GPU; "libdav1d" or "libaom-av1" on the CPU, or
+	// "software" when FFmpeg chooses. Empty for other sources.
+	Decoder string `json:"decoder,omitempty"`
+	// DecoderFallbackReason is why an AV1 source that started on the GPU
+	// decoder was started again on a software AV1 decoder.
+	DecoderFallbackReason string `json:"decoderFallbackReason,omitempty"`
+	gen                   uint64
 }
 
 // streamHealth reports encode speed and drops for the current run (nil when idle).
@@ -1448,19 +1575,49 @@ func (s *Sidecar) encoderSession() EncoderSession {
 
 // tailBuffer keeps the last few KB of ffmpeg stderr for exit/fallback reasons.
 type tailBuffer struct {
-	mu  sync.Mutex
-	buf []byte
+	diagnosticPending  []byte
+	diagnosticOverflow bool
+	decodeFailures     map[int]string
+	decodeFailureCount map[int]int
+	mu                 sync.Mutex
+	buf                []byte
+	// processError is published before the process completion channel closes.
+	processError    error
+	processExitedAt time.Time
+	decodeDeadline  time.Time
+	retryPending    atomic.Bool
 }
 
 func (t *tailBuffer) Write(p []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.recordDecodeDiagnostics(p)
 	t.buf = append(t.buf, p...)
 	if len(t.buf) > 4096 {
 		t.buf = t.buf[len(t.buf)-4096:]
 	}
 	return len(p), nil
 }
+
+// contains reports whether the end of ffmpeg's stderr contains text.
+func (t *tailBuffer) contains(text string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.Contains(string(t.buf), text)
+}
+
+// noAudioTrack reports whether ffmpeg stopped because the audio output had
+// nothing to take: the source has no audio track. The audio output may only
+// take audio (-vn), so ffmpeg 5.1 then exits with this error. The audio
+// output is always #1: the video output comes first.
+func noAudioTrack(t *tailBuffer) bool {
+	return t.contains("Output file #1 does not contain any stream")
+}
+
+// silentAudioInput stands in for the audio of a source that has none, so the
+// audio RTP output always has something to send. Read at the source's pace
+// (-re), or it would be generated as fast as ffmpeg can.
+var silentAudioInput = []string{"-re", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"}
 
 // summary summarizes the end of ffmpeg's stderr for a status reason: the
 // last two lines (the final one is often a generic wrapper), URLs redacted.
@@ -1514,15 +1671,6 @@ func videoPacketSize(req SourceRequest, spec EncoderSpec) int {
 	return rtpPacketSize
 }
 
-// clampStartSeconds keeps a requested seek offset usable: negative, NaN and
-// infinite values mean "from the start".
-func clampStartSeconds(v float64) float64 {
-	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
-		return 0
-	}
-	return v
-}
-
 // buildFFmpegArgs assembles the full ffmpeg command line for req and spec.
 func (s *Sidecar) buildFFmpegArgs(req SourceRequest, spec EncoderSpec, lowPower bool) []string {
 	w := req.Width
@@ -1542,7 +1690,13 @@ func (s *Sidecar) buildFFmpegArgs(req SourceRequest, spec EncoderSpec, lowPower 
 	// Periodic progress lines feed the encode-health tracker. -stats keeps
 	// them at warning level, which drops per-segment info chatter such as
 	// HLS "Skip ('#EXT-X-PROGRAM-DATE-TIME...')" lines from IPTV sources.
-	args := []string{"-stats_period", "2", "-stats", "-loglevel", "warning"}
+	loglevel := "warning"
+	if req.av1Hwaccel != "" && spec.Hardware && hwDecodeEnabled() {
+		// FFmpeg prints a message that repeats only once. Sustained AV1
+		// decode errors are counted, so each one must be printed.
+		loglevel = "repeat+warning"
+	}
+	args := []string{"-stats_period", "2", "-stats", "-loglevel", loglevel}
 	extraOut := extraFFmpegOutputArgs()
 	args = append(args, hwInitArgs(spec, req.Source != "")...)
 
@@ -1575,12 +1729,6 @@ func (s *Sidecar) buildFFmpegArgs(req SourceRequest, spec EncoderSpec, lowPower 
 				args = append(args, "-stream_loop", "-1")
 			}
 
-			// A seek starts each input at the same offset, the video and, for a
-			// split source, the audio too. Live sources cannot be seeked.
-			if req.StartSeconds > 0 && mode != modeLive {
-				args = append(args, "-ss", strconv.FormatFloat(req.StartSeconds, 'f', 3, 64))
-			}
-
 			// Live IPTV often has non-monotonic DTS. Without igndts, ffmpeg drops
 			// those audio frames and the stream cuts in and out.
 			fflags := "+genpts+discardcorrupt"
@@ -1591,7 +1739,24 @@ func (s *Sidecar) buildFFmpegArgs(req SourceRequest, spec EncoderSpec, lowPower 
 			if mode != modeLive || !livePacedBySource() {
 				args = append(args, "-re")
 			}
+			// Both inputs of a split source seek together (a seek, a resume or a
+			// quality restart). A looped file plays from the offset once, then
+			// loops from its start.
+			if mode != modeLive && req.StartAtSecs > 0 {
+				args = append(args, "-ss", strconv.FormatFloat(req.StartAtSecs, 'f', 3, 64))
+			}
+			// Like the hardware decoder, FFmpeg's own AV1 decoder is for the
+			// video input only.
+			if input == source && req.av1Hwaccel != "" && spec.Hardware && hwDecodeEnabled() {
+				args = append(args, "-c:v", "av1")
+			} else if input == source && req.av1SoftwareDecoder != "" {
+				args = append(args, "-c:v", req.av1SoftwareDecoder)
+			}
 			args = append(args, "-i", input)
+		}
+		if req.SilentAudio {
+			args = append(args, silentAudioInput...)
+			audioMap = fmt.Sprintf("%d:a:0", len(inputs))
 		}
 	} else {
 		args = append(args, "-re", "-f", "lavfi", "-i", fmt.Sprintf("color=c=black:s=%dx%d:r=1", w, h))
@@ -1621,6 +1786,10 @@ func (s *Sidecar) buildFFmpegArgs(req SourceRequest, spec EncoderSpec, lowPower 
 				"fps=%d,scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,%s",
 				fps, w, h, w, h, uploadFilter(spec),
 			)
+			if framesStayOnGPU(spec, true) {
+				vf = gpuVideoFilter(fps, w, h)
+				log.Printf("[FFmpeg] Frames stay on the GPU: vaapi decode, scale_vaapi, %s", spec.FFmpeg)
+			}
 			args = append(args,
 				"-map", "0:v:0",
 				"-vf", vf,
@@ -1649,6 +1818,12 @@ func (s *Sidecar) buildFFmpegArgs(req SourceRequest, spec EncoderSpec, lowPower 
 
 		args = append(args,
 			"-map", audioMap,
+			// Audio only. Without this, a source with no audio track left
+			// the optional map above matching nothing, and ffmpeg picked a
+			// stream for this output itself: the video, encoded a second time
+			// (as MPEG-4) into the audio RTP port. Now ffmpeg stops at once
+			// instead, and the stream starts again with silence.
+			"-vn", "-sn", "-dn",
 		)
 
 		audioFilters := []string{}
@@ -1687,14 +1862,17 @@ func (s *Sidecar) buildFFmpegArgs(req SourceRequest, spec EncoderSpec, lowPower 
 }
 
 // launchFFmpegLocked starts ffmpeg and returns a channel closed on exit.
-func (s *Sidecar) launchFFmpegLocked(args []string, priority string, gen uint64, health *healthTracker) (<-chan struct{}, *tailBuffer, error) {
-	tail := &tailBuffer{}
+func (s *Sidecar) launchFFmpegLocked(args []string, priority string, gen uint64, health *healthTracker, av1Stream int) (<-chan struct{}, *tailBuffer, error) {
+	tail := &tailBuffer{decodeDeadline: time.Now().Add(av1DecodeWatchWindow)}
 	cmd := exec.Command(getFfmpegPath(), args...)
 	if s.egress != nil {
 		cmd.Env = egressCommandEnv()
 	}
 	cmd.Stdout = nil
 	cmd.Stderr = io.MultiWriter(os.Stderr, tail, health)
+	// Stopping waits for this process to be reaped. A child that inherited
+	// stderr must not hold that wait, and ffmpegLock with it, open.
+	cmd.WaitDelay = 2 * time.Second
 	if err := cmd.Start(); err != nil {
 		return nil, nil, err
 	}
@@ -1702,13 +1880,22 @@ func (s *Sidecar) launchFFmpegLocked(args []string, priority string, gen uint64,
 	s.ffmpeg = cmd
 
 	done := make(chan struct{})
+	s.ffmpegDone = done
 	go func() {
 		err := cmd.Wait()
+		tail.processError = err
+		tail.processExitedAt = time.Now()
 		log.Printf("[FFmpeg] Exited: %v", err)
 		s.statusMu.Lock()
 		if s.encoder.gen == gen && atomic.LoadUint64(&s.ffmpegGen) == gen {
-			s.encoder.State = "exited"
-			if err != nil {
+			// Keep the session active while the fallback watcher owns a
+			// qualifying terminal failure. The backend must not act on an
+			// intermediate exited state before the retry is committed.
+			pendingRetry := err != nil && (tail.retryPending.Load() || (av1Stream >= 0 && tail.processExitedAt.Before(tail.decodeDeadline) && av1DecodeFailed(tail, av1Stream)))
+			if !pendingRetry {
+				s.encoder.State = "exited"
+			}
+			if err != nil && !pendingRetry {
 				reason := tail.summary()
 				if reason == "" {
 					reason = err.Error()
@@ -1728,7 +1915,10 @@ func (s *Sidecar) launchFFmpegLocked(args []string, priority string, gen uint64,
 func (s *Sidecar) StartFFmpeg(req SourceRequest) (EncoderSession, error) {
 	s.ffmpegLock.Lock()
 	defer s.ffmpegLock.Unlock()
+	return s.startFFmpegLocked(req)
+}
 
+func (s *Sidecar) startFFmpegLocked(req SourceRequest) (EncoderSession, error) {
 	var err error
 	req.Source, err = resolveSource(req.Source)
 	if err != nil {
@@ -1766,102 +1956,283 @@ func (s *Sidecar) StartFFmpeg(req SourceRequest) (EncoderSession, error) {
 	s.vp9Desc.reset()
 	s.vp9Rewrite.Store(req.Passthrough && requested.Codec == codecVP9)
 
-	// One proxy per source, kept across the hardware-fallback relaunches below.
-	if isRemoteSource(req.Source) && egressEnabled() {
-		proxy, err := startEgressProxy(&egressPolicy{allow: parseHostAllowlist(req.AllowedHosts)})
-		if err != nil {
-			return EncoderSession{}, fmt.Errorf("start egress proxy: %w", err)
-		}
-		s.egress = proxy
+	if err := s.startEgressLocked(req); err != nil {
+		return EncoderSession{}, err
 	}
 
 	s.source = req.Source
 	s.streamCodec.Store(requested.Codec)
 
-	spec := requested
-	fallbackReason := ""
-	lowPower := os.Getenv("VAAPI_LOW_POWER") == "1"
+	attempt := s.firstEncoderAttempt(requested)
+	if req.av1FallbackReason != "" {
+		attempt.av1Source = true
+		attempt.decoderFallbackReason = req.av1FallbackReason
+	} else {
+		attempt.av1Hwaccel, attempt.av1Source, attempt.av1Stream = s.av1GPUDecoder(req, attempt.spec)
+	}
+	if attempt.av1Hwaccel != "" {
+		log.Printf("[FFmpeg] AV1 source: decoding on the GPU (%s)", attempt.av1Hwaccel)
+	}
+	for {
+		gen, done, tail, err := s.launchAttemptLocked(req, requested, attempt)
+		if err != nil {
+			return s.encoderSession(), err
+		}
+
+		req.av1FallbackReason = attempt.decoderFallbackReason
+		if mayLackAudio(req) {
+			go s.restartWithSilenceIfNoAudio(req, gen, done, tail)
+		}
+		if attempt.av1Hwaccel != "" {
+			go s.restartOnLibdav1dIfAV1Fails(req, attempt.av1Hwaccel, attempt.av1Stream, gen, done, tail)
+		}
+
+		if !attempt.spec.Hardware {
+			return s.encoderSession(), nil
+		}
+		if survivedStartup(done) {
+			if attempt.av1Hwaccel == "" || !av1DecodeFailing(tail, attempt.av1Stream) {
+				return s.encoderSession(), nil
+			}
+			// FFmpeg's own AV1 decoder can keep running while the GPU
+			// fails every frame: stop it, and go on as if it had exited.
+			// A few failed frames in a stream that plays on are not that.
+			tail.retryPending.Store(true)
+			if s.ffmpeg != nil && s.ffmpeg.Process != nil {
+				s.ffmpeg.Process.Kill()
+			}
+			<-done
+		}
+
+		s.ffmpeg = nil
+		s.ffmpegDone = nil
+		// A successful exit is normal EOF, including short files. Never replay it.
+		if tail.processError == nil {
+			return s.encoderSession(), nil
+		}
+		if mayLackAudio(req) && noAudioTrack(tail) {
+			// Not the hardware encoder's fault: start it again with
+			// silence for the missing audio track.
+			log.Printf("[FFmpeg] The source has no audio track; starting again with silence")
+			req.SilentAudio = true
+			continue
+		}
+		// Any failed startup drops a forced AV1 decoder first: a GPU that
+		// cannot decode the source need not log a decode error before ffmpeg
+		// exits. The video's own decode error is the better reason when the
+		// rolling tail has moved past it.
+		reason := tail.summary()
+		if attempt.av1Hwaccel != "" {
+			if evidence := av1DecodeFailureReason(tail, attempt.av1Stream); evidence != "" {
+				reason = evidence
+			}
+		}
+		attempt = attempt.afterHardwareFailure(reason)
+	}
+}
+
+// startEgressLocked starts the egress proxy a remote source is read through.
+// One proxy per source, kept across the hardware-fallback relaunches.
+func (s *Sidecar) startEgressLocked(req SourceRequest) error {
+	if !isRemoteSource(req.Source) || !egressEnabled() {
+		return nil
+	}
+	proxy, err := startEgressProxy(&egressPolicy{allow: parseHostAllowlist(req.AllowedHosts)})
+	if err != nil {
+		return fmt.Errorf("start egress proxy: %w", err)
+	}
+	s.egress = proxy
+	return nil
+}
+
+// encoderAttempt is what one launch of ffmpeg in startFFmpegLocked encodes
+// with. A hardware encoder that exits during startup changes it for the next
+// launch (afterHardwareFailure).
+type encoderAttempt struct {
+	spec     EncoderSpec
+	lowPower bool
+	// fallbackReason is why spec is not the requested encoder ("" when it is).
+	fallbackReason string
+	// triedLowPowerToggle is set once no flip of lowPower is left to try
+	// before the software fallback.
+	triedLowPowerToggle bool
+	// av1Hwaccel is the GPU FFmpeg's own AV1 decoder runs on ("" = FFmpeg's
+	// default decoder); av1Source is set for an AV1 source either way.
+	av1Hwaccel         string
+	av1SoftwareDecoder string
+	av1Source          bool
+	// av1Stream is the AV1 video's stream index in the first input.
+	av1Stream int
+	// decoderFallbackReason is why the AV1 source no longer decodes on the GPU.
+	decoderFallbackReason string
+}
+
+// firstEncoderAttempt picks the encoder for the first launch: the requested
+// one, or its software encoder when the hardware is already known to be
+// unavailable.
+func (s *Sidecar) firstEncoderAttempt(requested EncoderSpec) encoderAttempt {
 	// When the capability cache already probed this encoder, lowPower is known.
 	// Otherwise allow one flip of lowPower before software fallback (matches probeOneEncoder).
-	probe, capsKnown := s.caps.peek().find(spec.ID)
-	// Only VAAPI has a low-power mode to flip.
-	triedLowPowerToggle := spec.Backend != backendVAAPI || capsKnown
-	if spec.Hardware {
-		if capsKnown {
-			if !probe.Available {
-				fallbackReason = probe.Error
-				if fallbackReason == "" {
-					fallbackReason = "hardware encoder unavailable"
-				}
-				spec = softwareEncoderFor(spec.Codec)
-			} else {
-				lowPower = probe.LowPower
-			}
-		} else if spec.Backend == backendVAAPI && !vaapiDevicePresent() {
-			fallbackReason = "VAAPI device not present"
-			spec = softwareEncoderFor(spec.Codec)
+	probe, capsKnown := s.caps.peek().find(requested.ID)
+	a := encoderAttempt{
+		spec:     requested,
+		lowPower: os.Getenv("VAAPI_LOW_POWER") == "1",
+		// Only VAAPI has a low-power mode to flip.
+		triedLowPowerToggle: requested.Backend != backendVAAPI || capsKnown,
+	}
+	if !requested.Hardware {
+		return a
+	}
+	switch reason := backendUnsupportedReason(requested.Backend); {
+	case reason != "":
+		// Not on this operating system: there is nothing to launch and wait
+		// for, whether or not the capability check has run yet.
+		a.fallbackReason = reason
+		a.spec = softwareEncoderFor(requested.Codec)
+	case capsKnown && probe.Available:
+		a.lowPower = probe.LowPower
+	case capsKnown:
+		a.fallbackReason = probe.Error
+		if a.fallbackReason == "" {
+			a.fallbackReason = "hardware encoder unavailable"
+		}
+		a.spec = softwareEncoderFor(requested.Codec)
+	case requested.Backend == backendVAAPI && !vaapiDevicePresent():
+		a.fallbackReason = "VAAPI device not present"
+		a.spec = softwareEncoderFor(requested.Codec)
+	default:
+		// Not probed yet: still no point launching an encoder this FFmpeg
+		// build does not contain.
+		if reason := s.caps.missingReason(requested); reason != "" {
+			a.fallbackReason = reason
+			a.spec = softwareEncoderFor(requested.Codec)
 		}
 	}
+	return a
+}
 
-	for {
-		gen := atomic.AddUint64(&s.ffmpegGen, 1)
-		now := time.Now().UTC()
+// afterHardwareFailure returns the attempt that follows a hardware encoder
+// exiting during startup with reason. With FFmpeg's own AV1 decoder forced,
+// the same encoder again on a software AV1 decoder first: the test decode passed, but the
+// GPU may still not decode this source (another profile, a driver fault).
+// Then the other low-power mode once, then the software encoder of the same
+// codec.
+func (a encoderAttempt) afterHardwareFailure(reason string) encoderAttempt {
+	if reason == "" {
+		reason = "hardware encoder exited during startup"
+	}
+	if a.av1Hwaccel != "" {
+		log.Printf("[FFmpeg] AV1 did not decode on the GPU (%s): %s; starting again with a software AV1 decoder", a.av1Hwaccel, reason)
+		a.av1Hwaccel = ""
+		a.decoderFallbackReason = reason
+		return a
+	}
+	if !a.triedLowPowerToggle {
+		a.triedLowPowerToggle = true
+		a.lowPower = !a.lowPower
+		log.Printf("[FFmpeg] %s failed (%s); retrying with low_power=%v", a.spec.ID, reason, a.lowPower)
+		return a
+	}
+	log.Printf("[FFmpeg] %s failed (%s); falling back to software", a.spec.ID, reason)
+	a.fallbackReason = reason
+	a.spec = softwareEncoderFor(a.spec.Codec)
+	return a
+}
+
+// launchAttemptLocked starts a new ffmpeg generation for one attempt and
+// publishes it as the running encoder session. It returns the generation, a
+// channel closed when that ffmpeg exits, and the end of its stderr.
+func (s *Sidecar) launchAttemptLocked(req SourceRequest, requested EncoderSpec, a encoderAttempt) (uint64, <-chan struct{}, *tailBuffer, error) {
+	if a.av1Source && a.av1Hwaccel == "" {
+		// Name the software decoder when this build lists one. Otherwise
+		// FFmpeg chooses, as it did before the decoder was named.
+		a.av1SoftwareDecoder = s.caps.av1Software.get(s.caps.runner(), getFfmpegPath())
+	}
+	gen := atomic.AddUint64(&s.ffmpegGen, 1)
+	now := time.Now().UTC()
+	s.statusMu.Lock()
+	s.encoder = EncoderSession{
+		Requested:             requested.ID,
+		Active:                a.spec.ID,
+		Codec:                 a.spec.Codec,
+		Hardware:              a.spec.Hardware,
+		FallbackReason:        a.fallbackReason,
+		Decoder:               decoderLabel(a),
+		DecoderFallbackReason: a.decoderFallbackReason,
+		State:                 "running",
+		StartedAt:             &now,
+		gen:                   gen,
+	}
+	s.statusMu.Unlock()
+
+	req.av1Hwaccel = a.av1Hwaccel
+	req.av1SoftwareDecoder = a.av1SoftwareDecoder
+	args := s.buildFFmpegArgs(req, a.spec, a.lowPower)
+	mode := resolveSourceMode(req.Mode, req.Source)
+	startAt := 0.0
+	if mode != modeLive && req.StartAtSecs > 0 {
+		startAt = req.StartAtSecs
+	}
+	health := newHealthTracker(mode, startAt, nil)
+	atomic.StoreUint64(&s.rtpVideoDrops, 0)
+	atomic.StoreUint64(&s.rtpAudioDrops, 0)
+	s.statusMu.Lock()
+	s.health = health
+	s.statusMu.Unlock()
+	log.Printf("[FFmpeg] Starting: encoder=%s mode=%s video=:%d audio=:%d", a.spec.ID, mode, s.videoPort, s.audioPort)
+	av1Stream := -1
+	if a.av1Hwaccel != "" {
+		av1Stream = a.av1Stream
+	}
+	done, tail, err := s.launchFFmpegLocked(args, resolveCPUPriority(req.CPUPriority), gen, health, av1Stream)
+	if err != nil {
+		log.Printf("[FFmpeg] Start error: %v", err)
 		s.statusMu.Lock()
-		s.encoder = EncoderSession{
-			Requested:      requested.ID,
-			Active:         spec.ID,
-			Codec:          spec.Codec,
-			Hardware:       spec.Hardware,
-			FallbackReason: fallbackReason,
-			State:          "running",
-			StartedAt:      &now,
-			gen:            gen,
-		}
+		s.encoder.State = "exited"
+		s.encoder.ExitError = err.Error()
 		s.statusMu.Unlock()
+		return gen, nil, nil, fmt.Errorf("start ffmpeg: %w", err)
+	}
+	return gen, done, tail, nil
+}
 
-		args := s.buildFFmpegArgs(req, spec, lowPower)
-		mode := resolveSourceMode(req.Mode, req.Source)
-		health := newHealthTracker(mode, nil)
-		atomic.StoreUint64(&s.rtpVideoDrops, 0)
-		atomic.StoreUint64(&s.rtpAudioDrops, 0)
-		s.statusMu.Lock()
-		s.health = health
-		s.statusMu.Unlock()
-		log.Printf("[FFmpeg] Starting: encoder=%s mode=%s video=:%d audio=:%d", spec.ID, mode, s.videoPort, s.audioPort)
-		done, tail, err := s.launchFFmpegLocked(args, resolveCPUPriority(req.CPUPriority), gen, health)
-		if err != nil {
-			log.Printf("[FFmpeg] Start error: %v", err)
-			s.statusMu.Lock()
-			s.encoder.State = "exited"
-			s.encoder.ExitError = err.Error()
-			s.statusMu.Unlock()
-			return s.encoderSession(), fmt.Errorf("start ffmpeg: %w", err)
-		}
+// mayLackAudio reports whether req reads the audio of a source that has not
+// yet been given a silent input in its place.
+func mayLackAudio(req SourceRequest) bool {
+	return req.Source != "" && !req.SilentAudio
+}
 
-		if !spec.Hardware {
-			return s.encoderSession(), nil
-		}
+// survivedStartup waits hwVerifyWindow and reports whether the ffmpeg behind
+// done was still running at the end of it.
+func survivedStartup(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return false
+	case <-time.After(hwVerifyWindow()):
+		return true
+	}
+}
 
-		select {
-		case <-done:
-			reason := tail.summary()
-			if reason == "" {
-				reason = "hardware encoder exited during startup"
-			}
-			s.ffmpeg = nil
-			if !triedLowPowerToggle {
-				triedLowPowerToggle = true
-				lowPower = !lowPower
-				log.Printf("[FFmpeg] %s failed (%s); retrying with low_power=%v", spec.ID, reason, lowPower)
-				continue
-			}
-			log.Printf("[FFmpeg] %s failed (%s); falling back to software", spec.ID, reason)
-			fallbackReason = reason
-			spec = softwareEncoderFor(spec.Codec)
-			continue
-		case <-time.After(hwVerifyWindow()):
-			return s.encoderSession(), nil
-		}
+// restartWithSilenceIfNoAudio starts the stream again with a silent audio
+// input when the ffmpeg of generation gen stopped because the source has no
+// audio track. Only if nothing has moved on since: a stop, a new source and
+// the hardware check in startFFmpegLocked all start a new generation. That
+// check holds ffmpegLock until it returns, so this waits for it and then
+// sees its generation.
+func (s *Sidecar) restartWithSilenceIfNoAudio(req SourceRequest, gen uint64, done <-chan struct{}, tail *tailBuffer) {
+	<-done
+	if !noAudioTrack(tail) {
+		return
+	}
+	s.ffmpegLock.Lock()
+	defer s.ffmpegLock.Unlock()
+	if atomic.LoadUint64(&s.ffmpegGen) != gen {
+		return
+	}
+	log.Printf("[FFmpeg] The source has no audio track; starting again with silence")
+	req.SilentAudio = true
+	if _, err := s.startFFmpegLocked(req); err != nil {
+		log.Printf("[FFmpeg] Restart with silence failed: %v", err)
 	}
 }
 
@@ -1869,7 +2240,13 @@ func (s *Sidecar) StopFFmpegLocked() {
 	atomic.AddUint64(&s.ffmpegGen, 1)
 	if s.ffmpeg != nil && s.ffmpeg.Process != nil {
 		s.ffmpeg.Process.Kill()
+		// Reap the old process before permitting another launch. Wait owns
+		// no ffmpegLock, so completion cannot deadlock this stop.
+		if s.ffmpegDone != nil {
+			<-s.ffmpegDone
+		}
 		s.ffmpeg = nil
+		s.ffmpegDone = nil
 	}
 	if s.egress != nil {
 		s.egress.Close()
@@ -1889,7 +2266,7 @@ func (s *Sidecar) GetStats() map[string]interface{} {
 	peers := map[string]interface{}{}
 	for id, peer := range s.peers {
 		peers[id] = map[string]interface{}{
-			"active": peer.Active,
+			"active": peer.isActive(),
 			"state":  peer.PC.ICEConnectionState().String(),
 		}
 	}
@@ -1910,7 +2287,7 @@ func (s *Sidecar) GetStats() map[string]interface{} {
 }
 
 func (s *Sidecar) Stop() {
-	s.running = false
+	s.running.Store(false)
 	s.ffmpegLock.Lock()
 	s.StopFFmpegLocked()
 	s.ffmpegLock.Unlock()
@@ -1924,13 +2301,52 @@ func (s *Sidecar) Stop() {
 
 	s.peersLock.Lock()
 	for id, peer := range s.peers {
-		peer.Active = false
+		peer.deactivate()
 		peer.PC.Close()
 		delete(s.peers, id)
 	}
 	s.peersLock.Unlock()
 
 	s.stopICEMedia()
+}
+
+func (s *Sidecar) postPeerAnswer(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID  string `json:"id"`
+		SDP string `json:"sdp"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	debugf("[API] Setting answer for peer: %s (%d bytes)", req.ID, len(req.SDP))
+
+	if err := s.SetAnswer(req.ID, req.SDP); err != nil {
+		log.Printf("[API] SetAnswer error: %s", quoteErr(err))
+		http.Error(w, "internal_error", http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Sidecar) postPeerICE(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID            string `json:"id"`
+		Candidate     string `json:"candidate"`
+		SDPMid        string `json:"sdpMid"`
+		SDPMLineIndex uint16 `json:"sdpMLineIndex"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	if err := s.AddICECandidate(req.ID, req.Candidate, req.SDPMid, req.SDPMLineIndex); err != nil {
+		log.Printf("[API] AddICE error: %s", quoteErr(err))
+		http.Error(w, "internal_error", http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func requireSidecarAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -1951,6 +2367,10 @@ func requireSidecarAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func main() {
+	if printVersionIfRequested(os.Args, os.Stdout) {
+		return
+	}
+
 	port := 9800
 	if p := os.Getenv("SIDECAR_PORT"); p != "" {
 		if v, err := strconv.Atoi(p); err == nil {
@@ -1994,7 +2414,7 @@ func main() {
 
 		sdp, err := sidecar.CreatePeerFor(req.ID, req.Codec, req.Browser)
 		if err != nil {
-			log.Printf("[API] CreatePeer error: %v", err)
+			log.Printf("[API] CreatePeer error: %s", quoteErr(err))
 			http.Error(w, err.Error(), 500)
 			return
 		}
@@ -2003,44 +2423,8 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"sdp": sdp})
 	}))
 
-	mux.HandleFunc("POST /peer/answer", requireSidecarAuth(func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			ID  string `json:"id"`
-			SDP string `json:"sdp"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), 400)
-			return
-		}
-		debugf("[API] Setting answer for peer: %s (%d bytes)", req.ID, len(req.SDP))
-
-		if err := sidecar.SetAnswer(req.ID, req.SDP); err != nil {
-			log.Printf("[API] SetAnswer error: %v", err)
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-	}))
-
-	mux.HandleFunc("POST /peer/ice", requireSidecarAuth(func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			ID            string `json:"id"`
-			Candidate     string `json:"candidate"`
-			SDPMid        string `json:"sdpMid"`
-			SDPMLineIndex uint16 `json:"sdpMLineIndex"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), 400)
-			return
-		}
-
-		if err := sidecar.AddICECandidate(req.ID, req.Candidate, req.SDPMid, req.SDPMLineIndex); err != nil {
-			log.Printf("[API] AddICE error: %v", err)
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-	}))
+	mux.HandleFunc("POST /peer/answer", requireSidecarAuth(sidecar.postPeerAnswer))
+	mux.HandleFunc("POST /peer/ice", requireSidecarAuth(sidecar.postPeerICE))
 
 	mux.HandleFunc("POST /peer/close", requireSidecarAuth(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -2080,13 +2464,17 @@ func main() {
 			Threads int `json:"threads"`
 			// CPUPriority is normal, low or lowest.
 			CPUPriority string `json:"cpuPriority"`
-			// StartSeconds starts a VOD or file source at this offset (a seek).
-			StartSeconds float64 `json:"startSeconds"`
 			// Passthrough streams the source's own H.264 or VP9 without re-encoding it
 			// (the encoder field names which).
 			Passthrough bool `json:"passthrough"`
 			// Pacing is the PacingFactor of a direct stream; 0 = off.
 			Pacing float64 `json:"pacing"`
+			// StartAtSecs starts an on-demand source at this offset (a seek, a
+			// resume, or a restart at a new quality).
+			StartAtSecs float64 `json:"startAtSecs"`
+			// VideoCodec is the source's video codec when the backend knows it
+			// (av1, vp9, h264); empty when it does not.
+			VideoCodec string `json:"videoCodec"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), 400)
@@ -2097,6 +2485,10 @@ func main() {
 			return
 		}
 		if err := validAudioSource(req.Source, req.AudioSource); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		if err := validVideoCodec(req.VideoCodec); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
@@ -2139,9 +2531,10 @@ func main() {
 			CpuUsed:      req.CpuUsed,
 			Threads:      clampThreads(req.Threads),
 			CPUPriority:  req.CPUPriority,
-			StartSeconds: clampStartSeconds(req.StartSeconds),
 			Passthrough:  req.Passthrough,
 			PacingFactor: req.Pacing,
+			StartAtSecs:  clampStartAt(req.StartAtSecs),
+			VideoCodec:   req.VideoCodec,
 		})
 		if err != nil {
 			http.Error(w, err.Error(), 500)
@@ -2244,11 +2637,15 @@ func main() {
 		json.NewEncoder(w).Encode(sidecar.GetStats())
 	}))
 
+	build := buildInfo()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":    "ok",
 			"videoPort": sidecar.videoPort,
 			"audioPort": sidecar.audioPort,
+			"version":   build["version"],
+			"os":        build["os"],
+			"arch":      build["arch"],
 		})
 	})
 
@@ -2261,8 +2658,9 @@ func main() {
 		os.Exit(0)
 	}()
 
-	log.Printf("[Sidecar] HTTP API listening on :%d", port)
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), mux); err != nil {
+	addr := httpListenAddr(port)
+	log.Printf("[Sidecar] %s (%s/%s) HTTP API listening on %s", build["version"], build["os"], build["arch"], addr)
+	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("HTTP server error: %v", err)
 	}
 }

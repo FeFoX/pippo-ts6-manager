@@ -2,8 +2,8 @@ import { test, expect, type APIRequestContext, type Locator, type Page } from '@
 import { readFileSync, readdirSync } from 'node:fs';
 import { canHandleRequest, isAppNavigation } from '../pwa/cache-policy';
 
-const routes = ['/dashboard', '/channels', '/clients', '/permissions', '/server-groups', '/channel-groups', '/media-bots', '/bots', '/bots/1', '/files', '/settings', '/login', '/setup'];
-const privatePaths = ['/api', '/api/health', '/api/auth/login', '/api/auth/refresh', '/api/auth/logout', '/api/auth/me', '/api/setup/status', '/api/servers/1/clients', '/api/servers/1/files', '/api/servers/1/tokens', '/api/servers/1/bans', '/api/music-bots', '/api/bots/1/logs', '/api/iptv/playlists/upload', '/api/iptv/playlists/1/replace', '/ws', '/ws/live'];
+const routes = ['/dashboard', '/channels', '/clients', '/permissions', '/server-groups', '/channel-groups', '/media-bots', '/bots', '/bots/1', '/files', '/settings', '/login', '/setup', '/remote'];
+const privatePaths = ['/api', '/api/health', '/api/auth/login', '/api/auth/refresh', '/api/auth/logout', '/api/auth/me', '/api/setup/status', '/api/servers/1/clients', '/api/servers/1/files', '/api/servers/1/tokens', '/api/servers/1/bans', '/api/music-bots', '/api/bots/1/logs', '/api/iptv/playlists/upload', '/api/iptv/playlists/1/replace', '/api/listener-remote', '/api/listener-remote/exchange', '/api/listener-remote/state', '/ws', '/ws/live'];
 const baseThemes = ['light', 'dark', 'black'] as const;
 const accents = ['cyan', 'violet', 'red', 'blue', 'emerald', 'amber'] as const;
 
@@ -84,7 +84,8 @@ test('request policy denies private, cross-origin, authenticated and mutating re
   for (const req of [new Request('https://cdn.example.test/assets/app.js'), new Request(origin + '/assets/app.js', { headers: { Authorization: 'Bearer test' } }), new Request(origin + '/settings', { method: 'POST' })]) {
     expect(canHandleRequest(req, new URL(req.url), origin)).toBe(false);
   }
-  for (const path of routes) expect(isAppNavigation({ mode: 'navigate' } as Request, new URL(path, origin))).toBe(true);
+  for (const path of [...routes, '/', '/remote/', '/bots/1/']) expect(isAppNavigation({ mode: 'navigate' } as Request, new URL(path, origin))).toBe(true);
+  expect(isAppNavigation({ mode: 'navigate' } as Request, new URL('/dashboard?edge-auth=1', origin))).toBe(false);
   for (const path of ['/api/auth', '/ws', '/widget/private-token', '/unknown', '/settings-extra']) expect(isAppNavigation({ mode: 'navigate' } as Request, new URL(path, origin))).toBe(false);
 });
 
@@ -313,12 +314,15 @@ test('settings sections are URL-backed and restored by browser history', async (
   await page.goto('/settings?tab=appearance&source=copied');
   await expect(page.getByRole('tab', { name: 'Appearance' })).toHaveAttribute('data-state', 'active');
   await expect(page.getByRole('heading', { name: 'Appearance' })).toBeVisible();
+  const initialHistoryLength = await page.evaluate(() => history.length);
 
   await page.getByRole('tab', { name: 'About' }).click();
   await expect(page).toHaveURL('/settings?tab=about&source=copied');
+  await expect.poll(() => page.evaluate(() => history.length)).toBe(initialHistoryLength + 1);
   await expect(page.getByRole('heading', { name: 'TS6 Manager' })).toBeVisible();
   await page.getByRole('tab', { name: 'Account' }).click();
   await expect(page).toHaveURL('/settings?tab=account&source=copied');
+  await expect.poll(() => page.evaluate(() => history.length)).toBe(initialHistoryLength + 2);
 
   await page.goBack();
   await expect(page).toHaveURL('/settings?tab=about&source=copied');
@@ -432,6 +436,54 @@ test('backend outage is visible even when the browser is online and clears on re
   await request.post('/__test/unavailable');
   await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
   await expect(page.getByRole('status')).toHaveCount(0);
+});
+
+test('opening the cached shell while the backend restarts recovers without a reload', async ({ page, request }) => {
+  await controlled(page);
+  await request.post('/__test/unavailable?on');
+  // The worker serves the shell instantly, so the app opens mid-restart.
+  const response = await page.reload();
+  expect(response?.fromServiceWorker()).toBe(true);
+  await expect(page.getByRole('status')).toContainText('Server unavailable');
+  await request.post('/__test/unavailable');
+  // No resume/online event and no reload: the notice must clear by itself.
+  await expect(page.getByRole('status')).toHaveCount(0, { timeout: 20_000 });
+});
+
+test('opening the cached shell with an expired proxy session signs in again by itself', async ({ page, request }) => {
+  await controlled(page);
+  await request.post('/__test/access?on');
+  const response = await page.reload();
+  expect(response?.fromServiceWorker()).toBe(true);
+  await expect.poll(async () => (await (await request.post('/__test/noop')).json()).accessLogins).toBe(1);
+  await expect(page).toHaveURL('/login');
+  await expect(page.getByLabel('Username')).toBeVisible();
+  await expect(page.getByRole('status')).toHaveCount(0);
+});
+
+test('an expired proxy session never reloads in a loop when the attempt cannot be recorded', async ({ page, request }) => {
+  await controlled(page);
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'sessionStorage', { get() { throw new DOMException('blocked', 'SecurityError'); } });
+  });
+  await request.post('/__test/access?on');
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Sign in again' })).toBeVisible();
+  expect((await (await request.post('/__test/noop')).json()).accessLogins).toBe(0);
+});
+
+test('a proxy session that expires mid-use asks before reloading', async ({ page, request }) => {
+  await controlled(page);
+  await page.getByLabel('Username').fill('unsaved-edit');
+  await request.post('/__test/access?on');
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await expect(page.getByRole('status')).toContainText('access session has expired');
+  await expect(page.getByLabel('Username')).toHaveValue('unsaved-edit');
+  await page.getByRole('button', { name: 'Sign in again' }).click();
+  await expect(page.getByLabel('Username')).toHaveValue('');
+  await expect(page).toHaveURL('/login');
+  await expect(page.getByRole('status')).toHaveCount(0);
+  expect((await (await request.post('/__test/noop')).json()).accessLogins).toBe(1);
 });
 
 test('private navigation stays network-only and missing static files are not HTML', async ({ page, request }) => {

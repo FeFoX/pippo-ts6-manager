@@ -6,6 +6,9 @@ const { WebSocketServer } = createRequire(new URL('../../backend/package.json', 
 const dist = new URL('../dist/', import.meta.url);
 let generation = 0;
 let unavailable = false;
+let accessExpired = false;
+let accessLogins = 0;
+const APP_ORIGIN = 'http://127.0.0.1:4175';
 let mutations = 0;
 let needsSetup = false;
 let allowTestAuth = false;
@@ -306,8 +309,23 @@ const server = createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   if (url.pathname.startsWith('/__test/')) {
     if (url.pathname === '/__test/update') generation++;
+    // Stand-in for an authenticating proxy's login: renew, then send the browser back.
+    // Like a real login page, it only completes for a page navigation.
+    if (url.pathname === '/__test/access-login') {
+      if (req.headers['sec-fetch-mode'] !== 'navigate') { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end('<title>Sign in</title>'); return; }
+      accessExpired = false;
+      accessLogins++;
+      // Only ever send the browser back to a path on the app under test.
+      const back = new URL(url.searchParams.get('next') || '/', APP_ORIGIN);
+      res.writeHead(302, { Location: back.origin === APP_ORIGIN ? APP_ORIGIN + back.pathname + back.search : APP_ORIGIN });
+      res.end();
+      return;
+    }
+    if (url.pathname === '/__test/access') accessExpired = url.searchParams.has('on');
     if (url.pathname === '/__test/reset') {
       unavailable = false;
+      accessExpired = false;
+      accessLogins = 0;
       mutations = 0;
       needsSetup = false;
       allowTestAuth = false;
@@ -380,7 +398,14 @@ const server = createServer(async (req, res) => {
       testRole = url.searchParams.get('role') === 'viewer' ? 'viewer' : 'admin';
     }
     res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify({ mutations, dashboardScenario, dashboardRequests, permissionScenario, permissionRequests, botScenario, botUpdateRequests, adminActionScenario, adminActionRequests, virtualServerListRequests, channelScenario, channelRequests, logsScenario, logsRequests }));
+    res.end(JSON.stringify({ mutations, accessLogins, dashboardScenario, dashboardRequests, permissionScenario, permissionRequests, botScenario, botUpdateRequests, adminActionScenario, adminActionRequests, virtualServerListRequests, channelScenario, channelRequests, logsScenario, logsRequests }));
+    return;
+  }
+  if (accessExpired) {
+    // The login lives on another origin, as a real proxy's does, so a fetch
+    // cannot follow it; only a page navigation can.
+    res.writeHead(302, { Location: `http://localhost:4175/__test/access-login?next=${encodeURIComponent(url.pathname + url.search)}` });
+    res.end();
     return;
   }
   if (/^\/(api|ws)(\/|$)/.test(url.pathname)) {
@@ -516,6 +541,8 @@ const server = createServer(async (req, res) => {
       : url.pathname === '/api/music-bots/media' && allowTestAuth ? (docsScenario ? docsBotMedia : [])
       : url.pathname === '/api/music-bots' && allowTestAuth ? (docsScenario ? docsMusicBots : [])
       : url.pathname === '/api/music-bots/7/state' && allowTestAuth && docsScenario ? docsPlaybackState
+      // Every bot has a video queue; specs that need items in it mock this route.
+      : /^\/api\/music-bots\/\d+\/stream\/queue$/.test(url.pathname) && allowTestAuth ? { current: null, upNext: [], kept: false }
       : url.pathname === '/api/bots' && allowTestAuth ? bots
       : /^\/api\/bots\/(\d+)$/.test(url.pathname) && allowTestAuth
         ? (() => {

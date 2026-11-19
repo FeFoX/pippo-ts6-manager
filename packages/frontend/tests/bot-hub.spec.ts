@@ -1,4 +1,5 @@
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { DEFAULT_BOT_AUTOMATION_SETTINGS } from '@ts6/common';
 
 async function signIn(page: Page, request: APIRequestContext) {
   await request.post('/__test/reset');
@@ -58,6 +59,82 @@ function summaries() {
   ];
 }
 
+test('Bot Hub saves per-bot Auto-DJ settings with server-scoped sources and 24/7 presence', async ({ page, request }) => {
+  const saves: unknown[] = [];
+  let finishLoading!: () => void;
+  const loading = new Promise<void>(resolve => { finishLoading = resolve; });
+  let finishSaving!: () => void;
+  const saving = new Promise<void>(resolve => { finishSaving = resolve; });
+  await page.route('**/api/music-bots/media', (r) => r.fulfill({ json: media(Date.now()) }));
+  await page.route('**/api/music-bots/3', async (r) => {
+    await loading;
+    return r.fulfill({ json: { ...summaries()[2], automationSettings: DEFAULT_BOT_AUTOMATION_SETTINGS } });
+  });
+  await page.route('**/api/music-bots/3/automation', async (r) => {
+    saves.push(r.request().postDataJSON());
+    await saving;
+    return r.fulfill({ json: r.request().postDataJSON() });
+  });
+  await page.route('**/api/playlists?serverConfigId=1', (r) => r.fulfill({ json: [
+    { id: 10, name: 'Night rotation', serverConfigId: 1 },
+    { id: 11, name: 'Shared rotation', serverConfigId: null },
+    { id: 12, name: 'Other server rotation', serverConfigId: 2 },
+  ] }));
+  await page.route('**/api/servers/1/radio-stations', (r) => r.fulfill({ json: [
+    { id: 20, name: 'Jazz station', serverConfigId: 1 },
+    { id: 21, name: 'Other server radio', serverConfigId: 2 },
+  ] }));
+  await signIn(page, request);
+  await page.goto('/bot-hub');
+  await page.getByRole('button', { name: 'Settings for Backup Bot' }).click();
+  await page.getByRole('menuitem', { name: 'Auto-DJ & 24/7' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Auto-DJ & 24/7: Backup Bot' });
+  await expect(dialog.getByRole('status')).toHaveText('Loading settings…');
+  finishLoading();
+  await expect(dialog.getByText('Enable Auto-start in Edit bot to restore this bot after a Manager restart.')).toBeVisible();
+  await dialog.getByRole('switch', { name: 'Enable Auto-DJ' }).check();
+  await expect(dialog.getByRole('button', { name: 'Save automation' })).toBeDisabled();
+  await dialog.getByRole('combobox', { name: 'Saved source' }).click();
+  await expect(page.getByRole('option')).toHaveText([
+    'Choose a playlist or radio station', 'Night rotation', 'Shared rotation', 'Jazz station',
+  ]);
+  await page.getByRole('option', { name: 'Night rotation', exact: true }).click();
+  await dialog.getByRole('switch', { name: 'Require a human listener' }).check();
+  await dialog.getByRole('switch', { name: 'Keep bot in channel (24/7)' }).check();
+  await dialog.getByLabel('Quiet period after manual Stop (seconds)').fill('0');
+  await dialog.getByLabel('First retry delay (seconds)').fill('60');
+  await dialog.getByLabel('Maximum retry delay (seconds)').fill('30');
+  await expect(dialog.getByRole('button', { name: 'Save automation' })).toBeDisabled();
+  await dialog.getByLabel('Maximum retry delay (seconds)').fill('3600');
+  await dialog.getByRole('button', { name: 'Save automation' }).click();
+  await expect(dialog.getByRole('status')).toHaveText('Saving automation settings…');
+  await expect.poll(() => saves.length).toBe(1);
+  expect(saves[0]).toEqual({ enabled: true, source: { kind: 'playlist', id: 10 }, requireListeners: true,
+    quietPeriodSeconds: 0, retryBaseSeconds: 60, retryMaxSeconds: 3600, stayInChannel: true });
+  finishSaving();
+  await expect(dialog).toBeHidden();
+});
+
+test('failed automation save preserves radio choice and explains the error', async ({ page, request }) => {
+  await page.route('**/api/music-bots/media', (r) => r.fulfill({ json: media(Date.now()) }));
+  await page.route('**/api/music-bots/3', (r) => r.fulfill({ json: { ...summaries()[2], automationSettings: {
+    ...DEFAULT_BOT_AUTOMATION_SETTINGS, enabled: true, source: { kind: 'radio', id: 20 },
+  } } }));
+  await page.route('**/api/playlists?serverConfigId=1', (r) => r.fulfill({ json: [] }));
+  await page.route('**/api/servers/1/radio-stations', (r) => r.fulfill({ json: [{ id: 20, name: 'Jazz station', serverConfigId: 1 }] }));
+  await page.route('**/api/music-bots/3/automation', (r) => r.fulfill({ status: 500, json: { error: 'Settings could not be saved' } }));
+  await signIn(page, request);
+  await page.goto('/bot-hub');
+  await page.getByRole('button', { name: 'Settings for Backup Bot' }).click();
+  await page.getByRole('menuitem', { name: 'Auto-DJ & 24/7' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Auto-DJ & 24/7: Backup Bot' });
+  await expect(dialog.getByRole('combobox', { name: 'Saved source' })).toHaveText('Jazz station');
+  await dialog.getByRole('button', { name: 'Save automation' }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('Settings could not be saved');
+  await expect(dialog.getByRole('combobox', { name: 'Saved source' })).toHaveText('Jazz station');
+  await expect(dialog.getByRole('button', { name: 'Save automation' })).toBeEnabled();
+});
+
 test('Bot Hub shows each bot\'s active media session and links to its sections', async ({ page, request }) => {
   await page.setViewportSize({ width: 1400, height: 1000 });
   await page.route('**/api/music-bots/media', (r) => r.fulfill({ json: media(Date.now()) }));
@@ -86,6 +163,45 @@ test('Bot Hub shows each bot\'s active media session and links to its sections',
   await expect(page.getByRole('heading', { name: 'Media Library' })).toBeVisible();
   await expect(page.getByRole('tab', { name: 'Streaming defaults' })).toHaveAttribute('aria-selected', 'true');
 });
+
+for (const path of ['/bot-hub', '/bot-hub/2']) {
+  test(`reports an asynchronous decoder fallback in ${path}`, async ({ page, request }) => {
+    let fallback = false;
+    await page.route('**/api/music-bots/2/state', route => route.fulfill({ json: {
+      status: 'connected', queue: [], currentIndex: -1, volume: 50, position: 0, duration: 0, nowPlaying: null,
+    } }));
+    await page.route('**/api/music-bots/2/stream/queue', route => route.fulfill({ json: {
+      current: null, upNext: [], kept: false,
+    } }));
+    await page.route('**/api/music-bots/2/stream/status', route => route.fulfill({ json: {
+      streaming: true, viewerCount: 0, viewers: [],
+    } }));
+    await page.route('**/api/music-bots/media', route => {
+      const sessions = media(Date.now());
+      if (fallback) {
+        Object.assign(sessions[1].video!.encoder, {
+          decoder: 'libdav1d', decoderFallbackReason: 'Failed to get HW surface format',
+        });
+      }
+      return route.fulfill({ json: sessions });
+    });
+    await signIn(page, request);
+    await page.goto(path);
+    await expect(page.getByText('Streaming from iptv.example')).toBeVisible();
+    const warning = page.getByRole('status').filter({ hasText: 'AV1 GPU decoding failed' });
+    await expect(warning).toHaveCount(0);
+    // A poll already in flight can still answer without the fallback.
+    const nextSample = page.waitForResponse(async response => {
+      if (new URL(response.url()).pathname !== '/api/music-bots/media') return false;
+      const sessions = await response.json();
+      return sessions[1]?.video?.encoder?.decoderFallbackReason === 'Failed to get HW surface format';
+    });
+    fallback = true;
+    await nextSample;
+    await expect(warning).toHaveText('AV1 GPU decoding failed, decoding on the CPU: Failed to get HW surface format');
+    await expect(warning).toHaveAttribute('aria-live', 'polite');
+  });
+}
 
 test('New bot creates a media bot on the chosen server', async ({ page, request }) => {
   const created: unknown[] = [];
@@ -169,7 +285,7 @@ test('a bot\'s settings menu edits, stops, shows the widget link, and deletes', 
   const openMenu = () => page.getByRole('button', { name: 'Settings for Backup Bot' }).click();
 
   await openMenu();
-  await expect(page.getByRole('menuitem')).toHaveText(['Edit bot', 'Stop bot', 'Widget link', 'Video CPU settings', 'Delete bot']);
+  await expect(page.getByRole('menuitem')).toHaveText(['Edit bot', 'Auto-DJ & 24/7', 'Stop bot', 'Widget link', 'Video CPU settings', 'Return home (suspend automation)', 'Delete bot']);
   await page.getByRole('menuitem', { name: 'Edit bot' }).click();
   const edit = page.getByRole('dialog', { name: 'Edit bot' });
   await expect(edit.getByLabel('Bot name and TeamSpeak nickname')).toHaveValue('Backup Bot');
@@ -187,6 +303,10 @@ test('a bot\'s settings menu edits, stops, shows the widget link, and deletes', 
   await expect(widget.getByRole('alert')).toHaveText('Widget tokens are unavailable');
   await expect(widget.getByRole('button', { name: 'Try again' })).toBeVisible();
   await page.keyboard.press('Escape');
+
+  await openMenu();
+  await page.getByRole('menuitem', { name: 'Return home (suspend automation)' }).click();
+  await expect.poll(() => calls).toContain('POST /api/music-bots/3/home');
 
   await openMenu();
   await page.getByRole('menuitem', { name: 'Delete bot' }).click();
@@ -306,4 +426,23 @@ test('IPTV Stream on… opens the chosen bot\'s console with the channel selecte
   // The exact row is looked up, since tvg-id can repeat across a playlist's channels.
   expect(lookups.some((q) => new URLSearchParams(q).get('channelId') === '7')).toBe(true);
   expect(streams).toHaveLength(0);
+});
+
+test('a bot with Auto-DJ and 24/7 on shows both on its card and console header', async ({ page, request }) => {
+  await signIn(page, request);
+  const withAutomation = (now: number) => media(now).map((bot) => (bot.botId === 1
+    ? { ...bot, automation: { autoDj: true, sourceKind: 'playlist', stayInChannel: true, playing: true } }
+    : bot));
+  await page.route('**/api/music-bots/media', (r) => r.fulfill({ json: withAutomation(Date.now()) }));
+  await page.route('**/api/music-bots/*/state', (route) => route.fulfill({ json: { status: 'playing', currentIndex: -1, queue: [], position: 0, duration: 0, volume: 50, shuffle: false, repeat: 'off' } }));
+  await page.goto('/bot-hub');
+
+  await expect(page.getByText('Auto-DJ playing', { exact: true })).toHaveCount(1);
+  await expect(page.getByText('24/7', { exact: true })).toHaveCount(1);
+  await expect(page.getByLabel('Auto-DJ is playing a saved playlist. A request replaces it at once.')).toBeVisible();
+
+  await page.getByRole('link', { name: 'Open console for Aurora Radio' }).click();
+  await expect(page).toHaveURL('/bot-hub/1');
+  await expect(page.getByText('Auto-DJ playing', { exact: true })).toBeVisible();
+  await expect(page.getByText('24/7', { exact: true })).toBeVisible();
 });

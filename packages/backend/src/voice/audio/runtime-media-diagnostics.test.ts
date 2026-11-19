@@ -1,15 +1,20 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, join } from 'node:path';
 import {
   DEFAULT_OVERALL_TIMEOUT_MS,
   diagnoseRuntimeMedia,
   probeCommandVersion,
+  binaryExistsOnPath,
+  resolveBinaryOnPath,
 } from './runtime-media-diagnostics.js';
 
 describe('diagnoseRuntimeMedia', () => {
   it('returns ok when all injected probes pass', async () => {
     const report = await diagnoseRuntimeMedia({
-      env: { SIDECAR_URL: 'http://sidecar:9800' },
+      env: { SIDECAR_URL: 'http://sidecar:9800', YT_DLP_PATH: '/trusted/tools/yt-dlp' },
       probeCommand: async (command) => ({ ok: true, version: `${command}-1.0` }),
       probeSidecarHealth: async () => ({ status: 'healthy' }),
       binaryExists: () => true,
@@ -19,8 +24,40 @@ describe('diagnoseRuntimeMedia', () => {
     assert.equal(report.meta.sidecarMode, 'url');
     assert.equal(report.stages.length, 4);
     assert.ok(report.stages.every((s) => s.status === 'ok'));
-    assert.equal(report.stages.find((s) => s.id === 'yt-dlp')?.version, 'yt-dlp-1.0');
+    assert.equal(report.stages.find((s) => s.id === 'yt-dlp')?.version, '/trusted/tools/yt-dlp-1.0');
     assert.ok(Date.parse(report.checkedAt));
+  });
+
+  it('reports the sidecar version and flags a release mismatch', async () => {
+    const run = (version: string | undefined, env: NodeJS.ProcessEnv) =>
+      diagnoseRuntimeMedia({
+        env,
+        backendVersion: '1.11.0',
+        probeCommand: async (command) => ({ ok: true, version: `${command}-1.0` }),
+        probeSidecarHealth: async () => ({ status: 'ok', version }),
+        binaryExists: () => true,
+      }).then((report) => report.stages.find((s) => s.id === 'sidecar'));
+
+    const matching = await run('1.11.0', { SIDECAR_URL: 'http://sidecar:9800' });
+    assert.equal(matching?.status, 'ok');
+    assert.equal(matching?.code, 'ok');
+    assert.equal(matching?.version, '1.11.0');
+    assert.equal(matching?.message, 'Sidecar health endpoint reachable');
+
+    const older = await run('1.10.2', { SIDECAR_URL: 'http://sidecar:9800' });
+    assert.equal(older?.status, 'ok');
+    assert.equal(older?.code, 'version_mismatch');
+    assert.equal(older?.version, '1.10.2');
+    assert.match(older?.message ?? '', /sidecar 1\.10\.2 does not match backend 1\.11\.0/);
+
+    const unversioned = await run(undefined, { SIDECAR_URL: 'http://sidecar:9800' });
+    assert.equal(unversioned?.code, 'ok');
+    assert.equal(unversioned?.version, 'unversioned');
+    assert.match(unversioned?.message ?? '', /older than 1\.11/);
+
+    const local = await run('1.10.2', { SIDECAR_BINARY_PATH: '/usr/local/bin/sidecar' });
+    assert.equal(local?.code, 'version_mismatch');
+    assert.match(local?.message ?? '', /^Local sidecar is listening, but /);
   });
 
   it('marks missing binaries as fail without hanging', async () => {
@@ -46,6 +83,29 @@ describe('diagnoseRuntimeMedia', () => {
     assert.equal(report.meta.sidecarMode, 'local');
     assert.equal(report.stages.find((s) => s.id === 'yt-dlp')?.code, 'binary_missing');
     assert.equal(report.stages.find((s) => s.id === 'sidecar')?.code, 'binary_missing');
+  });
+
+  it('reports an invalid yt-dlp path without probing it or discarding other stages', async () => {
+    for (const YT_DLP_PATH of ['yt-dlp', './yt-dlp', '']) {
+      const commands: string[] = [];
+      const report = await diagnoseRuntimeMedia({
+        env: { SIDECAR_URL: 'http://sidecar:9800', YT_DLP_PATH },
+        probeCommand: command => {
+          commands.push(command);
+          return Promise.resolve({ ok: true, version: '1.0' });
+        },
+        probeSidecarHealth: () => Promise.resolve({ status: 'healthy' }),
+      });
+
+      assert.equal(report.overall, 'partial');
+      assert.equal(report.stages.length, 4);
+      assert.deepEqual(report.stages.find(stage => stage.id === 'yt-dlp'), {
+        id: 'yt-dlp', status: 'fail', code: 'misconfigured',
+        message: 'YT_DLP_PATH must be an absolute path to a trusted yt-dlp executable',
+      });
+      assert.deepEqual(commands, ['ffmpeg', 'ffprobe']);
+      assert.ok(report.stages.filter(stage => stage.id !== 'yt-dlp').every(stage => stage.status === 'ok'));
+    }
   });
 
   it('skips local sidecar listening when binary exists but health fails', async () => {
@@ -112,7 +172,41 @@ describe('diagnoseRuntimeMedia', () => {
   });
 });
 
+describe('resolveBinaryOnPath', () => {
+  it('uses the first executable on PATH, supports absolute paths with spaces, and rejects missing binaries', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ts6-media-tools-'));
+    try {
+      const executable = join(dir, 'media tool');
+      writeFileSync(executable, '#!/bin/sh\nexit 0\n');
+      chmodSync(executable, 0o755);
+      const env = { PATH: `${join(dir, 'missing')}${delimiter}${dir}` };
+      assert.equal(resolveBinaryOnPath('media tool', env), executable);
+      assert.equal(resolveBinaryOnPath(executable, {}), executable);
+      assert.equal(binaryExistsOnPath('media tool', env), true);
+      assert.equal(resolveBinaryOnPath('missing-media-tool', env), undefined);
+      assert.equal(binaryExistsOnPath('missing-media-tool', env), false);
+      if (process.platform !== 'win32') {
+        chmodSync(executable, 0o644);
+        assert.equal(resolveBinaryOnPath('media tool', env), undefined);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('probeCommandVersion', () => {
+  it('redacts credentials before truncating probe output', async () => {
+    const result = await probeCommandVersion(process.execPath, [
+      '-e', `console.log('https://user:${'fake-password'.repeat(20)}@media.example.test/path')`,
+    ], 1_000);
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.match(result.version, /https:\/\/\[redacted\]@media\.example\.test/);
+      assert.doesNotMatch(result.version, /fake-password/);
+    }
+  });
+
   it('kills hung commands within the stage timeout', async () => {
     const started = Date.now();
     const result = await probeCommandVersion(

@@ -91,6 +91,36 @@ func TestH264EncoderArgsRepeatParameterSets(t *testing.T) {
 	}
 }
 
+// h264_amf takes a -header_spacing of at most 1000 frames and fails to start
+// on a larger one, which drops the stream to software encoding. A GOP that
+// long keeps AMF running and leaves the headers to the sidecar's cache.
+func TestAmfHeaderSpacingStaysWithinWhatFFmpegAccepts(t *testing.T) {
+	amf, _ := lookupEncoder("h264_amf")
+	cases := []struct {
+		gop  string
+		want string // "" for no -header_spacing at all
+	}{
+		{"1", "-header_spacing 1"},
+		{"1000", "-header_spacing 1000"},
+		{"1001", ""},
+		{"3000", ""},
+		{"0", ""},
+	}
+	for _, tc := range cases {
+		t.Setenv("VIDEO_GOP", tc.gop)
+		args := strings.Join(encoderArgs(amf, "2500k", false, 0, 0), " ")
+		if !strings.Contains(args, "-g "+tc.gop) {
+			t.Errorf("VIDEO_GOP=%s: GOP not passed on: %s", tc.gop, args)
+		}
+		switch {
+		case tc.want == "" && strings.Contains(args, "header_spacing"):
+			t.Errorf("VIDEO_GOP=%s: header_spacing must be left out: %s", tc.gop, args)
+		case tc.want != "" && !strings.Contains(args, tc.want+" "):
+			t.Errorf("VIDEO_GOP=%s: args missing %q: %s", tc.gop, tc.want, args)
+		}
+	}
+}
+
 func TestLibvpxHoldsBitrateWithMinrate(t *testing.T) {
 	for _, id := range []string{"vp8", "vp9"} {
 		spec, _ := lookupEncoder(id)
@@ -99,7 +129,7 @@ func TestLibvpxHoldsBitrateWithMinrate(t *testing.T) {
 			t.Errorf("%s needs -minrate to hold its bitrate: %s", id, args)
 		}
 	}
-	for _, id := range []string{"h264", "vp9_vaapi", "h264_vaapi", "h264_nvenc", "h264_amf"} {
+	for _, id := range []string{"h264", "vp9_vaapi", "h264_vaapi", "h264_nvenc", "h264_amf", "h264_videotoolbox"} {
 		spec, _ := lookupEncoder(id)
 		if args := strings.Join(encoderArgs(spec, "5500k", false, 0, 0), " "); strings.Contains(args, "-minrate") {
 			t.Errorf("%s holds -maxrate on its own and must not get -minrate: %s", id, args)
@@ -134,7 +164,7 @@ func TestBuildFFmpegArgsVaapiOpensDevice(t *testing.T) {
 	s := NewSidecar()
 	spec, _ := lookupEncoder("h264_vaapi")
 	args := strings.Join(s.buildFFmpegArgs(SourceRequest{Source: "https://example.com/a.mp4", Width: 3840, Height: 2160}, spec, false), " ")
-	for _, want := range []string{"-init_hw_device vaapi=va:/dev/dri/renderD129", "-filter_hw_device va", "-hwaccel vaapi", "format=nv12,hwupload"} {
+	for _, want := range []string{"-init_hw_device vaapi=va:/dev/dri/renderD129", "-filter_hw_device va", "-hwaccel vaapi", "hwupload"} {
 		if !strings.Contains(args, want) {
 			t.Errorf("args missing %q: %s", want, args)
 		}
@@ -232,7 +262,7 @@ func TestSummarizeFFmpegErrorRedactsURLs(t *testing.T) {
 // a 1500-byte MTU and is fragmented on the way to the viewer.
 func TestVideoRTPPacketsFitTheMTU(t *testing.T) {
 	s := NewSidecar()
-	for _, key := range []string{"vp8", "vp9", "h264", "h264_vaapi", "h264_nvenc", "h264_amf"} {
+	for _, key := range []string{"vp8", "vp9", "h264", "h264_vaapi", "h264_nvenc", "h264_amf", "h264_videotoolbox"} {
 		spec, ok := lookupEncoder(key)
 		if !ok {
 			t.Fatalf("no %s encoder", key)
@@ -320,7 +350,7 @@ func TestHardwareEncodersNameTheirBackend(t *testing.T) {
 		switch {
 		case !spec.Hardware && spec.Backend != "":
 			t.Errorf("software encoder %s has backend %q", spec.ID, spec.Backend)
-		case spec.Hardware && spec.Backend != backendVAAPI && spec.Backend != backendNVENC && spec.Backend != backendAMF:
+		case spec.Hardware && spec.Backend != backendVAAPI && spec.Backend != backendNVENC && spec.Backend != backendAMF && spec.Backend != backendVideoToolbox:
 			t.Errorf("hardware encoder %s has backend %q", spec.ID, spec.Backend)
 		}
 	}
@@ -362,6 +392,9 @@ func TestBuildFFmpegArgsAmf(t *testing.T) {
 }
 
 func TestProbeRunsAmfWithoutVaapiDevice(t *testing.T) {
+	// AMF is not test-encoded on macOS; pin the system so the test does not
+	// depend on where it runs.
+	setHostOS(t, "windows")
 	t.Setenv("VAAPI_LOW_POWER", "1")
 	t.Setenv("VIDEO_HW_DECODE", "1")
 	spec, _ := lookupEncoder("h264_amf")
@@ -476,5 +509,75 @@ func TestVideoPacketSizeLeavesRoomForTheVP9Descriptor(t *testing.T) {
 	var d vp9Descriptor
 	if out := d.rewrite(payload, true); len(out)+12 > rtpPacketSize {
 		t.Errorf("rewritten packet is %d bytes, over %d", len(out)+12, rtpPacketSize)
+	}
+}
+
+// With VIDEO_HW_DECODE=1 the decoded frames stay on the GPU: the decoder
+// hands VAAPI surfaces to the filters, which scale them there, so there is no
+// copy back to system memory and upload again.
+func TestVaapiDecodedFramesStayOnTheGPU(t *testing.T) {
+	t.Setenv("VIDEO_HW_DECODE", "1")
+	t.Setenv("VIDEO_GPU_FILTERS", "") // the default: on
+	s := NewSidecar()
+	spec, _ := lookupEncoder("h264_vaapi")
+	args := strings.Join(s.buildFFmpegArgs(SourceRequest{Source: "https://example.com/v.webm", AudioSource: "https://example.com/a.webm", Width: 1920, Height: 1080, Framerate: 30}, spec, false), " ")
+
+	if !strings.Contains(args, "-hwaccel_output_format vaapi -hwaccel vaapi -hwaccel_device va") {
+		t.Errorf("the decoder must hand VAAPI surfaces to the filters: %s", args)
+	}
+	if strings.Index(args, "-hwaccel_output_format") > strings.Index(args, "-i https://example.com/v.webm") {
+		t.Errorf("GPU decoding must apply to the video input: %s", args)
+	}
+	for _, want := range []string{"fps=30,format=nv12|vaapi,hwupload,scale_vaapi=w=1920:h=1080", "force_original_aspect_ratio=decrease", "force_divisible_by=2"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("GPU filter chain lacks %q: %s", want, args)
+		}
+	}
+	// Nothing in the chain may need CPU frames, or ffmpeg would copy back.
+	for _, cpuOnly := range []string{" scale=", ",scale=", "pad="} {
+		if strings.Contains(args, cpuOnly) {
+			t.Errorf("GPU filter chain has the CPU filter %q: %s", cpuOnly, args)
+		}
+	}
+}
+
+// Without GPU decoding there are no GPU frames to keep: the default
+// (VIDEO_HW_DECODE unset) keeps the CPU chain, so do other backends, and
+// VIDEO_GPU_FILTERS=0 turns it off.
+func TestFramesStayOnTheGPUOnlyWithVaapiDecoding(t *testing.T) {
+	vaapi, _ := lookupEncoder("h264_vaapi")
+	nvenc, _ := lookupEncoder("h264_nvenc")
+	sw, _ := lookupEncoder("h264")
+
+	t.Setenv("VIDEO_GPU_FILTERS", "") // the default: on
+	t.Setenv("VIDEO_HW_DECODE", "")
+	if framesStayOnGPU(vaapi, true) {
+		t.Error("without VIDEO_HW_DECODE=1 the source is decoded on the CPU")
+	}
+	s := NewSidecar()
+	if args := strings.Join(s.buildFFmpegArgs(SourceRequest{Source: "https://example.com/a.mp4"}, vaapi, false), " "); strings.Contains(args, "scale_vaapi") || strings.Contains(args, "hwaccel_output_format") {
+		t.Errorf("default VAAPI streams keep the CPU chain: %s", args)
+	}
+
+	t.Setenv("VIDEO_HW_DECODE", "1")
+	if !framesStayOnGPU(vaapi, true) {
+		t.Error("VAAPI decoding should keep its frames on the GPU")
+	}
+	if framesStayOnGPU(vaapi, false) {
+		t.Error("no source to decode, no GPU frames")
+	}
+	for _, spec := range []EncoderSpec{nvenc, sw} {
+		if framesStayOnGPU(spec, true) {
+			t.Errorf("%s keeps the CPU chain", spec.ID)
+		}
+	}
+
+	t.Setenv("VIDEO_GPU_FILTERS", "0")
+	if framesStayOnGPU(vaapi, true) {
+		t.Error("VIDEO_GPU_FILTERS=0 must copy the frames back")
+	}
+	args := strings.Join(s.buildFFmpegArgs(SourceRequest{Source: "https://example.com/a.mp4"}, vaapi, false), " ")
+	if strings.Contains(args, "hwaccel_output_format") || !strings.Contains(args, "format=nv12,hwupload") {
+		t.Errorf("VIDEO_GPU_FILTERS=0 must keep the CPU chain: %s", args)
 	}
 }

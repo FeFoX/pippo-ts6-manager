@@ -1,5 +1,15 @@
 # Agent notes (ts6-manager)
 
+## Documentation
+
+| Path | Audience |
+|------|----------|
+| `docs/public/` | Published guides. Pages and slugs are `docs/manifest.json`. |
+| `docs/internal/` | Implementation plans and maintainer notes. Not published. |
+| `docs/agents/` | Agent-only working notes. Not published. |
+
+Local setup is [Development](docs/public/development.md). Do not add `docs/internal/` or `docs/agents/` paths to the publication manifest. URL slugs stay stable (`/docs/ts6-manager/latest/<slug>/`).
+
 ## Releases (Release Please)
 
 This repo uses [Release Please](https://github.com/googleapis/release-please) on pushes to `main`.
@@ -14,10 +24,15 @@ This repo uses [Release Please](https://github.com/googleapis/release-please) on
 | `packages/frontend/src/lib/app-version.ts` | UI fallback version (`// x-release-please-version`) |
 | `CHANGELOG.md` | Generated / updated by Release Please, with final human curation before merge when needed |
 | `.github/workflows/publish-images.yml` | Reusable image publish for an immutable `vX.Y.Z` release (GHCR default + Docker Hub mirror + Hub README/description); also supports manual recovery for an existing release tag |
+| `.github/workflows/dockerhub-description.yml` | Pushes the README and short description of a `vX.Y.Z` tag to the Docker Hub page. Called by `publish-images.yml` after the builds; run it by hand to republish the page for an existing tag without touching images |
+| `.github/workflows/publish-sidecar-binaries.yml` | Reusable native media sidecar build for the same `vX.Y.Z` tag; attaches per-platform archives and `SHA256SUMS` to the GitHub Release. Also supports manual recovery |
+| `scripts/sidecar/build-release.sh` | Cross-compiles the sidecar archives (used by the workflow above and compiled, without archives, in PR validation) |
 
 Ordinary pushes and PR merges to `main` must **not** publish container images. Image publication is tied to a created GitHub Release so `latest`, semver tags, and SHA tags all point at a deliberate release.
 
-Docker Hub mirror (`uniskela/ts6-manager:<component>`) needs repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`. If either is unset, the workflow still publishes GHCR and warns. The same secrets update the Hub repository short description and the README from `README.md`, truncated to 25,000 bytes on Hub, after a successful image build (`DOCKERHUB_TOKEN` must be a Hub PAT with Read, Write, and Delete).
+Docker Hub mirror (`uniskela/ts6-manager:<component>`) needs repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` (a Hub PAT with Read & Write). If either is unset, the workflow still publishes GHCR and warns.
+
+The Hub repository short description and README are updated after a successful image build by `dockerhub-description.yml`. Docker Hub keeps only 25,000 bytes of a README, so `scripts/ci/dockerhub-readme.py` builds the Hub copy from the tag's `README.md`: the intro plus the Documentation, Quick Start (Docker), both Environment Variables, Requirements and License sections, ending with a link to the full README at that tag. It fails the job if one of those headings is renamed or missing or the result is too big, so update its `SECTIONS` when renaming them; the full `README.md` stays as it is. Editing a Hub repository needs a PAT with Read, Write, and Delete, so that workflow uses its own token: the `DOCKERHUB_DESCRIPTION_TOKEN` secret of the `dockerhub-description` GitHub environment, plus `DOCKERHUB_USERNAME`, and never reads `DOCKERHUB_TOKEN`. Callers pass `secrets: inherit`: a called workflow only sees its environment's secrets that way. If the token is unset it skips the update with a warning; if Hub refuses the update, that job fails without affecting the published images.
 
 ### Normal flow (agents + humans)
 
@@ -30,7 +45,9 @@ Docker Hub mirror (`uniskela/ts6-manager:<component>`) needs repository secrets 
    - collapse duplicate bullets that describe the same user-facing change;
    - keep notes focused on shipped behavior, not every intermediate implementation commit.
 6. Merge the release PR → GitHub creates tag `vX.Y.Z` and the GitHub Release; the Release Please workflow then invokes `publish-images.yml` for that exact tag.
-7. Confirm the tag, GitHub Release, GHCR tags, and (when Hub secrets are set) Docker Hub mirror tags were published from the release commit.
+7. Confirm the tag, GitHub Release, GHCR tags, and (when Hub secrets are set) Docker Hub mirror tags were published from the release commit, and that the release lists the five `ts6-media-sidecar_*` archives plus `SHA256SUMS`.
+
+The sidecar reports the release it was built from (`version.txt`, stamped by the Dockerfiles and `build-release.sh`) and the backend compares it with its own version. Never commit built sidecar binaries; `bin/` and `dist/` are git-ignored.
 
 Commit prefixes that matter:
 
@@ -90,7 +107,7 @@ Do this **after** the last intended pre-release PR has landed, because a subsequ
 
 ### Local JavaScript toolchain
 
-CI uses Node.js 20 and pnpm 9. Local verification should stay on pnpm 9 until the workspace is deliberately migrated to a newer pnpm major.
+CI uses Node.js 20 and pnpm 9. Local verification should stay on pnpm 9 until the workspace is deliberately migrated to a newer pnpm major. Commands and container setup are in [Development](docs/public/development.md).
 
 ```bash
 corepack enable
@@ -112,10 +129,10 @@ If CI fails with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`, close the PR without merge
 - [ ] After merge: wait for / review the Release Please release PR
 - [ ] Compare generated notes with current `main`; remove reverted entries and duplicate descriptions
 - [ ] Merge the release PR only after its changelog matches shipped behavior
-- [ ] Confirm tag `vX.Y.Z`, GitHub Release, GHCR publish, and Docker Hub mirror (if secrets set) from the Release Please workflow
+- [ ] Confirm tag `vX.Y.Z`, GitHub Release, GHCR publish, native sidecar archives, and Docker Hub mirror (if secrets set) from the Release Please workflow
 
 <!-- adhd-hub:project-agent:start -->
-<!-- adhd-hub:guidance-version:6 -->
+<!-- adhd-hub:guidance-version:8 -->
 ## ADHD Hub continuity
 
 For substantial work in this project:
@@ -157,16 +174,26 @@ For substantial work in this project:
   resolved context where possible. Create/register only after the workspace is
   authorized as a Hub project.
 - **One thread = one independently finishable outcome** (not the whole repo).
-  Before updating a thread, compare new work to that thread's Goal; if it does
-  not advance the same outcome, use another thread or create one.
+  Size the Goal to what the agent can finish (e.g. open a review-ready PR).
+  A Goal that includes merge/deploy stays open/paused until that is done — do
+  not auto-split every PR into a second thread. Before updating a thread,
+  compare new work to that thread's Goal; if it does not advance the same
+  outcome, use another thread or create one.
 - Known thread → `upsert_progress(thread_id=...)` with compact structured state
   (goal / focus / ≤3 next / blocked if any / resume); omit ritual `content`.
   Do not silently attach to an unrelated open thread.
 - `check_overlap` only before potentially new work; reuse only when the Goal
   matches. Different goal → separate thread (`force_new_thread` if needed).
-- When leaving mid-task, checkpoint then `pause_thread(thread_id, next_step=...)`
-  with one concrete resume action. `mark_done` only the known completed thread
-  — never close unrelated overlap results.
+- End-of-task (checkpoint first if Hub state is stale): `completion.ready`
+  reflects stored state only (not PR/CI/merge), so it can block `mark_done`
+  but never approve it alone. `mark_done` on that thread only when `ready` is
+  `true` or absent **and** the Goal is done with nothing remaining (optional
+  final checkpoint first). `ready == false` (even if the Goal looks done) or
+  any remaining work (review, draft PR, CI, merge, deploy, verify, or a next
+  action — even if `ready == true`) → `upsert_progress` (record it in
+  `next_steps`) then `pause_thread(thread_id, next_step=...)` — do **not**
+  `mark_done`. If `mark_done` is denied/rejected for unfinished work:
+  do not retry; checkpoint + `pause_thread` and continue the normal response.
 - If Hub guidance looks stale (session_digest guidance status, or doctor),
   mention it once, keep using the current MCP contract, and recommend
   `adhd-hub setup . --refresh` and `adhd-hub sync-project .` (or

@@ -274,3 +274,129 @@ test('unreadable Spotify playlist fails instead of playing a guess', async () =>
   );
   assert.equal(calls.play.length, 0);
 });
+
+test('the whole link is reserved before anything downloads, and released once when done', async () => {
+  const urls = Array.from({ length: 4 }, (_, i) => `https://www.youtube.com/watch?v=0000000000${i}`);
+  const events: string[] = [];
+  const { target, calls } = fakeTarget({
+    reserve: (count) => { events.push(`reserve ${count}`); },
+    release: () => { events.push('release'); },
+  });
+  await runMediaUrlPipeline(
+    fakeDeps({
+      expandYouTube: async () => ({ urls }),
+      downloadTrack: async (url) => { events.push('download'); return item(url); },
+    }),
+    target,
+    { url: 'https://www.youtube.com/playlist?list=PL1', enqueueOnly: false },
+  );
+  await flushBackground();
+  assert.deepEqual(events, ['reserve 4', 'download', 'download', 'download', 'download', 'release']);
+  assert.equal(calls.play.length + calls.enqueue.length, 4);
+});
+
+test('a refused reservation queues and downloads nothing', async () => {
+  let downloads = 0;
+  let released = 0;
+  const { target, calls } = fakeTarget({
+    reserve: () => { throw new Error('The queue is full'); },
+    release: () => { released++; },
+  });
+  await assert.rejects(runMediaUrlPipeline(
+    fakeDeps({
+      resolveSpotifyCollection: async () => ({ title: 'Mix', tracks: [{ artist: 'A', title: 'one' }, { artist: 'B', title: 'two' }] }),
+      downloadTrack: async (url) => { downloads++; return item(url); },
+    }),
+    target,
+    { url: 'https://open.spotify.com/playlist/abc', enqueueOnly: false },
+  ), /The queue is full/);
+  assert.equal(downloads, 0);
+  assert.equal(released, 0);
+  assert.equal(calls.play.length + calls.enqueue.length, 0);
+});
+
+test('a failed first track releases the reservation', async () => {
+  let released = 0;
+  const { target } = fakeTarget({ reserve: () => {}, release: () => { released++; } });
+  await assert.rejects(runMediaUrlPipeline(
+    fakeDeps({ downloadTrack: async () => { throw new Error('download failed'); } }),
+    target,
+    { url: 'https://www.youtube.com/watch?v=00000000001', enqueueOnly: false },
+  ), /download failed/);
+  assert.equal(released, 1);
+});
+
+test('an aborted request waits for a cancellable step to stop, then rejects', async () => {
+  const controller = new AbortController();
+  const seen: Array<AbortSignal | undefined> = [];
+  let downloadStarted!: () => void;
+  const started = new Promise<void>((resolve) => { downloadStarted = resolve; });
+  let stopped = false;
+  const { target, calls } = fakeTarget();
+  const pending = runMediaUrlPipeline(fakeDeps({
+    downloadTrack: (_url, signal) => {
+      seen.push(signal);
+      downloadStarted();
+      return new Promise<QueueItem>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => { setImmediate(() => { stopped = true; reject(new Error('process closed')); }); }, { once: true });
+      });
+    },
+  }), target, { url: 'https://www.youtube.com/watch?v=abcdefghijk', enqueueOnly: true, signal: controller.signal });
+  await started;
+  controller.abort(new Error('cancelled'));
+  await assert.rejects(pending, /cancelled/);
+  assert.equal(stopped, true, 'the step stopped before the pipeline rejected');
+  assert.deepEqual(seen, [controller.signal]);
+  assert.equal(calls.enqueue.length, 0);
+});
+
+test('an aborted request abandons a lookup that cannot be cancelled', async () => {
+  const controller = new AbortController();
+  let lookupStarted!: () => void;
+  const started = new Promise<void>((resolve) => { lookupStarted = resolve; });
+  const { target } = fakeTarget();
+  const pending = runMediaUrlPipeline(fakeDeps({
+    resolveSpotifyCollection: () => { lookupStarted(); return new Promise(() => {}); },
+  }), target, { url: 'https://open.spotify.com/playlist/x', enqueueOnly: true, signal: controller.signal });
+  await started;
+  controller.abort(new Error('cancelled'));
+  await assert.rejects(pending, /cancelled/);
+});
+
+test('an already aborted request calls no resolver', async () => {
+  const controller = new AbortController();
+  controller.abort(new Error('cancelled'));
+  let called = false;
+  const { target } = fakeTarget();
+  await assert.rejects(runMediaUrlPipeline(fakeDeps({
+    resolveSpotify: async (url) => { called = true; return url; },
+    downloadTrack: async (url) => { called = true; return item(url); },
+  }), target, { url: 'https://open.spotify.com/track/x', enqueueOnly: true, signal: controller.signal }), /cancelled/);
+  assert.equal(called, false);
+});
+
+test('Spotify and Apple Music lookups receive the request signal', async () => {
+  const controller = new AbortController();
+  const seen: Array<AbortSignal | undefined> = [];
+  const { target } = fakeTarget();
+  await runMediaUrlPipeline(fakeDeps({
+    resolveSpotify: async (url, signal) => { seen.push(signal); return 'https://www.youtube.com/watch?v=abcdefghijk'; },
+  }), target, { url: 'https://open.spotify.com/track/x', enqueueOnly: true, signal: controller.signal });
+  await runMediaUrlPipeline(fakeDeps({
+    resolveAppleMusic: async () => ({ tracks: [{ title: 'Song', artist: 'Artist' } as AppleMusicTrack] }),
+    appleTrackToYouTube: async (_track, signal) => { seen.push(signal); return 'https://www.youtube.com/watch?v=abcdefghijk'; },
+  }), target, { url: 'https://music.apple.com/us/album/x/1?i=2', enqueueOnly: true, signal: controller.signal });
+  assert.deepEqual(seen, [controller.signal, controller.signal]);
+});
+
+test('a cancelled playlist expansion reports the cancellation, not a resolve failure', async () => {
+  const controller = new AbortController();
+  const { target } = fakeTarget();
+  const pending = runMediaUrlPipeline(fakeDeps({
+    expandYouTube: (_url, _cap, signal) => new Promise((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(new Error('process killed')), { once: true });
+    }),
+  }), target, { url: 'https://www.youtube.com/playlist?list=PL123', enqueueOnly: true, signal: controller.signal });
+  controller.abort(new Error('cancelled'));
+  await assert.rejects(pending, /cancelled/);
+});

@@ -4,6 +4,53 @@ export type BotAvatarMode = 'none' | 'default' | 'custom';
 
 export type VoiceBotStatus = 'stopped' | 'starting' | 'connected' | 'playing' | 'paused' | 'error';
 
+export interface BotAutomationSettings {
+  enabled: boolean;
+  source: { kind: 'playlist' | 'radio'; id: number } | null;
+  requireListeners: boolean;
+  quietPeriodSeconds: number;
+  retryBaseSeconds: number;
+  retryMaxSeconds: number;
+  stayInChannel: boolean;
+}
+
+export const DEFAULT_BOT_AUTOMATION_SETTINGS: BotAutomationSettings = {
+  enabled: false,
+  source: null,
+  requireListeners: false,
+  quietPeriodSeconds: 300,
+  retryBaseSeconds: 30,
+  retryMaxSeconds: 1800,
+  stayInChannel: false,
+};
+
+/** What a bot's Auto-DJ and 24/7 settings mean right now, for status badges and `!help`. */
+export interface BotAutomationOverview {
+  /** Auto-DJ is on and has a source to play. */
+  autoDj: boolean;
+  /** Where Auto-DJ plays from, when it is on. */
+  sourceKind: 'playlist' | 'radio' | null;
+  /** The bot keeps its channel (24/7). */
+  stayInChannel: boolean;
+  /** Auto-DJ, not a request, is what is playing now. */
+  playing: boolean;
+}
+
+/**
+ * Null when the bot has neither Auto-DJ nor 24/7 on, so callers show nothing. Also null
+ * while automation is suspended ("Return home"): neither feature acts until the bot is
+ * started again, so it must not be shown as on.
+ */
+export function summarizeBotAutomation(
+  settings: BotAutomationSettings | null | undefined, playing = false, suspended = false,
+): BotAutomationOverview | null {
+  if (suspended) return null;
+  const autoDj = !!settings?.enabled && !!settings.source;
+  const stayInChannel = !!settings?.stayInChannel;
+  if (!autoDj && !stayInChannel) return null;
+  return { autoDj, sourceKind: autoDj ? settings!.source!.kind : null, stayInChannel, playing: autoDj && playing };
+}
+
 export interface MusicBotSummary {
   id: number;
   name: string;
@@ -18,6 +65,7 @@ export interface MusicBotSummary {
   voicePort: number;
   volume: number;
   autoStart: boolean;
+  automationSettings?: BotAutomationSettings;
   avatarMode?: BotAvatarMode;
   avatarMd5?: string | null;
   avatarError?: string | null;
@@ -208,9 +256,9 @@ export type VideoStreamPresetKey = (typeof VIDEO_STREAM_PRESET_KEYS)[number];
 /** A fixed preset, or `auto` to pick the largest preset the source fills (capped by the Auto limit). */
 export type VideoQualityRequest = 'auto' | VideoStreamPresetKey;
 
-export const VIDEO_ENCODER_IDS = ['vp8', 'vp9', 'h264', 'vp8_vaapi', 'vp9_vaapi', 'h264_vaapi', 'h264_nvenc', 'h264_amf'] as const;
+export const VIDEO_ENCODER_IDS = ['vp8', 'vp9', 'h264', 'vp8_vaapi', 'vp9_vaapi', 'h264_vaapi', 'h264_nvenc', 'h264_amf', 'h264_videotoolbox'] as const;
 export type VideoEncoderId = (typeof VIDEO_ENCODER_IDS)[number];
-/** `auto` picks software VP8, or the first working hardware encoder (VAAPI, NVENC or AMF) when hardware is preferred. */
+/** `auto` picks software VP8, or the first working hardware encoder (VAAPI, NVENC, AMF or VideoToolbox) when hardware is preferred. */
 export type VideoEncoderRequest = 'auto' | VideoEncoderId;
 export type VideoCodec = 'vp8' | 'vp9' | 'h264';
 
@@ -282,6 +330,8 @@ export interface BotMediaOverview {
   video: Omit<VideoStreamStatus, 'source' | 'viewers' | 'sidecar'> | null;
   lastMusicStop: MediaStopInfo | null;
   lastVideoStop: MediaStopInfo | null;
+  /** Auto-DJ and 24/7 status; null or absent when both are off. */
+  automation?: BotAutomationOverview | null;
 }
 
 export interface VideoStreamPreset {
@@ -314,8 +364,27 @@ export interface VideoStreamHealth {
   checkedAt: number;
 }
 
+/** One automatic quality change made while a stream runs (Auto only). */
+export interface VideoQualityChange {
+  direction: 'down' | 'up';
+  from: VideoStreamPresetKey;
+  to: VideoStreamPresetKey;
+  at: number;
+  reason: string;
+}
+
+/** Adaptive Auto quality state. Fixed presets never adapt and carry none. */
+export interface VideoQualityAdaptation {
+  /** Preset Auto started this source at; adaptation never goes above it. */
+  ceiling: VideoStreamPresetKey;
+  lastChange: VideoQualityChange | null;
+  /** Automatic changes made on this source so far. */
+  changes: number;
+}
+
 export interface VideoStreamQualityInfo {
   requested: VideoQualityRequest;
+  /** Preset being encoded now; below `adaptation.ceiling` while Auto is reduced. */
   actual: VideoStreamPresetKey;
   width: number;
   height: number;
@@ -324,6 +393,8 @@ export interface VideoStreamQualityInfo {
   sourceHeight: number | null;
   /** Why Auto chose what it chose, when not obvious (probe failure, capped by limit). */
   note: string | null;
+  /** Present while an Auto stream runs; null or absent for fixed presets. */
+  adaptation?: VideoQualityAdaptation | null;
 }
 
 export interface VideoStreamEncoderInfo {
@@ -335,6 +406,13 @@ export interface VideoStreamEncoderInfo {
   codec: VideoCodec;
   hardware: boolean;
   fallbackReason: string | null;
+  /**
+   * Video decoder of an AV1 source: "av1 (vaapi)" or "av1 (cuda)" on the GPU,
+   * a software decoder such as "libdav1d" on the CPU. Null or absent for other sources.
+   */
+  decoder?: string | null;
+  /** Why an AV1 source that started on the GPU decoder fell back to software. */
+  decoderFallbackReason?: string | null;
   note: string | null;
 }
 
@@ -394,7 +472,7 @@ export interface VideoStreamSettings {
   /** Highest preset Auto may select. */
   autoMaxPreset: VideoStreamPresetKey;
   defaultEncoder: VideoEncoderRequest;
-  /** Let `auto` use a working hardware encoder (VAAPI, NVENC or AMF). */
+  /** Let `auto` use a working hardware encoder (VAAPI, NVENC, AMF or VideoToolbox). */
   preferHardware: boolean;
   /** Clamp for any stream bitrate in kbps; 0 = no clamp. */
   maxBitrateKbps: number;
@@ -457,6 +535,19 @@ export interface VideoEncoderCapabilities {
   vaapiDevicePresent: boolean;
   hwDecode: boolean;
   encoders: VideoEncoderCapability[];
+  /** Whether FFmpeg decodes AV1 on a GPU here; used only with VIDEO_HW_DECODE=1 (sidecar 1.11+). */
+  av1HwDecode?: boolean;
+  /** One AV1 test decode per GPU found (sidecar 1.11+). */
+  av1Decode?: VideoAV1DecodeProbe[];
+}
+
+/** One AV1 test decode on a GPU (FFmpeg's own AV1 decoder on that hwaccel). */
+export interface VideoAV1DecodeProbe {
+  hwaccel: 'vaapi' | 'cuda';
+  device?: string;
+  available: boolean;
+  error?: string;
+  command?: string;
 }
 
 export interface VideoViewerInfo {
@@ -507,4 +598,31 @@ export interface StartVideoStreamRequest {
 
 export interface SetVideoSourceRequest {
   source: string;
+}
+
+/** One video waiting in (or playing from) a bot's video queue. */
+export interface VideoQueueItemInfo {
+  id: string;
+  /** The address the user gave: a watch URL or a music-folder filename. */
+  source: string;
+  title: string;
+  durationSec?: number;
+  sourceMode: VideoSourceModeRequest;
+  addedBy?: string;
+}
+
+export interface VideoQueueState {
+  current: VideoQueueItemInfo | null;
+  upNext: VideoQueueItemInfo[];
+  /** True when items are waiting and no queued stream is running. */
+  kept: boolean;
+}
+
+export interface QueueVideoResponse {
+  success: true;
+  queued: number;
+  started: boolean;
+  playlistTitle?: string;
+  truncated?: boolean;
+  state: VideoQueueState;
 }

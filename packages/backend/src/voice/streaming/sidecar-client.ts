@@ -5,7 +5,7 @@
 
 import type { VideoCodec, VideoCpuPriority, VideoEncoderCapabilities, VideoEncoderId, VideoSourceMode } from '@ts6/common';
 import path from 'node:path';
-import { resolvePathUnderMusicDir } from './video-download.js';
+import { resolvePathUnderMusicDir, type SourceVideoCodec } from './video-download.js';
 
 /** Encoder the sidecar reports running after POST /source. */
 export interface SidecarEncoderSession {
@@ -14,6 +14,10 @@ export interface SidecarEncoderSession {
   codec: VideoCodec;
   hardware: boolean;
   fallbackReason?: string;
+  /** GPU path or selected software AV1 decoder, such as "av1 (vaapi)" or "libdav1d" (sidecar 1.11+). */
+  decoder?: string;
+  /** Why an AV1 source that started on the GPU decoder fell back to software. */
+  decoderFallbackReason?: string;
   state: string;
   exitError?: string;
 }
@@ -37,12 +41,14 @@ export interface SidecarSourceOptions {
   cpuPriority?: VideoCpuPriority;
   /** Second remote input carrying the audio, when `source` is video only (YouTube direct). */
   audioSource?: string;
-  /** Start a VOD or file source at this offset in seconds (a seek); live sources ignore it. */
-  startSeconds?: number;
   /** Send the source's own H.264 without re-encoding it (the caller has checked it can be copied). */
   passthrough?: boolean;
   /** Direct streams: pace the video's packets at this multiple of its bitrate (0 = off). */
   pacing?: number;
+  /** Start an on-demand source at this offset in seconds: a seek, a resume, or a restart at a new quality. Live sources ignore it. */
+  startAtSecs?: number;
+  /** The source's video codec when known (YouTube direct), so the sidecar can decode AV1 on the GPU. */
+  videoCodec?: SourceVideoCodec;
 }
 
 export interface SidecarConvertOptions {
@@ -89,6 +95,8 @@ export interface SidecarStreamHealth {
   belowRealtime: boolean;
   belowRealtimeSecs: number;
   sampleAgeSecs: number;
+  /** Playback position in the source (sidecar 1.11+; absent until ffmpeg reports a time). */
+  positionSecs?: number;
 }
 
 export interface SidecarStats {

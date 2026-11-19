@@ -32,7 +32,7 @@ Built on the **WebQuery HTTP API** (the ServerQuery replacement in modern TeamSp
 
 ## Documentation
 
-The maintained public documentation is available at **[www.uniskela.com/docs/ts6-manager](https://www.uniskela.com/docs/ts6-manager/)** and is sourced from the reviewed Markdown files in [`docs/`](docs/index.md).
+The maintained public documentation is available at **[www.uniskela.com/docs/ts6-manager](https://www.uniskela.com/docs/ts6-manager/)** and is sourced from the reviewed Markdown files in [`docs/public/`](docs/public/index.md).
 
 Start with:
 
@@ -60,61 +60,61 @@ If you use Codex, Cursor, Claude Code, or another assistant with [Context7 MCP](
 ### Dashboard
 Live overview of your selected server, organized into Server Status, Traffic, and Runtime & Capacity with current refresh state.
 
-![Dashboard](docs/dashboard.png)
+![Dashboard](docs/public/dashboard.png)
 
 ### Channels and Clients
 Browse the channel tree with connected clients, mute/away status, and password indicators, then review the sortable client list with search and per-client actions.
 
-![Channel Tree](docs/channels.png)
+![Channel Tree](docs/public/channels.png)
 
-![Clients](docs/clients.png)
+![Clients](docs/public/clients.png)
 
 ### Server Groups and Permissions
 Manage group membership and edit permissions with readable Simple labels or raw Technical names.
 
-![Server Groups](docs/server-groups.png)
+![Server Groups](docs/public/server-groups.png)
 
-![Permission Editor](docs/permissions-editor.png)
+![Permission Editor](docs/public/permissions-editor.png)
 
 ### Server Logs
 Bounded, paged `logview` output with level badges and page-local search and level filters.
 
-![Server Logs](docs/server-logs.png)
+![Server Logs](docs/public/server-logs.png)
 
 ### Bot Hub
 The bot list and one place for what every bot is doing right now: the current track or stream, channel, video quality, viewers, and last stop reason. Each bot has **Open console** for playback, and the page links to Bot Flows, Media Library, Streaming defaults and IPTV.
 
-![Bot Hub](docs/bot-hub.png)
+![Bot Hub](docs/public/bot-hub.png)
 
 ### Music Bots
 Run multiple music bots per server. Each bot has its own queue, volume control, and playback state. Supports radio streams, YouTube, and a local music library. Admins can import stations from [Community Radio Browser](https://www.radio-browser.info/) under Media Library → Radio stations. Users in the bot's channel can control it via text commands (`!radio`, `!play`, `!vol`, etc.).
 
-![Music Bots](docs/musicbots.png)
+![Music Bots](docs/public/musicbots.png)
 
 ### Video Streaming / IPTV
 Browse channels from configured M3U/M3U8 playlist URLs and stream a selected channel through a running music bot and the video sidecar.
 
-![Video Streaming and IPTV](docs/iptv.png)
+![Video Streaming and IPTV](docs/public/iptv.png)
 
 ### Bot Flow Engine
 Visual node-based editor for building automated server workflows. Readable orthogonal routes, labelled condition branches, and a canvas sized from the real flow keep larger automations navigable. Unsaved drafts are protected from normal in-app navigation and query refreshes.
 
-![Flow Editor](docs/flow-editor.png)
+![Flow Editor](docs/public/flow-editor.png)
 
 ### Flow Templates
 Get started quickly with pre-built flow templates. Covers common use cases like temporary channel creation, AFK movers, idle kickers, online counters, and group protection. One click to import, then customize to your needs.
 
-![Flow Templates](docs/flow-templates.png)
+![Flow Templates](docs/public/flow-templates.png)
 
 ### Try it without TeamSpeak
-The Demo TeamSpeak Server connection provides synthetic channels, clients, groups, permissions, bans, and logs so you can explore the UI without a real server. The Channels, Clients, Groups, Permission Editor, and Logs screenshots above were captured from it. See [Configuration](docs/configuration.md#demo-server-for-ui-testing).
+The Demo TeamSpeak Server connection provides synthetic channels, clients, groups, permissions, bans, and logs so you can explore the UI without a real server. The Channels, Clients, Groups, Permission Editor, and Logs screenshots above were captured from it. See [Configuration](docs/public/configuration.md#demo-server-for-ui-testing).
 
-![Demo connection](docs/demo-connection.png)
+![Demo connection](docs/public/demo-connection.png)
 
 ### Permissions Compare
 Compare two to four entities from the same permission layer in a read-only table. Simple or technical labels and Set on any / Differences only filters make raw values, unset states, Skip, and Negate flags easier to review.
 
-![Permissions Compare](docs/permissions-compare.png)
+![Permissions Compare](docs/public/permissions-compare.png)
 
 ## Features
 
@@ -153,7 +153,7 @@ Compare two to four entities from the same permission layer in a read-only table
 - M3U/M3U8 playlist URL management; administrators can also upload `.m3u`, `.m3u8`, or `.txt` playlist files (see [Video streaming](https://www.uniskela.com/docs/ts6-manager/latest/video-streaming/)); channel browsing, filtering, and music-bot streaming
 - In-browser preview with WebRTC playback
 - A/V synchronization via RTCP Sender Reports
-- Runs as a Docker sidecar container alongside the backend
+- Runs as a Docker sidecar container alongside the backend; optional [native binaries](docs/public/native-sidecar.md) are published with each release for host GPU encoders
 
 ### Bot Flow Engine
 - Visual flow editor with drag-and-drop nodes, dynamic canvas extents, rounded orthogonal routes, and labelled True/False branches
@@ -247,7 +247,7 @@ Prebuilt images are published only for immutable `vX.Y.Z` releases created by Re
 | Sidecar  | `ghcr.io/uniskela/ts6-manager/sidecar:latest` |
 | All-in-one | `ghcr.io/uniskela/ts6-manager/all-in-one:latest` |
 
-**Docker Hub (mirror)** — same digests, flat tags on [`uniskela/ts6-manager`](https://hub.docker.com/r/uniskela/ts6-manager), published only when both `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets are set (otherwise GHCR still publishes and Hub tags may be missing or stale). After a successful image publish, the same secrets also push this README (Hub truncates at 25k bytes) and the GitHub repository short description onto that Hub page:
+**Docker Hub (mirror)** — same digests, flat tags on [`uniskela/ts6-manager`](https://hub.docker.com/r/uniskela/ts6-manager), published only when both `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets are set (otherwise GHCR still publishes and Hub tags may be missing or stale). After a successful image publish, a separate Hub token (`DOCKERHUB_DESCRIPTION_TOKEN` in the `dockerhub-description` environment) puts the GitHub repository short description and a shortened copy of this README on that Hub page, linking back to the full README for that release:
 
 | Service  | Image |
 |----------|--------|
@@ -290,7 +290,7 @@ docker compose up -d
 
 > `JWT_SECRET`, `ENCRYPTION_KEY`, and `SIDECAR_SECRET` are **required** in production. The backend refuses to start without them when `NODE_ENV=production`.
 > The sidecar HTTP API is authenticated with `SIDECAR_SECRET` and is not published to the host by default.
-> Browser WebRTC preview needs a published UDP mux (`WEBRTC_UDP_PORT`, often `10000`) and `WEBRTC_NAT1TO1_IP` - see `docker-compose.pr-test.yml` and [Video streaming](docs/video-streaming.md).
+> Browser WebRTC preview needs a published UDP mux (`WEBRTC_UDP_PORT`, often `10000`) and `WEBRTC_NAT1TO1_IP` - see `docker-compose.pr-test.yml` and [Video streaming](docs/public/video-streaming.md).
 
 ### Connection credentials and upgrades
 
@@ -413,6 +413,7 @@ Defaults below are the **sidecar code defaults**. Compose files may intentionall
 | `SYNC_MAX_DELAY_MS` | `1000` | The most one track is held back to meet the other, and how long the first track waits for the other to start |
 | `AUDIO_DELAY_MS` | `0` | Optional manual audio delay; normally leave at `0` with adaptive pacing |
 | `SIDECAR_DEBUG_LOGS` | `0` | Set to `1` to enable verbose high-frequency runtime logs |
+| `SIDECAR_HOST` | unset | Address the sidecar HTTP API listens on. Unset listens on all interfaces (Docker). Set it for a [native sidecar](docs/public/native-sidecar.md). |
 | `VIDEO_RTP_READ_BUFFER` | `4194304` | Requested UDP socket read buffer for video RTP |
 | `AUDIO_RTP_READ_BUFFER` | `1048576` | Requested UDP socket read buffer for audio RTP |
 | `VIDEO_WIDTH` | `1280` | Default output width when not supplied by the API |
@@ -439,6 +440,8 @@ When a music bot is connected to a configured command channel, users there can c
 - **`!commands`** - List enabled custom chat commands
 - **`!play <url>`** - Play YouTube, Spotify, or Apple Music media
 - **`!play`** - Resume paused playback
+- **`!history`** - Show this bot's 10 most recent requests
+- **`!again [id]`** - Replay a stored request by ID, or the latest one
 - **`!queue [show|clear|remove <n>|play <n>|<url>]`** - Show or manage the queue using one-based positions
 - **`!add <url>`** - Alias for `!queue <url>`
 - **`!playlist [name-or-id]` / `!pl <name-or-id>`** - List or append a saved playlist; an idle connected bot resumes queue order
@@ -449,6 +452,8 @@ When a music bot is connected to a configured command channel, users there can c
 - **`!stop`** - Stop playback
 - **`!pause`** - Toggle pause/resume
 - **`!skip` / `!next`** - Next track in queue
+- **`!voteskip`** - Vote to skip the current track; more than half of human listeners in the bot channel must vote
+- **`!remote [bot name]`** - Get a private one-time link to a phone listener remote
 - **`!prev`** - Previous track
 - **`!vol [0-100]` / `!volume [0-100]`** - Show or set volume for music, radio, video, and IPTV
 - **`!np` / `!nowplaying`** - Show the current track

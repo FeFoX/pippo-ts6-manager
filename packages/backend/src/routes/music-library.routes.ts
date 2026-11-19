@@ -25,6 +25,7 @@ import {
   youtubeIdFromFilename,
 } from '../voice/audio/metadata.js';
 import { loadMaxPlaylistImport } from '../utils/app-settings.js';
+import { removeSongFileIfUnused, withLibraryFileLock } from '../voice/audio/library-files.js';
 import type { VoiceBotManager } from '../voice/voice-bot-manager.js';
 import multer from 'multer';
 import path from 'path';
@@ -34,6 +35,8 @@ import { randomUUID } from 'crypto';
 import rateLimit from 'express-rate-limit';
 
 const MUSIC_DIR = process.env.MUSIC_DIR || '/data/music';
+/** Uploads in progress; the scan skips them. */
+const UPLOADING_PREFIX = '.uploading-';
 const ALLOWED_EXTENSIONS = ['.mp3', '.wav', '.flac', '.ogg', '.opus', '.m4a', '.aac', '.wma', '.webm'];
 /** Cap Apple Music → YouTube matches for library info / import previews. */
 const APPLE_MUSIC_INFO_CAP = 100;
@@ -236,11 +239,22 @@ async function enrichYouTubeIdFile(
   };
 }
 
+/** Where an upload is written, and where it is published; built only from our own id and a known extension. */
+interface UploadPaths { temp: string; final: string }
+const uploadPaths = new WeakMap<Request, UploadPaths>();
+
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, MUSIC_DIR),
-  filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    cb(null, `${randomUUID()}${ext}`);
+  filename: (req, file, cb) => {
+    // The file filter has already accepted the extension; take it from the list, not the request.
+    const ext = ALLOWED_EXTENSIONS.find((allowed) => allowed === path.extname(file.originalname).toLowerCase());
+    if (!ext) { cb(new Error('Unsupported file type'), ''); return; }
+    const id = randomUUID();
+    // A temporary name the scan ignores (it keeps the extension for probing);
+    // the upload is published under the library lock.
+    const name = `${UPLOADING_PREFIX}${id}${ext}`;
+    uploadPaths.set(req as Request, { temp: path.join(MUSIC_DIR, name), final: path.join(MUSIC_DIR, `${id}${ext}`) });
+    cb(null, name);
   },
 });
 
@@ -347,6 +361,34 @@ musicLibraryRoutes.get('/songs/search', async (req: Request, res: Response, next
   } catch (err) { next(err); }
 });
 
+/**
+ * SQLite write conflicts surface from Prisma as P2034 or a "database is locked"
+ * error; P2028 is a transaction that could not start in time behind another one.
+ */
+function isWriteConflict(err: any): boolean {
+  return err?.code === 'P2034' || err?.code === 'P2028' || /database is locked|SQLITE_BUSY/i.test(String(err?.message ?? ''));
+}
+
+/**
+ * Add a row for a scanned file, unless the file is gone or this server already
+ * has a row for it. The check and the insert run in one transaction, retried a
+ * few times when another writer holds the database.
+ */
+async function adoptScannedFile(prisma: any, configId: number, filePath: string, data: Record<string, unknown>) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await prisma.$transaction(async (tx: any) => { // NOSONAR: retries run one after another
+        if (!fs.existsSync(filePath)) return null;
+        const taken = await tx.song.findFirst({ where: { serverConfigId: configId, filePath } });
+        return taken ? null : tx.song.create({ data });
+      });
+    } catch (err) {
+      if (attempt >= 3 || !isWriteConflict(err)) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 50 * attempt)); // NOSONAR: back off before the next attempt
+    }
+  }
+}
+
 // POST /scan — Import audio files already present under MUSIC_DIR
 musicLibraryRoutes.post('/scan', heavyMusicOpLimiter, async (req: Request, res: Response, next) => {
   try {
@@ -366,7 +408,7 @@ musicLibraryRoutes.post('/scan', heavyMusicOpLimiter, async (req: Request, res: 
     const created: unknown[] = [];
 
     for (const entry of entries) {
-      if (!entry.isFile()) continue;
+      if (!entry.isFile() || entry.name.startsWith(UPLOADING_PREFIX)) continue;
       const ext = path.extname(entry.name).toLowerCase();
       if (!ALLOWED_EXTENSIONS.includes(ext)) continue;
       const filePath = path.join(MUSIC_DIR, entry.name);
@@ -406,7 +448,9 @@ musicLibraryRoutes.post('/scan', heavyMusicOpLimiter, async (req: Request, res: 
         continue;
       }
 
-      const stat = fs.statSync(filePath);
+      // Removals do not wait for a scan, so a listed file can be gone by now.
+      const stat = fs.statSync(filePath, { throwIfNoEntry: false });
+      if (!stat) continue;
       let songData: {
         title: string;
         artist: string | null;
@@ -472,7 +516,11 @@ musicLibraryRoutes.post('/scan', heavyMusicOpLimiter, async (req: Request, res: 
         };
       }
 
-      const song = await prisma.song.create({ data: songData });
+      // Adopting the file runs under the library file lock, after the slow probing above:
+      // a removal cannot delete it between its last reference check and this row.
+      // Only files without a row in `knownByPath` get here; the check is repeated under the lock.
+      const song = await withLibraryFileLock(() => adoptScannedFile(prisma, configId, filePath, songData)); // NOSONAR: files are adopted one at a time, each briefly under the lock
+      if (!song) continue;
       created.push(song);
       imported++;
     }
@@ -487,49 +535,103 @@ musicLibraryRoutes.post('/upload', musicWriteLimiter, upload.single('file'), asy
     const prisma = req.app.locals.prisma;
     const configId = parseInt(req.params.configId as string);
     const file = req.file;
-    if (!file) throw new AppError(400, 'No file uploaded');
+    const paths = uploadPaths.get(req);
+    if (!file || !paths) throw new AppError(400, 'No file uploaded');
 
-    const tags = await probeAudioTags(file.path);
+    const tags = await probeAudioTags(paths.temp);
     const fromName = parseTitleArtistFromFilename(file.originalname);
     const title = tags.title || fromName.title;
     const artist = tags.artist || fromName.artist;
     let duration = tags.duration ?? null;
     if (duration == null) {
-      try { duration = await getAudioDuration(file.path); } catch { /* ignore */ }
+      try { duration = await getAudioDuration(paths.temp); } catch { /* ignore */ }
     }
 
-    const song = await prisma.song.create({
-      data: {
-        title,
-        artist,
-        duration,
-        filePath: file.path,
-        source: 'local',
-        fileSize: file.size,
-        serverConfigId: configId,
-      },
+    // Publish the file under its final name together with its row.
+    const finalPath = paths.final;
+    const song = await withLibraryFileLock(async () => {
+      fs.renameSync(paths.temp, finalPath);
+      try {
+        return await prisma.song.create({
+          data: {
+            title,
+            artist,
+            duration,
+            filePath: finalPath,
+            source: 'local',
+            fileSize: file.size,
+            serverConfigId: configId,
+          },
+        });
+      } catch (err) {
+        // Nothing else can know this fresh name yet: no row, no file.
+        fs.rmSync(finalPath, { force: true });
+        throw err;
+      }
     });
 
     res.status(201).json(song);
-  } catch (err) { next(err); }
+  } catch (err) {
+    // A failed upload leaves no temporary file behind (it was never published).
+    const paths = uploadPaths.get(req);
+    if (paths) fs.rm(paths.temp, { force: true }, () => undefined);
+    next(err);
+  }
 });
+
+/** Files the bots have playing or queued. */
+function queuedSongFiles(manager: VoiceBotManager | undefined): string[] {
+  const files: string[] = [];
+  for (const { id } of manager?.listBots() ?? []) {
+    const bot = manager?.getBot(id);
+    if (!bot) continue;
+    for (const item of [bot.nowPlaying, ...bot.queue.getAll()]) {
+      if (item?.filePath) files.push(item.filePath);
+    }
+  }
+  return files;
+}
+
+/** A route id written as a plain positive whole number ("12", not "1e1", "0x0c" or "12abc"); otherwise null. */
+function positiveId(raw: unknown): number | null {
+  if (typeof raw !== 'string' || !/^[1-9]\d*$/.test(raw)) return null;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) ? n : null;
+}
 
 // DELETE /songs/:id — Delete song
 musicLibraryRoutes.delete('/songs/:id', musicWriteLimiter, async (req: Request, res: Response, next) => {
   try {
     const prisma = req.app.locals.prisma;
-    const id = parseInt(req.params.id as string);
-    const song = await prisma.song.findUnique({ where: { id } });
+    const configId = positiveId(req.params.configId);
+    const id = positiveId(req.params.id);
+    // Only songs of the server in the URL: another server's song is "not found" and nothing is removed.
+    const scope = { id, serverConfigId: configId };
+    const song = id !== null && configId !== null
+      ? await prisma.song.findFirst({ where: scope })
+      : null;
     if (!song) throw new AppError(404, 'Song not found');
 
-    // Remove file from disk
+    const { count } = await prisma.song.deleteMany({ where: scope });
+    // Removed by a concurrent request in the meantime.
+    if (count === 0) throw new AppError(404, 'Song not found');
+    // The file goes too, unless something else still uses it (see removeSongFileIfUnused).
     try {
-      if (fs.existsSync(song.filePath)) {
-        fs.unlinkSync(song.filePath);
-      }
-    } catch { /* ignore file deletion failure */ }
-
-    await prisma.song.delete({ where: { id } });
+      const outcome = await removeSongFileIfUnused({
+        filePath: song.filePath,
+        musicDir: MUSIC_DIR,
+        otherSongPaths: async () => (await prisma.song.findMany({
+          where: { id: { not: id }, filePath: { not: '' } },
+          select: { filePath: true },
+        })).map((row: { filePath: string }) => row.filePath),
+        queuedPaths: () => queuedSongFiles(req.app.locals.voiceBotManager),
+        onUnverifiable: (file, reason) => console.warn(`[MusicLibrary] Could not identify ${file} (${reason}); keeping the file of removed song ${id}`),
+      });
+      if (outcome !== 'removed' && outcome !== 'missing') console.log(`[MusicLibrary] Kept the file of removed song ${id} (${outcome})`);
+    } catch (err) {
+      // The song is gone; a file that could not be removed stays and is logged.
+      console.warn(`[MusicLibrary] Could not remove the file of song ${id}: ${(err as NodeJS.ErrnoException).code ?? (err as Error).name}`);
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });

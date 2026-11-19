@@ -1,0 +1,346 @@
+# Media bots
+
+TS6 Manager can run multiple TeamSpeak media bots per server. Each bot has independent playback, queue, and volume state.
+
+## Bot Hub
+
+**Automation → Bot Hub** (`/bot-hub`) is the list of media bots. Each card shows live connection/playback status, current media, channel, progress, volume, and, for video, quality, encoder, viewers, uptime, the no-viewer auto-stop countdown and last stop reason. Live status reads in-memory bot state; it does not probe the media sidecar or TeamSpeak Query.
+
+Use **New bot** to create a bot with a single **Name**, used as both the admin label and TeamSpeak nickname. Names must be 3–30 characters; the web UI and API reject out-of-range nicknames before connecting. If the API request omits `nickname`, it uses `MediaBot`. Each card's settings menu provides **Edit bot**, **Start bot** or **Stop bot**, **Widget link**, and **Delete bot**. The same menu is available as **Bot settings** in the console header. Bots can reconnect automatically with exponential backoff and overlap protection.
+
+![Bot Hub showing one playing bot and one idle bot](bot-hub.png)
+
+A bot plays music **or** video, never both, and only one video stream runs at a time. See [Video streaming — one media session at a time](video-streaming.md#one-media-session-at-a-time). Start/stop failures use the [API error contract](api-errors.md).
+
+## Bot console
+
+Choose **Open console** on a Bot Hub card to open `/bot-hub/:botId`. **Now playing** shows that bot's current media and playback controls. **Up next** holds its music queue; use the drag handles to reorder with a mouse, touch or keyboard, play a queued item now, remove an item, or **Clear** the queue. With a keyboard, focus a drag handle, press Space to pick up, use the arrow keys to move, then press Space to drop or Escape to cancel.
+
+![Bot console with Now playing, Up next and source tabs](musicbots.png)
+
+Under **Play something**, choose a source:
+
+- **Music** — Choose **Songs**, **Playlists**, or **Recent requests**; search songs by title or artist. The play button starts an item; the queue button adds it without interrupting playback.
+- **Link** — Paste a supported URL and choose **Play as music** or **Stream as video**. For video, a filename can refer to a file already in the music folder; local music files play from **Music**. See [Video streaming](video-streaming.md).
+- **Radio** — Search stations or filter by mood, then play a station. Moods come from each station's **Mood or genre** in **Media Library → Radio stations**.
+- **IPTV** — Browse groups or search across playlists, filter by **Playlist**, and use **Favourites** or **Recent**. See [IPTV playlists](video-streaming.md#iptv-playlists).
+
+Each **Play something** tab has a **+** link to the matching manage page: **Add songs**, **Add playlist** or **Manage requests** on Music, **Add files** on Link, **Add station** on Radio, and **Add playlist** on IPTV. The link only opens that page.
+
+If the bot is offline, the console offers **Start bot** before showing its sources. When a start conflicts with an active media session, **Replace what is playing?** lists what will stop. Choose **Keep playing** to cancel or **Stop and switch** to replace it.
+
+Radio and video keep the music queue. **Play queue** resumes the upcoming songs, with the replacement prompt when needed; while radio plays and nothing is queued, **Up next** is hidden. While a video streams, **Up next** lists the bot's queued videos and a waiting music queue is shown as one line below it; see [Queue videos and playlists](video-streaming.md#queue-videos-and-playlists). Radio shows the station and live status rather than track progress or skip controls. Music controls include pause/resume, skip and volume; **Up next** also provides **Shuffle** and repeat modes.
+
+**Queue limits.** A bot's music queue holds at most 5,000 tracks, played and waiting together, whether they come from the console, chat, a Bot Flow, a playlist import or replayed history. A request that does not fit is refused with a message, and a playlist or multi-track link is queued whole or not at all. The queue keeps the last 50 played tracks for `!prev`; older ones are removed as playback moves on. With repeat set to **queue**, nothing is removed, because played tracks come round again. Shuffle only reorders the tracks still to play. If the queue moves under an open console (for example, a played track was removed), a play, remove or reorder is refused with **The queue changed** instead of changing a different track; try again once **Up next** refreshes.
+
+## Auto-DJ and 24/7 presence
+
+Open **Bot settings → Auto-DJ & 24/7** on a Bot Hub card or in its console. Existing bots have automation off. Enable Auto-DJ and choose a saved playlist or radio station for that server. Playlist tracks play in saved order, continuing after the last automated track across restarts; a playlist with multiple tracks avoids immediate repeats.
+
+Auto-DJ fills idle time only when neither request queue has upcoming items and no human media is playing or paused. A new music request immediately interrupts automated music or live radio. Automated tracks stay outside the request queue, so request shuffle and repeat controls keep their normal meaning. A kept video queue waits for **Play queue** and blocks Auto-DJ.
+
+**Require a human listener** (off by default) suspends automated playback when the last human leaves, excluding managed media bots and Query clients. It resumes when a listener returns. With this rule off, automated audio continues in an empty channel; ordinary human playback and video retain their existing auto-stop policies.
+
+Manual **Stop** or **Clear queue** starts the saved quiet period (five minutes by default). Requests can still play during that period. Broken sources retry with exponential backoff, starting at 30 seconds and capped at 30 minutes by default. Short radio dropouts count as failures. Quiet periods, retry deadlines and playlist position survive a Manager restart.
+
+**Keep bot in channel (24/7)** reserves the channel from automatic idle-bot summons and restores the most recently joined channel on reconnect. An explicitly targeted `!here <id>` can still move it. Enable **Auto-start** in **Edit bot** to reconnect after a Manager restart. **Stop bot** leaves the server and suppresses auto-start until **Start bot**. **Return home (suspend automation)** reconnects in the configured default channel (or the server's default) and keeps automation suspended. Stop and start the bot to re-enable it. These manual overrides survive restarts.
+
+A bot with either setting on shows it without opening the dialog: its Bot Hub card and console header carry an **Auto-DJ** badge (**Auto-DJ playing** while automated music is on) and a **24/7** badge. In chat, `!help` ends with a **This bot** section that tells listeners Auto-DJ is on, whether it plays a saved playlist or a radio station, and that requests play first. Neither is shown while automation is suspended by **Return home**. Auto-DJ plays the playlist or station an admin chose; it does not pick similar music by itself.
+
+## Media Library
+
+**Automation → Media Library** (`/media-bots`) manages media shared by every bot on a server. Select the server, then choose one of its five tabs:
+
+| Tab | Purpose |
+|-----|---------|
+| **Library** | Manage local/downloaded songs and media imports. |
+| **Playlists** | Create and edit saved playlists. |
+| **Radio stations** | Add stations manually, from built-in presets, or by searching [Community Radio Browser](https://www.radio-browser.info/), then edit name, stream URL and mood or genre. **Play** on each station starts it on a running bot for the selected server. When several bots are running, pick the target under **Play on**. With no running bot, **Play** stays visible but disabled and the hint points to Bot Hub. |
+| **Requests** | Review `!play` history and replay or enqueue a request. |
+| **Streaming defaults** | Set defaults for future streams and auto-stop chat notices. |
+
+Use a bot's console to choose sources and control playback. Changes to video options in the console apply to that one stream; **Streaming defaults** stay as they are. The console's source lists offer 25, 50 or 100 items per page and remember the chosen size for each list.
+
+Old links still work: `/music-bots` redirects to `/media-bots`; the old **Bots** tab goes to Bot Hub, and **Queue** with a bot ID goes to its console. **Video** with a bot ID goes to the console, otherwise to **Streaming defaults**. **Commands** goes to **Bot Flows → Chat commands**.
+
+## Auto-stop chat notices
+
+**Media Library → Streaming defaults → Announce auto-stops in chat** is enabled by default. When a bot stops music or radio because its channel is empty, it posts a line such as `Stopped the music: the channel was empty for 5 minutes.` or `Stopped radio: the channel was empty for 5 minutes.` Video auto-stops also explain an empty channel or lack of viewers, for example `Stopped the stream: nobody watched for 5 minutes.` The duration follows the configured timeout.
+
+When the video no-viewer timeout is longer than 60 seconds, the bot warns one minute before stopping: `Nobody is watching. The stream stops in 1 minute.` A viewer joining cancels the warning timer and stop countdown. Timeouts of 60 seconds or less skip the warning. All notices use the existing TeamSpeak flood hold.
+
+Turn **Announce auto-stops in chat** off and choose **Save defaults** to suppress both the warning and stop notices. Automatic stopping remains enabled. Video and IPTV use the notice setting saved when the stream starts; music and radio use the current setting when they auto-stop.
+
+## Bot avatars
+
+Open a bot's settings menu in Bot Hub or **Bot settings** in its console, choose **Edit bot**, and use **Avatar → Upload**, **Use default**, or **None**. Uploads accept PNG, JPEG or GIF images up to 200 KB, checked by image content. TeamSpeak 6 clients leave avatars larger than about 320×320 pixels blank, so the bot shrinks larger images to fit 300×300 (keeping the aspect ratio, and keeping GIF animation) before uploading them to TeamSpeak. This uses the `ffmpeg` already shipped in the images. Bot Hub and the console still show the original upload.
+
+New bots created in the web UI use the bundled TS6 Manager app icon by default. Existing bots start with **None**. The chosen image appears on Bot Hub cards and in the console header, even when TeamSpeak refuses the upload. Bot Flows query clients do not use avatars.
+
+The bot uploads and confirms its selected image whenever it connects or the avatar changes. Its TeamSpeak server group must allow file uploads. If TeamSpeak refuses an upload, the bot stays connected and settings show:
+
+> TeamSpeak refused the avatar upload. Allow file uploads for the bot's server group, or choose None.
+
+Choosing **None** clears the avatar and asks TeamSpeak to delete the uploaded file. If TeamSpeak refuses the deletion, the old file remains on the server without being displayed as the bot's avatar.
+
+## Requests
+
+**Bot console → Music → Recent requests** and **Media Library → Requests** (`/media-bots?tab=requests`) show requests for the selected bot, including title, artist and duration when known, source, request time and availability. **Play** starts that request immediately, confirming any media it replaces. **Enqueue** adds it without interrupting playback. When several bots are running, pick the target bot. `/music-requests` redirects here.
+
+History stays in the existing database across restarts. Repeated requests update the same source's time for that bot. By default, the newest 100 unique requests are kept per bot and connection; set `MUSIC_REQUEST_HISTORY_LIMIT` in the backend process environment to a positive integer (maximum 1,000) to change the limit. For Docker, pass it in the backend service's `environment`. Oldest rows are trimmed as requests are saved. Older server-wide history remains visible to bots on that connection and is trimmed when history is read. The timestamp is the request time, including queued items, rather than proof of completed playback. History does not retain requester identities or expose raw URLs or local paths to the UI.
+
+Replay uses the stored media reference through the normal validation and permission checks. Missing files, removed sources, or references rejected by current URL policy show **Unavailable**. Chat `!again` can retry a reference after it becomes available again. A [listener remote](#listener-remote) session cannot open administrator history or replay, but what it adds is recorded in the history.
+
+## Sources
+
+Music bots support:
+
+- radio streams with ICY metadata;
+- YouTube playback through yt-dlp;
+- Spotify and Apple Music media resolution through the supported resolver path;
+- local files and downloaded media; and
+- saved playlists.
+
+Local/downloaded tracks are decoded incrementally at media speed to keep memory use bounded on long tracks.
+
+## Playlists
+
+Playlists are shared by every media bot on the same TeamSpeak server. Create and edit them in **Media Library → Playlists**, then start or enqueue them from any bot's **Music → Playlists** view. Chat `!playlist` and `!pl` use the same server-wide list, including playlists created for another bot.
+
+## Channel text commands
+
+When a bot is connected to a configured command channel, users in that channel can use built-in commands.
+
+- **`!help`** — Show built-in and custom commands
+- **`!here [id]`** / **`!come [id]`** — Summon an idle music bot to your channel (or target a bot by ID)
+- **`!commands`** — List enabled custom chat commands only
+- **`!play <url>`** — Play supported media
+- **`!play <song name>`** — Search YouTube Music and play the best match (falls back to a regular YouTube search). Queues it if something is already playing
+- **`!play`** — Resume paused playback
+- **`!history`** — Show this bot's 10 most recent requests, with request IDs, source and UTC time
+- **`!again [id]`** — Replay a stored request by ID, or the most recent request when no ID is given. Adds it to the queue while music is playing or paused. Unavailable files or blocked sources report that the media is no longer available
+- **`!queue [show|clear|remove <n>|play <n>|<url>]`** — Show or manage the queue. The list starts just before the current track, and a track keeps its number while older played tracks are removed
+- **`!add <url>`** — Alias for adding to the queue
+- **`!playlist [name-or-id]` / `!pl <name-or-id>`** — List or append a saved playlist
+- **`!repeat [off|track|queue]`** — Show or set repeat mode
+- **`!seek <seconds|+seconds|-seconds>`** — Seek within a track or a non-live video (YouTube included). Live streams and radio cannot be seeked
+- **`!remove <text>`** — Remove one unambiguous upcoming match
+- **`!shuffle [on|off]`** — Toggle or set shuffle
+- **`!stop`** — Stop playback and clear the music queue, including a playlist still expanding in the background. **Stop media** on a Bot Hub card does the same.
+- **`!pause`** — Toggle pause/resume
+- **`!skip` / `!next`** — Advance the queue
+- **`!voteskip`** — Vote to skip the current track; more than half of human listeners in the bot channel must vote. Bots do not count, each identity votes once, and changing tracks resets votes
+- **`!remote [bot name]`** — Get a private, one-time link to a phone-friendly [listener remote](#listener-remote) for the bot in your channel
+- **`!prev`** — Previous track, up to 50 back; at the oldest kept track it replays that track
+- **`!vol [0-100]` / `!volume [0-100]`** — Show or set the bot volume. The same level is used for music, radio, video, and IPTV.
+- **`!np` / `!nowplaying`** — Show the current track
+- **`!radio [id]`** — List or play radio stations
+- **`!stream <url> [preset]`** — Start a video stream. Without a preset, a YouTube or Twitch link starts at Auto quality (up to the Auto quality limit) and any other URL at the bot's stored preset (720p by default), because Auto opens the source once more to measure it; `auto`, `480p`, `720p`, `1080p`, `1440p` or `2160p` sets it
+- **`!stopstream`** — Stop the active video stream
+- **`!viewers`** — List stream viewers
+- **`!channels [search]`** — List/search IPTV channels
+- **`!tv <name>` / `!iptv <name>`** — Stream an IPTV channel
+- **`!lyrics [artist - title]`** — Show/search lyrics
+
+Custom chat commands are configured in **Bot Flows → Chat commands**, alongside the built-in list and clash warnings. See [Bot Flows](bot-flows.md).
+
+Admins can also restrict playback, queue/playlist changes, and video/IPTV commands to selected TeamSpeak server groups there. **Everyone** is the default after upgrading. Help and read-only information stay accessible, including `!history`; human listeners can still use `!voteskip`, and `!remote` is never restricted (what the remote can do follows the same permissions, see below). `!again` counts as a playback command. [Bot flows — Chat commands](bot-flows.md#chat-commands) lists which group each command belongs to. Denied controls receive a short private reply with a cooldown.
+
+### Several bots in one channel
+
+When more than one bot shares a command channel, exactly one of them answers. Name the bot to choose it: `!next Bot 2` when the command takes no other arguments, or `!vol 30 @Bot 2` when it does. The name is the bot's configured name; matching ignores case and extra spaces. An unknown name stays part of the command, so `!playlist Test` still looks up that playlist.
+
+With no name, the bot that is playing, paused or streaming answers. If none is, the lowest bot id answers; if more than one is, the lowest id among those active bots answers. `!help` shows the name syntax.
+
+### Custom command presets
+
+**Bot Flows → Chat commands** can seed recommended server-scoped canned replies shared by every music bot on that connection:
+
+| Command | Purpose |
+|---------|---------|
+| `!rules` | Server rules text |
+| `!links` | Useful links (website, Discord, donate, …) |
+| `!discord` | Discord invite (optional; can fold into `!links`) |
+| `!info` / `!about` | Short community blurb |
+
+Seeded presets start **disabled**. Edit the placeholder Markdown, then enable. `!commands` is a built-in that lists enabled customs (also shown under Custom in `!help`). Multiple bots on the same channel only send one informational reply (`!help` / `!commands` / customs) per user within a short cooldown.
+
+A `!command` that is not built in, not an enabled custom command and not a Bot Flow command trigger gets a short **Unknown command** reply pointing to `!help` and `!commands`, with a "Did you mean…" hint for near-miss typos such as `!plya`.
+
+## Listener remote
+
+The listener remote lets someone who is listening in the bot's channel see what is playing and add music from their phone, without typing chat commands. It is for listeners, not administrators.
+
+### For listeners
+
+1. Join the channel the bot is in and type `!remote` (or `!remote Bot 2` to pick a bot when several share the channel; see [Several bots in one channel](#several-bots-in-one-channel)).
+2. The bot answers in a **private message** with a link: `Your private one-time listener remote link: https://…/remote#token=…`. Open it on your phone or computer. Do not share it.
+3. The page shows **Now playing**, **Up next**, a **Library** search box and a **Media URL** box. It refreshes every five seconds while the page is visible.
+
+What you can do on the page:
+
+- see the current track and the queue (the first 50 upcoming tracks, with a count of the rest);
+- search the server's song library by title or artist and add a song with the **+** button; and
+- paste a link and choose **Request URL** to add it. A link to a playlist adds only its first track.
+
+The queue holds at most 500 items. If the bot is connected and idle, what you add starts playing at once, whether or not Auto-DJ is on. If music is playing or paused, it joins the end of **Up next**. If the bot is streaming video, it joins the music queue and does not start by itself. The remote never interrupts or replaces what is playing. If someone stops the music or a video on that bot, or clears the queue, while your link is still loading, the request is dropped and the page shows `Playback was stopped before this request was ready.`; add it again if you still want it. Skipping a track or video does not drop it. Songs and links added from the remote are recorded in the bot's [request history](#requests).
+
+What you cannot do: pause, skip, stop, seek, change the volume, reorder or clear the queue, or use any admin function. For those, use chat commands (`!skip`, `!voteskip` and so on) or ask an admin.
+
+**Permissions.** Actions follow the same **Who can use this?** settings as chat (**Bot Flows → Chat commands → Built-in command permissions**). Seeing the queue and searching the library are always available to a verified listener. **Add** buttons and the **Media URL** box appear only when you are allowed to use the **Queue and playlist changes** group, just as for `!queue <url>`. If an admin changes that setting while your page is open, the next add attempt is refused with `You are not allowed to use this command.` and the page updates.
+
+**How long it lasts.**
+
+| What | Lifetime |
+|------|----------|
+| The link | Valid for 5 minutes and works once. Opening it a second time fails. |
+| Your session | 15 minutes from the moment you open the link, no matter how much you use it. Activity does not extend it. |
+
+When the session ends, the page says the access is invalid or expired. Type `!remote` in the channel again to get a new link. The page keeps the session only in the browser's memory, so reloading or closing it also means asking for a new link.
+
+**What ends a session early:**
+
+- you leave the bot's channel or are moved out of it;
+- the bot moves to another channel or disconnects;
+- an administrator revokes access;
+- you type `!remote` again (the new link replaces the earlier link and session for that bot); and
+- the Manager backend restarts.
+
+**Rate limits** are per minute and keep the page usable for everyone: you can request about three links per minute for a bot, paste at most five links per minute for that bot (a new `!remote` link does not reset this), and only one pasted link per bot is resolved at a time. The page shows `Too many remote requests` or `A media request is already pending.` when you hit a limit; wait a minute and try again. A pasted link that takes longer than two minutes to load is cancelled with `The media link took too long to load.`; closing the page or losing access also cancels it.
+
+**What you may see in chat** when asking for a link. All of these arrive as private messages:
+
+| Reply | Meaning |
+|-------|---------|
+| `Listener remote needs a verified listener in the bot channel.` | You are not in the bot's channel, the bot is not connected, or TeamSpeak could not confirm who you are. Join the channel and try again. |
+| `Listener remote is unavailable: an admin must configure Public URL.` | No Public URL is set. Tell an admin. |
+| `Listener remote requires an HTTPS Public URL.` | The Public URL is not HTTPS. Tell an admin. |
+| `Listener remote is unavailable right now. Try again shortly.` | A temporary error, or you asked for links too often. Wait a moment. |
+
+Asking again within a couple of seconds is ignored, and nothing is sent while the bot is holding back chat because of TeamSpeak flood protection.
+
+### For administrators
+
+- **Set an HTTPS Public URL.** The link starts with the manager's Public URL. Setting the `PUBLIC_URL` environment variable is the simplest way. The same address can be saved in the UI: there is no Settings page for it, only the **Public URL of this manager** field under the hosted banner upload in a channel's edit dialog (it appears once a banner has been uploaded, or through **Change** when one is set). A saved value wins over the variable. It must be reachable from listeners' phones. A plain `http://localhost` address is accepted only outside production, for development. Links are never built from the request's `Host` header.
+- **Put it behind a reverse proxy and check `TRUST_PROXY`.** Opening a link and requests without a valid session are limited per client address (per /64 network for IPv6), so the backend must see real client addresses; signed-in listeners are limited individually. The stock Docker images set a default; behind an outer proxy, or outside the images, set `TRUST_PROXY` or every listener appears to come from the proxy and shares one limit. See [Reverse proxy — Listener remote and client IP limits](reverse-proxy.md#listener-remote-and-client-ip-limits) for the recommended values and for what to turn off in proxy logs.
+- **Run one backend.** Links, sessions and limits live in memory; a restart ends every session.
+- **Revoke access.** An administrator can end all remote sessions for a bot, or one listener's, with `POST /api/listener-remote-admin/bots/<bot id>/revoke` using the normal admin sign-in. Pass `{"uid": "<TeamSpeak unique ID>"}` to revoke one person and omit it to revoke everyone; the response is `{"revoked": <count>}`. There is no button for this in the web UI yet.
+- **Audit.** Issuing a link, adding a song or link, and revoking are recorded in the audit history with an anonymous fingerprint for listeners, never the link, session or pasted URL. Refusals are recorded as totals per 5 minutes rather than one entry per request:
+  - refused or expired access and rate limits get one entry per source (a keyed hash of the address, or the listener fingerprint), written when the 5 minutes end;
+  - a permission denial or a full queue is written at once with the listener's fingerprint, the bot and the command, and its entry shows how many followed in the same 5 minutes;
+  - each kind keeps at most 50 sources per window; the rest are added to one combined entry, so no total is lost;
+  - refusal entries have their own retention budgets (10,000 for refused access and rate limits, 10,000 for permission denials and full queues) and do not count toward the 100,000-entry audit limit, so a flood of requests cannot push other audit history out. The audit history therefore holds at most 120,000 entries;
+  - malformed requests, disallowed links and missing songs, and requests that could not be checked, are only counted in the server log.
+
+  The target column shows the total, for example `n=12;bot=4;add`.
+
+The remote cannot reach any other part of the manager: its session does not authenticate administrator pages or APIs.
+
+## Download progress
+
+Explicit library downloads run as bounded background jobs and can expose:
+
+- current and total item counts;
+- yt-dlp percentage;
+- speed;
+- ETA;
+- processing state; and
+- failure status.
+
+Progress endpoints require an authenticated administrator, the matching server, and the requesting user. Jobs are kept in memory, capped, and expire automatically. A backend restart clears progress history.
+
+## yt-dlp lifecycle
+
+Production containers do not self-update yt-dlp.
+
+The tool is installed at image build time and validated alongside FFmpeg, Node, and Deno. Deno (pinned in `.deno-version`) is the only yt-dlp JavaScript runtime configured for YouTube challenge solving (`--js-runtimes deno`). Image Node remains 20 for the Nest backend and is not an EJS fallback. To update the bundled extractor or Deno, pull a newer TS6 Manager image and recreate the container, or rebuild from a fresh image build.
+
+Administrators can confirm the currently bundled yt-dlp (and related media tools) with the demand-driven Runtime / media check on Settings → YouTube or Media Library → Library. That check is not part of live bot status polling. For a fuller report (tool versions and paths, a short test decode and encode, yt-dlp extractors, Deno and sidecar health), administrators can open **System → Diagnostics**; it runs when the page opens and again only on **Refresh**. See [Video streaming — Troubleshooting](video-streaming.md).
+
+A public-video smoke test is intentionally not a release gate because media availability, rate limits, and regional restrictions are external to the project.
+
+## Restricting who can use the bot, and limiting seeks
+
+Both settings are in the web panel (admin only) and apply at once, with no restart. Nothing is read from environment variables.
+
+- **Settings → Users → Bot access**: one or more TeamSpeak server groups, chosen from the groups of the selected server or typed by name or id. When the list is not empty, only clients in one of those groups can use the built-in chat commands (`!play`, `!stop`, `!seek`, `!help` and the rest). Everybody else gets one short refusal every 30 seconds, in the channel where they typed, and the command is not run (this includes `!here`, `!come` and `!help` typed in a channel the bot is not in). The sender's groups are read from TeamSpeak at every command, so taking the group away stops access at once. If TeamSpeak cannot be asked, or a listed group (a name or a numeric id) does not exist, nobody in that group is allowed, and the server log says which entry matched no server group. An empty list (the default) means everybody can. Custom chat commands, viewing a video stream and the web panel are not affected.
+- **Settings → YouTube → Download & Stream Limits → Seek cooldown**: how long a bot waits between two seeks on a **remote** source (a YouTube track or video, a link, a radio URL). Default `120` seconds, `0` turns it off. A seek reopens the remote resource, so this keeps repeated seeks from hammering the site. The limit counts for the whole bot, whoever asks. A seek in a file that is already on the server (a downloaded track or video) is never limited. A refused chat `!seek` tells the user how long to wait, the API answers `429`, and a flow's Voice Seek step is skipped.
+- **Settings → YouTube → Download & Stream Limits → Resume cooldown** (`resume_cooldown_seconds`; the API field is `resumeCooldownSeconds` on `PUT /api/settings/limits`): how long a bot waits between two resumes of a paused video that has no local copy and has to be opened again on its site. Default `10` seconds, range `0` to `3600`, `0` turns it off. A resume is not a seek, so it never uses up the seek cooldown. A refused resume leaves the video paused and answers `429`.
+
+Both changes are written to the audit history (`settings.bot_access_update`, `settings.limits_update`).
+
+## Direct streams (no re-encoding) and pausing a video
+
+Normally the sidecar decodes every video and encodes it again for TeamSpeak, which costs a lot of CPU
+(a 1080p picture can take more than one core). A **direct stream** sends the video as it is.
+
+**Where to turn it on.** Bot console → Link tab → *Video options* → *Streaming mode* → *Direct: no re-encoding*
+(for that start only). In chat: `!streamdirect <url> [preset]`, which is `!stream` with the same switch on.
+Nothing is stored: the default stays *Re-encode*.
+
+**What it needs.** Two kinds of picture can be copied:
+
+- **VP9** (profile 0, 8-bit 4:2:0). Its hidden frames travel in the same packet as the frame that follows, so every
+  packet is already in display order. This is what YouTube serves at 720p and above, so a YouTube video is asked for in
+  VP9 first.
+- **H.264** (8-bit 4:2:0) **without B-frames**. Viewers decode packets in the order they arrive, and a B-frame stream is
+  sent out of display order. YouTube's own H.264 has B-frames, so it is only copied when a video happens to have none
+  (most screen recordings, Twitch VODs, files you encode with `-bf 0`).
+
+Only a downloaded or local file is checked (one short `ffprobe`); a remote URL (IPTV, an HLS link, YouTube direct mode)
+is always re-encoded, and so is AV1, HEVC, 10-bit or any other picture. When the file cannot be copied the stream **still
+plays, re-encoded**, and the reason is shown on the *Now playing* card and in the chat reply. Viewers keep the codec they
+negotiated for the whole stream: a later source in another codec is re-encoded to the codec already in use.
+
+**Trade-offs.** Almost no CPU. The bandwidth is the file's own bitrate (a 1080p YouTube video is often 3–5 Mbps,
+against about 1.5 Mbps re-encoded) for every viewer. A viewer who joins late waits for the next keyframe (up to a few
+seconds). After a seek or a resume the video starts at the keyframe before the requested time. The audio is still
+encoded to Opus. The mode is chosen when the stream starts: changing the source keeps it, and `!streamdirect` on a
+running re-encoded stream asks you to `!stopstream` first.
+
+**Lost packets.** A video sent as it is has a keyframe only as often as its source does (YouTube: every few seconds),
+so one lost packet used to freeze the picture until the next keyframe while the audio went on. The sidecar now offers
+NACK to viewers and reads their feedback, so a lost packet is sent again within a few milliseconds. `GET /stats` on the
+sidecar shows `retransmissionRequests` and `keyframeRequests`; if the picture still freezes and the first stays at 0,
+the viewer is not asking for resends.
+
+**VP9 packet descriptor.** ffmpeg's VP9 packetizer labels every packet with the same one-byte descriptor, which
+tells a receiver that every frame is a keyframe and carries no picture number. After a lost packet the receiver then
+decodes the following frames against a missing reference and the picture breaks up or freezes, without ever asking for a
+keyframe. For a copied VP9 the sidecar rewrites the descriptor the way libwebrtc's own sender writes it (15-bit picture
+id, "predicted" bit on every frame but a real keyframe, layer index, TL0PICIDX, and on keyframes the structure that
+says each picture depends on the one before). Measured with headless Chromium on the same video and 2% packet loss:
+10-27 s of frozen picture in 40 s before, about 2.5 s after. H.264 is not affected.
+
+**Keyframe bursts.** ffmpeg writes all the packets of a frame at the same instant, and a keyframe of a copied video
+is often ten times a normal frame: hundreds of packets at once can overflow a queue on the way (the viewer's router,
+Wi-Fi), and the lost ones freeze the picture. For direct streams the sidecar therefore spreads the packets of each
+frame over time, at a multiple of the video's own measured bitrate (Light 4×, Normal 2.5×, Strong 1.5×; a keyframe may
+arrive up to 0.6 s later; the audio is held back by the pacer's recent average delay so the two stay close). Choose it in *Media Library → Streaming defaults → Direct
+streams: smooth keyframes* (also per server); *Off* sends frames as they come. It never touches a re-encoded stream.
+
+**When the picture cannot be copied.** H.264 with B-frames (most files, including recorded TV),
+AV1, HEVC and 10-bit pictures cannot be sent as they are. By default the manager then **converts the whole video once**
+into H.264 without B-frames (x264 `ultrafast`, a keyframe every second, at the quality the stream was asked for; the
+bitrate cap is lowered to the source's own bitrate when it is known, so the file is not larger than its source), and **only when the conversion is finished** starts the stream, now copying the converted
+file. A source is read through the sidecar's network rules, as for streaming it. While it converts, the *Now playing*
+card shows the progress and a *Cancel* button (`!stopstream` cancels too), the chat is told when the conversion starts and
+ends, and the page answers "still starting" after 20 s instead of waiting for the end. The converted file is the one
+paused, seeked and copied afterwards (no remote reopening). Choose the speed, or turn it off, in *Streaming defaults →
+Direct streams: when the picture cannot be copied* (also per server): *x264 ultrafast / superfast / veryfast* (a slower
+preset gives a better picture for the same size) or *Re-encode while it plays* (no wait, the old behaviour).
+
+Not converted, and re-encoded while they play instead, with the reason on the card and in chat: a live source (it has no
+end), a video longer than *Max video duration* (default 15 min; raise it in Settings for long videos), a conversion that
+fails, a conversion that stalls (no progress for 5 minutes) or would take longer than twice the video's length, and a
+source that cannot be inspected. Only one conversion runs at a time, using at most 2 CPU threads. The sidecar writes the
+result as `.stream-<digits>.mp4` in the music folder and it is deleted when the stream ends; files a restart left
+behind are removed at the next sidecar start once they are more than four hours old.
+
+**Pausing a video.** The *Now playing* card has *Pause* / *Resume* for a finite video, and `!pause` toggles it in
+chat, as for music. Pausing stops the encode and remembers the position; the viewers stay connected and keep the last
+picture. Resume starts again from that position (a video without a local copy is opened again on its site, but resuming
+does not count against the seek cooldown, only against the shorter resume cooldown). Live streams and looping videos cannot be paused. A seek while paused plays
+from the target; a volume change while paused is applied when it plays again. Pause/resume also work through
+`POST /api/music-bots/:id/pause` and `/resume`, which now handle video as well.
+

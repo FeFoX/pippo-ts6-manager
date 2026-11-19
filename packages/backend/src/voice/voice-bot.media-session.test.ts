@@ -26,6 +26,42 @@ function fakeMusic(bot: VoiceBot) {
   b._nowPlaying = { id: '1', title: 'Neon Skyline', source: 'local', filePath: '/x.mp3' };
 }
 
+describe('stale radio startup', () => {
+  for (const outcome of ['opened', 'failed']) for (const newer of [false, true]) {
+    it(`discards an ${outcome} stream after ${newer ? 'replacement' : 'stop'}`, async () => {
+      const bot = makeBot();
+      const b = bot as any;
+      b.startIcyPolling = () => {};
+      b.updateNowPlayingNickname = () => {};
+      let resolve!: (stream: unknown) => void;
+      let reject!: (error: Error) => void;
+      let killed = 0;
+      b.pipeline.toPcmStream = () => new Promise((done, fail) => { resolve = done; reject = fail; });
+      const startup = bot.playStream({ id: 'radio', title: 'Radio', source: 'radio', filePath: '', streamUrl: 'https://example.test/radio' });
+      assert.ok(resolve);
+      const startupToken = bot.playbackToken;
+      if (newer) {
+        b.ensurePlayableFile = async () => '/newer.opus';
+        b.startFileStream = async () => true;
+        await bot.play({ id: 'newer', title: 'Newer track', source: 'local', filePath: '/newer.opus' });
+      } else bot.clearPlayback();
+      assert.notEqual(bot.playbackToken, startupToken);
+      const token = bot.playbackToken;
+      const current = bot.nowPlaying;
+      if (outcome === 'opened') resolve({ kill: () => { killed++; } });
+      else reject(new Error('old stream failed'));
+      await startup;
+      assert.equal(killed, outcome === 'opened' ? 1 : 0);
+      assert.equal(bot.playbackToken, token);
+      assert.equal(bot.nowPlaying, current);
+      assert.equal(bot.status, newer ? 'playing' : 'connected');
+      assert.equal(b.streamKill, null);
+      assert.equal(b.playbackTimer, null);
+      bot.clearPlayback();
+    });
+  }
+});
+
 function fakeVideo(bot: VoiceBot) {
   const b = bot as any;
   b._videoStreaming = true;
@@ -456,5 +492,93 @@ describe('music session end', () => {
     assert.equal(bot.lastMusicStop?.reason, 'source_ended');
     fakeMusic(bot);
     assert.notEqual(bot.musicSessionInfo()!.id, first.id, 'later music is a new session');
+  });
+});
+
+it('playback token resets votes on play/replay/stop but survives pause/resume/seek', async () => {
+  const bot = makeBot();
+  const runtime = bot as any;
+  runtime.ensurePlayableFile = async () => '/fake.ogg';
+  runtime.pipeline.toPcmFileStream = async () => ({ stdout: new PassThrough(), process: new EventEmitter(), kill: () => {} });
+  const item = { id: 'same', title: 'Track', source: 'local' as const, filePath: '/fake.ogg', duration: 100 };
+  const idle = bot.playbackToken;
+  try {
+    await bot.play(item);
+    const first = bot.playbackToken;
+    assert.notEqual(first, idle);
+    bot.pause();
+    assert.equal(bot.playbackToken, first);
+    bot.resume();
+    assert.equal(bot.playbackToken, first);
+    await bot.seek(25);
+    assert.equal(bot.playbackToken, first);
+    await bot.play(item);
+    assert.notEqual(bot.playbackToken, first, 'replay of the identical item starts a fresh vote');
+    const replay = bot.playbackToken;
+    bot.stopAudio();
+    assert.notEqual(bot.playbackToken, replay);
+  } finally { bot.stopAudio(); }
+});
+
+describe('radio requests queued from history', () => {
+  for (const action of ['finish', 'skip', 'previous'] as const) {
+    it(`plays the live stream when the queue advances through ${action}`, async () => {
+      const bot = makeBot();
+      const radio = { id: 'history_7', title: 'Station', source: 'radio' as const,
+        filePath: '', streamUrl: 'https://example.test/radio' };
+      const local = { id: 'local', title: 'Song', source: 'local' as const, filePath: '/fake.ogg' };
+      bot.queue.addMany(action === 'previous' ? [radio, local] : [local, radio]);
+      bot.queue.playAt(action === 'previous' ? 1 : 0);
+      const b = bot as any;
+      b._status = 'playing';
+      b._nowPlaying = local;
+      let received: unknown;
+      let options: unknown;
+      bot.playStream = async (item, opts) => { received = item; options = opts; return []; };
+      b.ensurePlayableFile = async () => assert.fail('radio must not resolve a local file');
+      if (action === 'finish') b.finishFileTrack();
+      else bot[action]({ replaceSessionIds: ['confirmed-session'] });
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(received, radio);
+      assert.deepEqual(options, action === 'finish' ? {} : { replaceSessionIds: ['confirmed-session'] });
+    });
+  }
+});
+
+describe('stop generation', () => {
+  it('advances on a manual stop or clear, never on a track change, Auto-DJ or media replacement', async () => {
+    const bot = makeBot();
+    const b = bot as any;
+    b.updateNowPlayingNickname = () => {};
+    b.ensurePlayableFile = async () => '/next.opus';
+    b.startFileStream = async () => true;
+    const local = (id: string) => ({ id, title: id, source: 'local' as const, filePath: `/${id}.opus` });
+    let generation = bot.stopGeneration;
+    // A new track, a skip, and stops recorded with an automatic reason keep pending requests alive.
+    await bot.play(local('a'));
+    bot.queue.add(local('b'));
+    bot.skip();
+    for (let turn = 0; turn < 100 && bot.nowPlaying?.id !== 'b'; turn++) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(bot.nowPlaying?.id, 'b');
+    for (const reason of ['channel_empty', 'replaced_by_video', 'source_unreachable'] as const) bot.clearPlayback(reason);
+    // Neither do a skip past the last track (console, flows, chat) nor a video stop that is not an explicit Stop.
+    bot.skip();
+    assert.equal(bot.nowPlaying, null);
+    bot.stopAudio({ keepPendingRequests: true });
+    for (const reason of ['manual', 'no_viewers', 'source_unreachable', 'replaced_by_music'] as const) await bot.stopVideoStream(reason);
+    assert.equal(bot.stopGeneration, generation);
+    // Stop and clear-queue from chat or the console, and an explicit video Stop, cancel them.
+    for (const stop of [
+      () => bot.stopAudio(),
+      () => bot.clearPlayback(),
+      () => { void bot.stopVideoStream('manual', 'Stopped from the web UI', { cancelPendingRequests: true }); },
+    ]) {
+      stop();
+      assert.notEqual(bot.stopGeneration, generation);
+      generation = bot.stopGeneration;
+    }
+    b.client.disconnect = () => {};
+    await bot.stop();
+    assert.notEqual(bot.stopGeneration, generation);
   });
 });

@@ -1050,3 +1050,22 @@ test('a refusal notice the SSH helper could not post is logged, not thrown', asy
     setControlAccessForTests(null);
   }
 });
+
+test('restricted playback blocks cross-channel !here and !come privately before moving', async () => {
+  const bot = makeBot(1);
+  const f = fixture([bot]);
+  const privateReplies: string[] = [];
+  (bot as any).sendTextMessage = (_clid: number, message: string) => privateReplies.push(message);
+  f.handler.prisma.appSetting.findUnique = async () => ({ value: JSON.stringify({
+    playback: { mode: 'server_groups', serverGroupIds: [9] }, queue: { mode: 'everyone' }, video: { mode: 'everyone' },
+  }) });
+  f.handler.eventBridge = { executeCommand: async () => 'client_unique_identifier=listener client_servergroups=6 client_type=0' };
+  f.handler.channelToBots.set('9:1:20', new Set([1]));
+  for (const command of ['here', 'come']) {
+    await f.handler.onCrossChannelTextMessage(9, 1, 20, { invokerid: '2', invokeruid: 'listener', msg: `!${command}` });
+  }
+  assert.deepEqual(bot._joins, []);
+  assert.deepEqual(f.replies, []);
+  assert.equal(privateReplies.length, 1);
+  assert.match(privateReplies[0], /not allowed/i);
+});

@@ -5,6 +5,7 @@ import type { QueueItem } from '../playlist/queue.js';
 import type { EventBridge } from '../../bot-engine/event-bridge.js';
 import type { findSongForQuery } from '../audio/youtube.js';
 import type { ChatMediaRequest } from './queue.js';
+import type { ListenerRemoteService } from '../listener-remote.js';
 
 /** Whether a running flow answers this raw chat line from the base or dedicated listener. */
 export type FlowCommandLookup = (
@@ -127,6 +128,8 @@ export interface CommandMethods {
     args: string,
   ): Promise<void>;
   handlePlay(botId: number, bot: VoiceBot, userClid: number, args: string): Promise<void>;
+  handleHistory(botId: number, bot: VoiceBot, userClid: number, args: string): Promise<void>;
+  handleAgain(botId: number, bot: VoiceBot, userClid: number, args: string): Promise<void>;
   enqueueMediaUrl(botId: number, bot: VoiceBot, userClid: number, rawUrl: string, request?: ChatMediaRequest): Promise<void>;
   findSong(query: string, signal?: AbortSignal): ReturnType<typeof findSongForQuery>;
   handlePlaylist(botId: number, bot: VoiceBot, userClid: number, args: string): Promise<void>;
@@ -152,7 +155,7 @@ export interface CommandMethods {
   handleTv(bot: VoiceBot, userClid: number, args: string): Promise<void>;
   handleLyrics(bot: VoiceBot, userClid: number, args: string): Promise<void>;
   handleViewers(bot: VoiceBot, userClid: number): void;
-  saveMusicRequest(bot: VoiceBot, item: QueueItem): void;
+  saveMusicRequest(bot: VoiceBot, item: QueueItem | QueueItem[]): void;
 }
 
 /** Shared state of one handler; cooldown claims remain shared across handlers in dedupe.ts. */
@@ -161,6 +164,7 @@ export interface CommandContext extends CommandMethods {
   voiceBotManager: VoiceBotManager;
   registeredBots: Set<number>;
   eventBridge: EventBridge | null;
+  readonly listenerRemote: ListenerRemoteService | null;
   readonly flowCommandLookup: FlowCommandLookup | null;
   eventBridgeListening: boolean;
   botChannelConfig: Map<number, BotChannelConfig>;

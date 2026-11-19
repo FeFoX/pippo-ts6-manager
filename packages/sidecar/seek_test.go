@@ -6,14 +6,14 @@ import (
 	"testing"
 )
 
-// A seek restarts ffmpeg with -ss on every input, so the video and the
+// A seek (StartAtSecs) restarts ffmpeg with -ss on every input, so the video and the
 // separate audio of a split source start at the same point.
-func TestStartSecondsSeeksEveryInput(t *testing.T) {
+func TestStartAtSecsSeeksEveryInput(t *testing.T) {
 	s := NewSidecar()
 	spec, _ := lookupEncoder("h264")
 	req := SourceRequest{
 		Source: "https://v.example/video", AudioSource: "https://a.example/audio",
-		Mode: modeVOD, Volume: 100, StartSeconds: 1800,
+		Mode: modeVOD, Volume: 100, StartAtSecs: 1800,
 	}
 	got := strings.Join(s.buildFFmpegArgs(req, spec, false), " ")
 	if n := strings.Count(got, "-ss 1800.000"); n != 2 {
@@ -31,12 +31,12 @@ func TestStartSecondsSeeksEveryInput(t *testing.T) {
 	}
 }
 
-func TestStartSecondsSingleSourceAndFile(t *testing.T) {
+func TestStartAtSecsSingleSourceAndFile(t *testing.T) {
 	s := NewSidecar()
 	spec, _ := lookupEncoder("h264")
 	for _, req := range []SourceRequest{
-		{Source: "https://x.example/clip.mp4", Mode: modeVOD, Volume: 100, StartSeconds: 90.5},
-		{Source: "/data/music/clip.mp4", Mode: modeFile, Volume: 100, StartSeconds: 90.5},
+		{Source: "https://x.example/clip.mp4", Mode: modeVOD, Volume: 100, StartAtSecs: 90.5},
+		{Source: "/data/music/clip.mp4", Mode: modeFile, Volume: 100, StartAtSecs: 90.5},
 	} {
 		got := strings.Join(s.buildFFmpegArgs(req, spec, false), " ")
 		if strings.Count(got, "-ss 90.500") != 1 || strings.Count(got, " -i ") != 1 {
@@ -45,10 +45,10 @@ func TestStartSecondsSingleSourceAndFile(t *testing.T) {
 	}
 }
 
-func TestStartSecondsIgnoredForLiveAndZero(t *testing.T) {
+func TestStartAtSecsIgnoredForLiveAndZero(t *testing.T) {
 	s := NewSidecar()
 	spec, _ := lookupEncoder("h264")
-	live := strings.Join(s.buildFFmpegArgs(SourceRequest{Source: "https://x.example/live.m3u8", Mode: modeLive, Volume: 100, StartSeconds: 600}, spec, false), " ")
+	live := strings.Join(s.buildFFmpegArgs(SourceRequest{Source: "https://x.example/live.m3u8", Mode: modeLive, Volume: 100, StartAtSecs: 600}, spec, false), " ")
 	if strings.Contains(live, "-ss ") {
 		t.Errorf("a live source has no timeline to seek in: %s", live)
 	}
@@ -58,13 +58,13 @@ func TestStartSecondsIgnoredForLiveAndZero(t *testing.T) {
 	}
 }
 
-func TestClampStartSecondsDropsUnusableOffsets(t *testing.T) {
+func TestClampStartAtDropsUnusableOffsets(t *testing.T) {
 	cases := []struct{ in, want float64 }{
-		{0, 0}, {1800, 1800}, {90.5, 90.5}, {-5, 0}, {math.NaN(), 0}, {math.Inf(1), 0}, {math.Inf(-1), 0},
+		{0, 0}, {1800, 1800}, {90.5, 90.5}, {-5, 0}, {math.NaN(), 0}, {math.Inf(1), maxStartAtSecs}, {math.Inf(-1), 0},
 	}
 	for _, tc := range cases {
-		if got := clampStartSeconds(tc.in); got != tc.want {
-			t.Errorf("clampStartSeconds(%v) = %v, want %v", tc.in, got, tc.want)
+		if got := clampStartAt(tc.in); got != tc.want {
+			t.Errorf("clampStartAt(%v) = %v, want %v", tc.in, got, tc.want)
 		}
 	}
 }

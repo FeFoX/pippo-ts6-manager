@@ -7,7 +7,10 @@
 
 import { spawn } from 'child_process';
 import { accessSync, constants as fsConstants } from 'fs';
-import { delimiter, isAbsolute, join } from 'path';
+import { createRequire } from 'node:module';
+import { delimiter, isAbsolute, join, resolve } from 'path';
+import { getYtDlpPath } from './yt-dlp-path.js';
+import { redactDiagnosticText } from '@ts6/common';
 import type {
   RuntimeMediaDiagnosticReport,
   RuntimeMediaOverall,
@@ -15,6 +18,11 @@ import type {
   RuntimeMediaStageId,
   RuntimeMediaStageResult,
 } from '@ts6/common';
+import { checkSidecarVersion } from '../streaming/sidecar-version.js';
+import { mediaEgressEnabled, mediaEgressProblem } from '../egress/media-egress.js';
+
+const require = createRequire(import.meta.url);
+const backendPkg = require('../../../package.json') as { version?: string };
 
 export const RUNTIME_MEDIA_STAGE_IDS: readonly RuntimeMediaStageId[] = [
   'yt-dlp',
@@ -37,7 +45,9 @@ export interface DiagnoseRuntimeMediaOptions {
   /** Injected for tests. */
   env?: NodeJS.ProcessEnv;
   /** Injected for tests — replaces SidecarClient.getHealth. */
-  probeSidecarHealth?: (baseUrl: string, timeoutMs: number) => Promise<{ status?: string }>;
+  probeSidecarHealth?: (baseUrl: string, timeoutMs: number) => Promise<SidecarHealthProbe>;
+  /** Injected for tests — defaults to this backend's package version. */
+  backendVersion?: string;
   /** Injected for tests — replaces spawn version probes. */
   probeCommand?: (
     command: string,
@@ -48,12 +58,19 @@ export interface DiagnoseRuntimeMediaOptions {
   binaryExists?: (command: string, env: NodeJS.ProcessEnv) => boolean;
 }
 
+/** The fields of the sidecar's GET /health this module reads. */
+export interface SidecarHealthProbe {
+  status?: string;
+  /** Release the sidecar was built from; absent before 1.11. */
+  version?: string;
+}
+
 export type CommandProbeResult =
   | { ok: true; version: string }
   | { ok: false; code: 'binary_missing' | 'timeout' | 'nonzero_exit' | 'error'; message: string };
 
 function sanitizeSnippet(raw: string, max = 120): string {
-  return raw.replace(/\s+/g, ' ').trim().slice(0, max);
+  return redactDiagnosticText(raw).replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
 function versionFromOutput(stdout: string, stderr: string): string {
@@ -163,7 +180,7 @@ export function probeCommandVersion(
 async function defaultProbeSidecarHealth(
   baseUrl: string,
   timeoutMs: number,
-): Promise<{ status?: string }> {
+): Promise<SidecarHealthProbe> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -177,7 +194,7 @@ async function defaultProbeSidecarHealth(
     const text = await res.text();
     if (!text) return { status: 'ok' };
     try {
-      return JSON.parse(text) as { status?: string };
+      return JSON.parse(text) as SidecarHealthProbe;
     } catch {
       return { status: 'ok' };
     }
@@ -252,29 +269,54 @@ function resolveSidecarMode(env: NodeJS.ProcessEnv): {
   };
 }
 
-/** True when `command` is an absolute/relative path or resolves on PATH. Never spawns. */
-export function binaryExistsOnPath(command: string, env: NodeJS.ProcessEnv = process.env): boolean {
+/** Resolve an executable using the playback process's PATH. Never spawns. */
+export function resolveBinaryOnPath(command: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
   const name = command.trim();
-  if (!name) return false;
+  if (!name) return undefined;
   if (isAbsolute(name) || name.includes('/') || name.includes('\\')) {
     try {
-      accessSync(name, fsConstants.X_OK);
-      return true;
+      accessSync(command, fsConstants.X_OK);
+      return resolve(command);
     } catch {
-      return false;
+      return undefined;
     }
   }
   const pathEnv = env.PATH || '';
+  const suffixes = process.platform === 'win32' ? ['', '.com', '.exe'] : [''];
   for (const dir of pathEnv.split(delimiter)) {
     if (!dir) continue;
-    try {
-      accessSync(join(dir, name), fsConstants.X_OK);
-      return true;
-    } catch {
-      /* continue */
+    for (const suffix of suffixes) {
+      try {
+        accessSync(join(dir, name + suffix), fsConstants.X_OK);
+        return resolve(dir, name + suffix);
+      } catch {
+        /* continue */
+      }
     }
   }
-  return false;
+  return undefined;
+}
+
+export function binaryExistsOnPath(command: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return resolveBinaryOnPath(command, env) !== undefined;
+}
+
+/**
+ * Message, version and code for a sidecar that answered /health. A version
+ * that differs from the backend's stays `ok` (the stream may still work) but
+ * is called out, since only same-release pairs are supported.
+ */
+function sidecarReachableFields(
+  reachable: string,
+  backendVersion: string | undefined,
+  health: SidecarHealthProbe,
+): Pick<RuntimeMediaStageResult, 'message' | 'version' | 'code'> {
+  const check = checkSidecarVersion(backendVersion, health.version);
+  return {
+    message: check.note ? `${reachable}, but ${check.note}` : reachable,
+    version: check.label,
+    code: check.state === 'mismatch' ? 'version_mismatch' : 'ok',
+  };
 }
 
 async function probeSidecarStage(
@@ -282,6 +324,7 @@ async function probeSidecarStage(
     env: NodeJS.ProcessEnv;
     probeSidecarHealth: NonNullable<DiagnoseRuntimeMediaOptions['probeSidecarHealth']>;
     binaryExists: NonNullable<DiagnoseRuntimeMediaOptions['binaryExists']>;
+    backendVersion: string | undefined;
     remainingMs: () => number;
   },
 ): Promise<{ stage: RuntimeMediaStageResult; mode: RuntimeMediaSidecarMode }> {
@@ -308,9 +351,7 @@ async function probeSidecarStage(
         stage: {
           id: 'sidecar',
           status: 'ok',
-          message: 'Sidecar health endpoint reachable',
-          version: health.status || 'ok',
-          code: 'ok',
+          ...sidecarReachableFields('Sidecar health endpoint reachable', options.backendVersion, health),
         },
       };
     } catch (err: any) {
@@ -362,9 +403,7 @@ async function probeSidecarStage(
       stage: {
         id: 'sidecar',
         status: 'ok',
-        message: 'Local sidecar is listening',
-        version: health.status || 'ok',
-        code: 'ok',
+        ...sidecarReachableFields('Local sidecar is listening', options.backendVersion, health),
       },
     };
   } catch {
@@ -422,13 +461,37 @@ export async function diagnoseRuntimeMedia(
     stages.push(stageFromCommand(id, label, result, missingHint));
   };
 
-  await runBinary(
-    'yt-dlp',
-    'yt-dlp',
-    ['--version'],
-    'yt-dlp',
-    'yt-dlp was not found — pull or rebuild the TS6 Manager image to restore the bundled extractor',
-  );
+  let ytDlpCommand: string | undefined;
+  try {
+    ytDlpCommand = getYtDlpPath(env);
+  } catch {
+    stages.push({
+      id: 'yt-dlp', status: 'fail', code: 'misconfigured',
+      message: 'YT_DLP_PATH must be an absolute path to a trusted yt-dlp executable',
+    });
+  }
+  if (ytDlpCommand) {
+    await runBinary(
+      'yt-dlp',
+      ytDlpCommand,
+      ['--ignore-config', '--version'],
+      'yt-dlp',
+      'yt-dlp was not found — pull or rebuild the TS6 Manager image to restore the bundled extractor',
+    );
+  }
+  const ytDlpStage = stages.find((stage) => stage.id === 'yt-dlp');
+  if (ytDlpStage?.status === 'ok' && !mediaEgressEnabled(env)) {
+    // An emergency setting, so it is shown as a failure until switched back on.
+    ytDlpStage.status = 'fail';
+    ytDlpStage.code = 'egress_disabled';
+    ytDlpStage.message = 'Media download protection is switched off (MEDIA_EGRESS_PROXY=off): downloads are not checked at connection time and only YouTube links are accepted';
+  }
+  const egressProblem = mediaEgressProblem(env);
+  if (ytDlpStage?.status === 'ok' && egressProblem) {
+    ytDlpStage.status = 'fail';
+    ytDlpStage.code = 'egress_misconfigured';
+    ytDlpStage.message = `Media downloads are unavailable: ${egressProblem}`;
+  }
   await runBinary(
     'ffmpeg',
     'ffmpeg',
@@ -448,6 +511,7 @@ export async function diagnoseRuntimeMedia(
     env,
     binaryExists,
     probeSidecarHealth,
+    backendVersion: options.backendVersion ?? backendPkg.version,
     sidecarTimeoutMs,
     remainingMs,
   });

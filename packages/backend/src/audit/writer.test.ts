@@ -178,7 +178,11 @@ describe('admin audit writer privacy', () => {
     await runRemoteAudited(
       prisma,
       { actor, action: 'media.session.switch', connectionId: 4, target: { type: 'music_bot', id: 12 } },
-      async () => { stopped.push(20); return { id: 99 }; },
+      () => {
+        assert.equal(rows[0].outcome, 'pending');
+        stopped.push(20);
+        return { id: 99 };
+      },
       {
         resolveTargetId: (r) => r.id,
         relatedAfter: () => stopped.map((id) => ({ actor, action: 'media.video.stop' as const, connectionId: 9, target: { type: 'music_bot' as const, id } })),
@@ -197,10 +201,20 @@ describe('admin audit writer privacy', () => {
     await assert.rejects(runRemoteAudited(
       prisma,
       { actor, action: 'media.session.switch', connectionId: 4, target: { type: 'music_bot', id: 12 } },
-      async () => { stopped.push(20); throw new Error('start failed'); },
+      () => { stopped.push(20); throw new Error('start failed'); },
       { relatedAfter: () => stopped.map((id) => ({ actor, action: 'media.video.stop' as const, connectionId: 9, target: { type: 'music_bot' as const, id } })) },
     ), /start failed/);
     assert.deepEqual(rows.map((r) => [r.action, r.outcome]), [['media.session.switch', 'failure'], ['media.video.stop', 'success']]);
     assert.equal(rows[0].operationId, rows[1].operationId);
+  });
+});
+
+describe('classifyRemoteError for listener remote refusals', () => {
+  it('records a full queue as queue_full and a pending link as rate_limited', async () => {
+    const { ListenerRemoteError } = await import('../voice/listener-remote.js');
+    const { classifyRemoteError } = await import('./writer.js');
+    assert.deepEqual(classifyRemoteError(new ListenerRemoteError(409, 'queue_full', 'The queue is full.')), { outcome: 'failure', resultCode: 'queue_full' });
+    assert.deepEqual(classifyRemoteError(new ListenerRemoteError(429, 'rate_limited', 'A media request is already pending.')), { outcome: 'failure', resultCode: 'rate_limited' });
+    assert.deepEqual(classifyRemoteError(new ListenerRemoteError(409, 'cancelled', 'Playback was stopped.')), { outcome: 'failure', resultCode: 'cancelled' });
   });
 });

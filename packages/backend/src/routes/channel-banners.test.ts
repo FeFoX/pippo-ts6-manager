@@ -104,9 +104,22 @@ test('public URL validation', () => {
   assert.deepEqual(parsePublicUrl('https://ts.example.com/'), { ok: true, value: 'https://ts.example.com' });
   assert.deepEqual(parsePublicUrl(' http://10.0.0.5:3000 '), { ok: true, value: 'http://10.0.0.5:3000' });
   assert.deepEqual(parsePublicUrl(''), { ok: true, value: null });
-  for (const bad of ['ts.example.com', 'ftp://x', 'javascript:alert(1)', 'https://u:p@x', 'https://x/?a=1', 'https://x/#y', 42]) {
+  for (const bad of ['ts.example.com', 'ftp://x', 'javascript:alert(1)', 'https://u:p@x', 'https://x/?a=1', 'https://x/#y', 'https://cdn.example.com/hero/a.jpg', 'https://x/banner.PNG', 42]) {
     assert.equal(parsePublicUrl(bad).ok, false, String(bad));
   }
+});
+
+test('public URL rejects image links however the trailing path is written', () => {
+  for (const bad of [
+    'https://x/banner.png/', 'https://x/banner.png//', 'https://x/banner.PNG/', 'https://x/a/b.jpeg///',
+    'https://x/banner%2Epng', 'https://x/banner.p%6Eg/', 'https://x/banner.png/.', 'https://x/img/../banner.webp/',
+  ]) {
+    assert.equal(parsePublicUrl(bad).ok, false, bad);
+  }
+  assert.deepEqual(parsePublicUrl('https://x/ts6/'), { ok: true, value: 'https://x/ts6' });
+  assert.deepEqual(parsePublicUrl('https://x/ts6//'), { ok: true, value: 'https://x/ts6' });
+  assert.deepEqual(parsePublicUrl('https://x/png/'), { ok: true, value: 'https://x/png' });
+  assert.deepEqual(parsePublicUrl('https://x/manager.png.d/'), { ok: true, value: 'https://x/manager.png.d' });
 });
 
 test('non-images, oversized files and multiple files are rejected before saving', async () => {

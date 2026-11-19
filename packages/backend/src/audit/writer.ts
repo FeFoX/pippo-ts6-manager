@@ -81,7 +81,7 @@ function normalizeTargetId(id: string | number | null | undefined): string | nul
   return s;
 }
 
-function buildRow(input: BaseEventInput & {
+export function buildRow(input: BaseEventInput & {
   operationId: string;
   outcome: AdminAuditOutcome;
   resultCode?: AdminAuditResultCode | null;
@@ -141,6 +141,8 @@ export async function completeRemoteAttempt(
     outcome: Exclude<AdminAuditOutcome, 'pending'>;
     resultCode: AdminAuditResultCode;
     targetId?: string | number | null;
+    /** Corrects the action the attempt began with when the dispatch did something else. */
+    action?: AdminAuditAction;
   },
 ): Promise<void> {
   const outcome = assertOutcome(completion.outcome);
@@ -155,6 +157,7 @@ export async function completeRemoteAttempt(
   if (completion.targetId !== undefined) {
     data.targetId = normalizeTargetId(completion.targetId);
   }
+  if (completion.action !== undefined) data.action = completion.action;
   await prisma.adminAuditEvent.updateMany({
     where: { operationId, outcome: 'pending' },
     data,
@@ -220,6 +223,19 @@ export async function markPartial(
   });
 }
 
+/** Listener remote refusal codes and the result each one records. */
+const LISTENER_REMOTE_RESULTS: Readonly<Record<string, AdminAuditResultCode>> = {
+  invalid_access: 'invalid_access',
+  permission_denied: 'permission_denied',
+  rate_limited: 'rate_limited',
+  queue_full: 'queue_full',
+  invalid_request: 'invalid_request',
+  not_found: 'not_found',
+  cancelled: 'cancelled',
+  timeout: 'timeout',
+  unavailable: 'unavailable',
+};
+
 /** Map unknown errors to allow-listed result codes (no message leakage). */
 export function classifyRemoteError(err: unknown): {
   outcome: 'failure' | 'unknown';
@@ -228,6 +244,11 @@ export function classifyRemoteError(err: unknown): {
   const name = err && typeof err === 'object' && 'name' in err ? String((err as { name: unknown }).name) : '';
   const code = err && typeof err === 'object' && 'code' in err ? String((err as { code: unknown }).code) : '';
   const message = err instanceof Error ? err.message.toLowerCase() : '';
+
+  // A listener remote refusal carries its own code; the queue was not changed.
+  if (name === 'ListenerRemoteError') {
+    return { outcome: 'failure', resultCode: LISTENER_REMOTE_RESULTS[code] ?? 'unknown' };
+  }
 
   if (
     name === 'TimeoutError'
@@ -281,7 +302,7 @@ export function actorFromRequest(user: { id: number; username: string } | undefi
 export async function runRemoteAudited<T>(
   prisma: PrismaClient,
   input: BaseEventInput,
-  dispatch: () => Promise<T>,
+  dispatch: () => T | Promise<T>,
   options?: {
     resolveTargetId?: (result: T) => string | number | null | undefined;
     /**
@@ -291,6 +312,12 @@ export async function runRemoteAudited<T>(
      * operationId; best-effort like completion.
      */
     relatedAfter?: () => BaseEventInput[];
+    /**
+     * The action the dispatch actually performed, read once it returns or
+     * throws. Only for a dispatch whose kind is decided after the attempt began
+     * (e.g. a queue add that turns out to start or not start a stream).
+     */
+    resolveAction?: () => AdminAuditAction | undefined;
   },
 ): Promise<T> {
   const attempt = await beginRemoteAttempt(prisma, input);
@@ -318,6 +345,7 @@ export async function runRemoteAudited<T>(
         outcome: 'success',
         resultCode: 'ok',
         targetId: options?.resolveTargetId ? options.resolveTargetId(result) : undefined,
+        action: options?.resolveAction?.(),
       });
     } catch {
       // Dispatch already succeeded — leave pending for stale resolution; do not fail the request.
@@ -326,7 +354,7 @@ export async function runRemoteAudited<T>(
     return result;
   } catch (err) {
     try {
-      await completeRemoteAttempt(prisma, attempt.operationId, classifyRemoteError(err));
+      await completeRemoteAttempt(prisma, attempt.operationId, { ...classifyRemoteError(err), action: options?.resolveAction?.() });
     } catch {
       // Leave pending; retention will mark unknown.
     }

@@ -1,0 +1,225 @@
+# Troubleshooting
+
+## `invalid apikey`
+
+TS6 Manager does not clear saved WebQuery keys during a normal container restart or upgrade.
+
+If TeamSpeak returns `invalid apikey`:
+
+1. confirm the saved connection points to the correct server and port;
+2. verify the server-side key still exists and has management scope;
+3. if you used beta13 `TSSERVER_QUERY_ADMIN_API_KEY`, check whether that value changed; and
+4. update the saved connection if the server-side key was replaced.
+
+When manually creating a persistent key, use `lifetime=0` where appropriate.
+
+## Saved credentials stopped working after redeploy
+
+Check `ENCRYPTION_KEY`.
+
+The same key must be retained across restarts and upgrades. A different value cannot decrypt credentials stored with the previous key.
+
+## Server Logs: TeamSpeak log file unavailable / error 2052
+
+Server Logs uses TeamSpeak `logview`. When TeamSpeak cannot open or read its logfile it returns **error 2052** (`file input/output error`). TS6 Manager maps that to **TeamSpeak log file unavailable** (not a generic “Connection failed”).
+
+Typical causes on the TeamSpeak host:
+
+- the `logs` directory is missing or not writable by the TeamSpeak process user;
+- logfile lock or rotation while `logview` runs;
+- a Docker volume whose ownership was changed outside the container (e.g. host `chown` as root).
+
+What to do:
+
+1. Confirm other TeamSpeak-backed pages still work (Dashboard, Clients). If they do, Manager ↔ Query is fine.
+2. On Docker pr-test: `docker exec ts6-pr-teamspeak ls -la /var/tsserver/logs` and ensure the TeamSpeak user owns the tree. If permissions look wrong, recreate the volume with `docker compose -f docker-compose.pr-test.yml down -v` and bring the stack up again.
+3. Use the **Retry** button once after a short wait — Manager does not auto-retry this error (repeated `logview` calls can make locks worse).
+
+Activity journal and administrative audit do not use `logview`, so they can look healthy while Server Logs fails.
+
+## TeamSpeak Query flood protection / error 524
+
+TS6 Manager automatically pauses WebQuery traffic and backs off SSH Query reconnects when TeamSpeak reports flood protection. The UI should show a temporary cooldown message and recover automatically after TeamSpeak accepts Query traffic again.
+
+**Files storage summaries:** Opening Files used to auto-scan every channel with `ftgetfilelist`, which commonly tripped flood protection and took down the shared EventBridge SSH session (file browse unavailable, CHANNELS “Check failed.”, journal leave/join interrupted). Summaries now run only on **manual Refresh**, with a minimum gap between `ftgetfilelist` calls. Ordinary channel browse still uses one listing at a time.
+
+If this happens repeatedly, verify the TeamSpeak Query allow-list. TeamSpeak 6 uses a **file path** for this setting:
+
+- command line: `--query-ip-allow-list <file>`
+- environment: `TSSERVER_QUERY_ALLOW_LIST=<file>`
+- `tsserver.yaml`: `query.ip-allow-list`
+- default filename: `query_ip_allowlist.txt`
+
+For the official TeamSpeak Docker image, persistent server data is normally mounted at `/var/tsserver`, so the default file will commonly be `/var/tsserver/query_ip_allowlist.txt` unless the setting points elsewhere.
+
+Compare the source IP shown in TeamSpeak's Query logs with the CIDRs loaded at startup. If TS6 Manager comes from a Docker network that is not covered by the allow-list, add the narrowest stable address/CIDR that covers the manager. Prefer a dedicated network/static container address and a `/32` entry when practical instead of exempting an unrelated shared Docker subnet.
+
+After changing the file, restart TeamSpeak and confirm its startup log reports the expected `query_ip_allowlist` entries.
+
+## SSH features do not work
+
+Core WebQuery management can work while SSH-dependent features fail.
+
+Check:
+
+- SSH Query is enabled and reachable;
+- the saved SSH credentials are correct;
+- host-key trust is valid; and
+- network/firewall rules allow the connection.
+
+Transient closes during the initial handshake are retried. Authentication and host-key failures need configuration changes.
+
+## Dashboard stays on WebQuery only after enabling metrics
+
+Native metrics are opt-in on the connection **and** must be reachable from the ts6-manager backend.
+
+Check:
+
+1. TeamSpeak has metrics enabled (`TSSERVER_METRICS_ENABLED=1` / equivalent UI).
+2. The metrics bind address is reachable from the manager. The TeamSpeak default is **localhost-only** (`TSSERVER_METRICS_IP=127.0.0.1`). When the manager runs in another container or host, bind a private interface (commonly `0.0.0.0` on a closed Docker network) and firewall the port.
+3. Connection **metrics port** matches TeamSpeak (default `9187`), and **metrics host** overrides the WebQuery host when the listener is elsewhere.
+4. The dashboard badge: **WebQuery only** means scrape is off; **WebQuery · metrics unreachable/timed out/…** means scrape is on but failed — hover the badge for the operator hint.
+
+Do not expose the metrics port on the public internet; it is unauthenticated.
+
+## Sidecar or video streaming errors
+
+For a split-stack deployment verify:
+
+- `SIDECAR_URL` points to the sidecar service;
+- backend and sidecar use the same `SIDECAR_SECRET`;
+- both containers share the same media volume path; and
+- sidecar port 9800 is reachable internally without being exposed publicly;
+- a [native sidecar](native-sidecar.md#version-compatibility) is the same release as the backend. The Runtime / media strip shows its version and says when it differs.
+
+In the UI, use **Refresh** on the Runtime / media strip beside Video, IPTV, or Settings → YouTube. That runs a bounded on-demand probe (yt-dlp, ffmpeg, ffprobe, sidecar). Music bot status polling does not run these probes.
+
+## YouTube/media extraction problems
+
+yt-dlp is bundled into the production backend image and does not self-update at runtime.
+
+If an extractor has changed upstream, pull a newer TS6 Manager image or rebuild the image so a newer bundled yt-dlp can be installed.
+
+The Settings → YouTube Runtime / media strip shows the bundled yt-dlp version when you refresh diagnostics. It never updates the tool in place.
+
+Production images ship a pinned **Deno** binary as yt-dlp’s YouTube EJS / `n` challenge runtime (`--js-runtimes deno`). Node in the image is for the Nest backend only (Node 20) and is not configured for EJS. Cookies alone are not enough when that challenge fails. If logs show `n challenge solving failed` or ask for a JavaScript runtime, pull or rebuild an image that includes Deno (see `.deno-version`) rather than installing a runtime into a running container.
+
+For media requiring login, age, or member access, configure an appropriate cookie file and protect it like a credential.
+
+## Database/schema problems after upgrade
+
+Backend startup runs the schema-apply script automatically.
+
+Confirm:
+
+- the persistent database volume is mounted at the expected path;
+- the container can write to it; and
+- startup logs show the schema apply/seed path completing.
+
+Do not discard the persistent volume as a first troubleshooting step.
+
+## `!remote` does not send a link, or the link stops working
+
+The bot replies privately, so check the listener's private chats. `Listener remote is unavailable: an admin must configure Public URL.` and `Listener remote requires an HTTPS Public URL.` mean `PUBLIC_URL` is missing or not HTTPS. `Listener remote needs a verified listener in the bot channel.` means the person is not in the bot's channel. A link works once and only for 5 minutes; a session ends after 15 minutes, when its owner leaves the channel, or when the backend restarts. In each case type `!remote` again. If listeners hit `Too many remote requests` right away, or sign-in attempts block everyone at once, the backend may be seeing every visitor as your proxy's address. Check the `Trusted proxies:` line in the backend's startup log; stock Docker images set a default, but an outer reverse proxy, or a backend run outside the images, needs `TRUST_PROXY` set. See [Media bots — Listener remote](music-bots.md#listener-remote).
+
+## Reverse-proxy login or live-update problems
+
+Check:
+
+- the public frontend origin matches `FRONTEND_URL`;
+- WebSocket upgrades are supported by the reverse proxy (see [Reverse proxy](reverse-proxy.md) for a full NGINX example); and
+- the public domain routes to the frontend/nginx service, not directly to the internal sidecar; and
+- `TRUST_PROXY` names your proxy if you run an outer proxy in front of the stock images (the startup log shows `Trusted proxies: …`); otherwise every user shares one sign-in rate limit (see [Upgrading to 1.11.0](upgrading.md#reverse-proxy-set-trust_proxy)).
+
+## Browser preview stuck on “Connecting to stream…”
+
+Signaling for the WebUI preview goes through the HTTP API. Media uses WebRTC/UDP to the sidecar host. A reverse proxy that only forwards HTTP does not carry that UDP path.
+
+The preview pane should stop hanging after ~15s with an ICE timeout (and call out loopback-only offers when that was the failure mode).
+
+Check:
+
+- the stream actually started (TeamSpeak viewers / stream status), not only the preview pane;
+- ICE failure / timeout text in the preview pane;
+- **candidate reachability:** `WEBRTC_NAT1TO1_IP` is an IPv4 the browser can dial (not a container `172.x`; not `127.0.0.1` unless the browser is on the Docker host);
+- **Docker host binding:** `WEBRTC_UDP_PORT` is published via `WEBRTC_BIND_IP` on the host (`${WEBRTC_BIND_IP}:${WEBRTC_UDP_PORT}:…/udp`). Bind can differ from NAT1To1 when a firewall/NAT forwards the public UDP port to the host;
+- for public-Internet browsers: advertise the public IPv4 in `WEBRTC_NAT1TO1_IP`, forward UDP to the Docker host, and keep the host bind accordingly;
+- WebSocket upgrade headers on the outer reverse proxy's `/ws` location (not on `/api`) so live UI updates still work;
+- Twitch live URLs use yt-dlp URL resolve (not a temp download) — see #203 if Twitch sources fail before the preview can attach.
+
+### Check the browser side first
+
+The preview needs your browser to produce ICE candidates. Some VPNs, privacy extensions ("WebRTC leak protection") and managed browser policies block this, and then the preview times out even when the server is set up correctly.
+
+1. In the same browser, open the [Trickle ICE test](https://webrtc.github.io/samples/src/content/peerconnection/trickle-ice/) and click **Gather candidates**. You should see `host` and `srflx` rows. Read the result like this:
+   - **No rows at all** (not even `host`): host candidates don't depend on STUN, so the browser is most likely restricting WebRTC. Check any ICE errors the page reports, then work through the table below.
+   - **`host` rows but no `srflx`:** the browser works, but it couldn't reach the STUN server. Check the page's ICE errors and whether your network blocks outbound UDP.
+2. Disable VPN or privacy extensions and retry in a private window with extensions off, or in another browser. Then check the browser's own setting:
+
+| Browser | Where to look |
+|---|---|
+| Chrome | No user setting. Check `chrome://policy` for `WebRtc*` policies and `chrome://extensions` for VPN or privacy add-ons. |
+| Edge | `edge://policy` for `WebRtc*` policies (for example `WebRtcLocalhostIpHandling`, `WebRtcIPHandlingUrl`), plus `edge://extensions`. |
+| Brave | `brave://settings/privacy` → *WebRTC IP handling policy*. "Disable non-proxied UDP" stops the preview. |
+| Firefox | `about:config`: `media.peerconnection.enabled` must be `true` and `media.peerconnection.ice.proxy_only` must be `false`. Also check `about:policies`. |
+| Safari | Rarely the cause. If needed, check the Develop menu's WebRTC options, and turn off iCloud Private Relay or a VPN to test. |
+
+Setting names move between browser versions; if one isn't where the table says, the Trickle ICE test above is still the reliable check.
+
+3. **Still no candidates?** Try a brand-new browser profile (in Chrome: profile icon → **Add**). A damaged profile can block WebRTC even in a private window with every extension disabled and no policies set. A fresh profile fixed exactly this case in [#202](https://github.com/uniskela/ts6-manager/issues/202); thanks to [@D3nnis3n](https://github.com/D3nnis3n) for tracking it down.
+
+### Collect details for a bug report
+
+- **Signaling uses HTTP(S) POST.** Look for `POST …/stream/webrtc/offer`, `/answer` and `/ice` in DevTools → Network. The WS/Socket tab will be empty for the preview; that's expected.
+- **Browser side:** open `chrome://webrtc-internals` in a new tab *before* starting the preview, then click **Create dump** after it fails. Check that the offer has your `WEBRTC_NAT1TO1_IP` on `WEBRTC_UDP_PORT` as a `typ host` candidate, and that the browser logged its own `icecandidate` events.
+- **Server side:** set `SIDECAR_DEBUG_LOGS=1` and `PION_LOG_WARN=ice`, restart, and make one preview attempt without clicking **Retry**. During it, run `sudo tcpdump -ni any udp port 10000` (or your `WEBRTC_UDP_PORT`) on the Docker host. STUN packets from the browser's public IP should arrive and get replies.
+
+## TeamSpeak client stuck on "Connecting..."
+
+The stream runs and the web UI preview plays it, but the stream window in the TeamSpeak client shows **Connecting...** and never starts. The sidecar log shows the viewer's peer at `ICE: checking` until the client gives up after about 20 seconds and asks again (`Reconnect from clid=…`), followed by:
+
+```text
+[Peer 1] TeamSpeak viewer never connected: none of the offered addresses worked for it (127.0.0.1:10000 host, 203.0.113.9:36203 srflx)
+```
+
+The TeamSpeak client has to reach one of the addresses listed there:
+
+- **`127.0.0.1`:** the TeamSpeak client does not connect to a loopback address, even when it runs on the Docker host. A browser on that host does, which is why the preview works. `docker-compose.pr-test.yml` advertises only `127.0.0.1` by default, and the sidecar warns about this at startup.
+- **A container address (`172.x`):** the sidecar has no `WEBRTC_UDP_PORT`/`WEBRTC_NAT1TO1_IP`, and the client is outside the Docker network (Docker Desktop, WSL, or another machine).
+- **Only your public IP (`srflx`):** a client on the same LAN needs the router to loop traffic back to its own public IP (hairpin NAT), which many routers don't do.
+
+Advertise an address the TeamSpeak client can reach and publish the UDP port there. On the Docker host itself and on the same LAN, that's the host's LAN IPv4; over Tailscale, its Tailscale IPv4. Keep `127.0.0.1` in the list for a browser on the host:
+
+```bash
+# .env (docker-compose.pr-test.yml); replace 192.168.1.20 with the Docker host's LAN IPv4
+WEBRTC_BIND_IP=0.0.0.0
+WEBRTC_NAT1TO1_IP=127.0.0.1,192.168.1.20
+```
+
+`WEBRTC_BIND_IP=0.0.0.0` publishes the port on every host interface. To publish it only on the LAN address, set `WEBRTC_BIND_IP` to that address and use the address in place of `127.0.0.1` too. Recreate the sidecar afterwards (`docker compose -f docker-compose.pr-test.yml up -d sidecar`), then start watching again.
+
+## TeamSpeak 6.0.0-beta5 never answers a stream
+
+The bot starts streaming and the web UI preview plays, but nobody can watch in the TeamSpeak client. The client receives the stream offer and never answers it. A client trace stops at `HandleRemoteOffer ENTRY`. People who tried to watch can still be listed as viewers.
+
+This is not [stuck on "Connecting..."](#teamspeak-client-stuck-on-connecting). There the client answers the offer, then cannot reach an advertised address, and the sidecar log ends with `TeamSpeak viewer never connected`.
+
+Sidecars before 1.11.2 mark the stream's audio and video as send-and-receive (`a=sendrecv`). The TeamSpeak 6.0.0-beta5 client does not answer that offer. Older clients did. Every older sidecar sends the same offer, so downgrading does not help.
+
+Upgrade ts6-manager to 1.11.2 or newer, including the media sidecar. That sidecar offers send-only media (`a=sendonly`), which beta5 answers. A Docker sidecar follows the image tag. Replace a [native sidecar](native-sidecar.md#version-compatibility) with the 1.11.2 archive.
+
+## Appearance custom CSS made the UI unusable
+
+Custom CSS is browser-local. Open:
+
+`/settings?tab=appearance&safe-ui=1`
+
+Safe mode suspends custom CSS for that page load (and the rest of that document lifetime) without deleting the saved text. Use Appearance → Advanced to **Disable** or **Reset**, then reload without `?safe-ui=1`.
+
+Do not rely on a visible Disable button under hostile CSS — type or bookmark the recovery URL before enabling custom CSS. Clearing site data for the origin also removes the preference, but safe mode is the supported recovery path.
+
+## Beta or prerelease images
+
+If you pinned a `vX.Y.Z-beta.N` or `sha-*` tag and the UI or schema misbehaves, do not switch `latest` on a production compose file. Use `docker compose --env-file .env.beta -f docker-compose.beta.yml` on `main`, point that tester stack back at the previous tag or at stable `v1.11.2`, and restore the volume backup. Keep `.env.beta` private and Git-ignored. See [Beta releases — Rollback](beta.md#rollback).
+
+Discord voice is not part of manager images. A missing Discord bot is expected. See [Discord bridge](discord-bridge.md).

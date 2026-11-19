@@ -166,6 +166,10 @@ model MusicBot {
   avatarFile      String?
   avatarMd5       String?
   autoStart       Boolean   @default(false)
+  /// JSON Auto-DJ and persistent channel presence settings; absent means disabled.
+  automationSettings String?
+  /// JSON controller checkpoint (quiet deadline, source cursor and retry deadline).
+  automationState String?
   streamPreset    String    @default("720p")
   sidecarPort     Int       @default(9800)
   createdAt       DateTime  @default(now())
@@ -252,6 +256,21 @@ model IptvPlaylist {
   channelPicks IptvChannelPick[]
 }
 
+/// A bot's queued videos (#253). Rows are rewritten together after each change.
+model VideoQueueEntry {
+  id          String   @id
+  musicBotId  Int
+  position    Int
+  source      String
+  title       String
+  durationSec Int?
+  sourceMode  String   @default("auto")
+  addedBy     String?
+  createdAt   DateTime @default(now())
+
+  @@index([musicBotId, position])
+}
+
 model IptvChannelPick {
   serverConfigId Int
   playlistId Int
@@ -323,12 +342,20 @@ model Widget {
 model MusicRequest {
   id             Int            @id @default(autoincrement())
   title          String
+  artist         String?
+  duration       Float?
+  /// Canonical replay reference (media URL or local filename). Never a display title.
   url            String
+  source         String         @default("url")
+  status         String         @default("available")
   serverConfigId Int
   serverConfig   TsServerConfig @relation(fields: [serverConfigId], references: [id], onDelete: Cascade)
+  /// 0 keeps rows recorded before history was stored per bot.
+  musicBotId     Int            @default(0)
   requestedAt    DateTime       @default(now())
 
-  @@unique([serverConfigId, url])
+  @@unique([serverConfigId, musicBotId, url])
+  @@index([serverConfigId, requestedAt])
 }
 
 model StreamSession {

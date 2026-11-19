@@ -228,8 +228,8 @@ export function useLoadPlaylist() {
 export function useRemoveFromQueue() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ botId, index }: { botId: number; index: number }) =>
-      musicBotsApi.removeFromQueue(botId, index),
+    mutationFn: ({ botId, index, itemId }: { botId: number; index: number; itemId?: string }) =>
+      musicBotsApi.removeFromQueue(botId, index, itemId),
     onSuccess: (_, { botId }) => qc.invalidateQueries({ queryKey: ['music-bot-state', botId] }),
   });
 }
@@ -263,8 +263,8 @@ export function useSetRepeat() {
 export function usePlayFromQueue() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ botId, index }: { botId: number; index: number }) =>
-      musicBotsApi.playFromQueue(botId, index),
+    mutationFn: ({ botId, index, itemId }: { botId: number; index: number; itemId?: string }) =>
+      musicBotsApi.playFromQueue(botId, index, itemId),
     onSuccess: (_, { botId }) => qc.invalidateQueries({ queryKey: ['music-bot-state', botId] }),
   });
 }
@@ -272,8 +272,8 @@ export function usePlayFromQueue() {
 export function useMoveQueueItem() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ botId, from, to }: { botId: number; from: number; to: number }) =>
-      musicBotsApi.moveQueueItem(botId, from, to),
+    mutationFn: ({ botId, from, to, itemId }: { botId: number; from: number; to: number; itemId?: string }) =>
+      musicBotsApi.moveQueueItem(botId, from, to, itemId),
     onSuccess: (_, { botId }) => qc.invalidateQueries({ queryKey: ['music-bot-state', botId] }),
   });
 }
@@ -362,6 +362,66 @@ export function useKickVideoViewer() {
       musicBotsApi.kickViewer(botId, clid),
     onSuccess: (_, { botId }) => qc.invalidateQueries({ queryKey: ['video-stream-status', botId] }),
   });
+}
+
+// === Video queue ===
+
+export function useVideoQueue(botId: number | null) {
+  return useQuery({
+    queryKey: ['video-queue', botId],
+    queryFn: () => musicBotsApi.videoQueue(botId!),
+    enabled: !!botId,
+    refetchInterval: 2000,
+  });
+}
+
+/** Every video queue change shows in Up next and can start or stop a stream. */
+function useVideoQueueMutation<TVariables extends { botId: number }, TData>(
+  mutationFn: (variables: TVariables) => Promise<TData>,
+) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn,
+    onSettled: (_data, _error, { botId }) => {
+      qc.invalidateQueries({ queryKey: ['video-queue', botId] });
+      qc.invalidateQueries({ queryKey: ['bot-media'] });
+    },
+  });
+}
+
+export function useQueueVideo() {
+  return useVideoQueueMutation(({ botId, ...request }: { botId: number } & StartVideoStreamRequest) =>
+    musicBotsApi.queueVideo(botId, request));
+}
+
+export function usePlayVideoQueue() {
+  return useVideoQueueMutation(({ botId, ...request }: { botId: number } & Partial<StartVideoStreamRequest>) =>
+    musicBotsApi.playVideoQueue(botId, request));
+}
+
+export function useSkipVideo() {
+  return useVideoQueueMutation(({ botId }: { botId: number }) => musicBotsApi.skipVideo(botId));
+}
+
+export function usePlayQueuedVideo() {
+  return useVideoQueueMutation(
+    ({ botId, index, ...request }: { botId: number; index: number } & Partial<StartVideoStreamRequest>) =>
+      musicBotsApi.playQueuedVideo(botId, index, request),
+  );
+}
+
+export function useRemoveQueuedVideo() {
+  return useVideoQueueMutation(({ botId, index }: { botId: number; index: number }) =>
+    musicBotsApi.removeQueuedVideo(botId, index));
+}
+
+export function useMoveQueuedVideo() {
+  return useVideoQueueMutation(({ botId, from, to }: { botId: number; from: number; to: number }) =>
+    musicBotsApi.moveQueuedVideo(botId, from, to));
+}
+
+export function useClearVideoQueue() {
+  return useVideoQueueMutation(({ botId }: { botId: number }) => musicBotsApi.clearVideoQueue(botId));
 }
 
 // === Bot hub ===

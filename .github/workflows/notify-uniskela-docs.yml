@@ -27,12 +27,12 @@ jobs:
           fi
       - name: Create short-lived destination token
         id: app
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           app-id: ${{ vars.DOCS_SYNC_APP_ID }}
           private-key: ${{ secrets.DOCS_SYNC_APP_PRIVATE_KEY }}
           owner: uniskela
-          repositories: .com
+          repositories: com
           permission-contents: write
       - name: Notify the documentation receiver
         env:
@@ -43,4 +43,4 @@ jobs:
         run: |
           jq -n --arg repository "$SOURCE_REPO" --arg sha "$SOURCE_SHA" --arg ref "$SOURCE_REF" \
             '{event_type:"docs-source-updated",client_payload:{repository:$repository,sha:$sha,ref:$ref}}' > "$RUNNER_TEMP/docs-dispatch.json"
-          gh api --method POST repos/uniskela/.com/dispatches --input "$RUNNER_TEMP/docs-dispatch.json"
+          gh api --method POST repos/uniskela/com/dispatches --input "$RUNNER_TEMP/docs-dispatch.json"

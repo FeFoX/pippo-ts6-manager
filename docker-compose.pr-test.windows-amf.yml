@@ -1,5 +1,5 @@
 # Windows-native AMF PR test: Docker TeamSpeak/backend/frontend + native Windows sidecar.
-# Start the native sidecar first; see docs/video-streaming.md#windows-amf-pr-test.
+# Start the native sidecar first; see docs/public/video-streaming.md#windows-amf-pr-test.
 # Run this file alone, not as an override of docker-compose.pr-test.yml.
 # HTTP 9800 and WebRTC UDP are owned by the native process, never published here.
 # All Docker host ports bind loopback; this is a same-host development harness.
@@ -69,6 +69,8 @@ services:
       JWT_ACCESS_EXPIRY: 15m
       JWT_REFRESH_EXPIRY: 7d
       FRONTEND_URL: http://localhost:3000
+      # Optional HTTPS listener remote URL; production-mode backend rejects plain HTTP.
+      PUBLIC_URL: ${PUBLIC_URL:-}
       MUSIC_DIR: /data/music
       TS_ALLOW_SELF_SIGNED: ${TS_ALLOW_SELF_SIGNED:-true}
       TS_ALLOW_PRIVATE_HOSTS: ${TS_ALLOW_PRIVATE_HOSTS:-true}

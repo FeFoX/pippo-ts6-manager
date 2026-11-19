@@ -8,10 +8,14 @@ import type { Readable } from 'stream';
 import { Ts3Client, type Ts3ClientOptions, generateIdentity, type IdentityData, buildCommand, buildSendTextCommands, isConnectionRefusal } from './tslib/index.js';
 import { AudioPipeline, FRAME_MS, BYTES_PER_FRAME, isRemoteInput } from './audio/pipeline.js';
 import { PlayQueue, type QueueItem } from './playlist/queue.js';
+import { createQueueChangeHook } from './queue-change-hook.js';
+import type { AutomationController } from './automation-controller.js';
 import { fetchIcyMetadata } from './audio/icy-metadata.js';
 import { downloadYouTube, resolveYouTubeAudioStream, isYouTubeHostUrl } from './audio/youtube.js';
 import { StreamSignaling, type ActiveStream, type SignalingMessage } from './streaming/stream-signaling.js';
+import { summarizeBotAutomation } from '@ts6/common';
 import type {
+  BotAutomationOverview,
   BotMediaOverview,
   MediaSessionInfo,
   MediaStopInfo,
@@ -30,10 +34,11 @@ import type {
   VideoSourceModeRequest,
   VideoStreamHealth,
 } from '@ts6/common';
-import { SidecarClient, type SidecarEncoderSession } from './streaming/sidecar-client.js';
+import { SidecarClient, type SidecarEncoderSession, type SidecarStreamHealth } from './streaming/sidecar-client.js';
+import { AdaptiveQualityController, type QualityDecision } from './streaming/adaptive-quality.js';
 import { SidecarProcess, type SidecarConfig } from './streaming/sidecar-process.js';
 import { STREAM_PRESETS, DEFAULT_PRESET, type VideoViewerInfo, type VideoStreamStatus } from './streaming/types.js';
-import { downloadVideoForStream, safeUnlinkStreamTemp, resolvePathUnderMusicDir } from './streaming/video-download.js';
+import { downloadVideoForStream, safeUnlinkStreamTemp, resolvePathUnderMusicDir, type SourceVideoCodec } from './streaming/video-download.js';
 import { convertGiveUpReason } from './streaming/convert-limits.js';
 import { effectiveBitrate, normalizeQualityRequest, presetBitrate, resolveQuality } from './streaming/quality.js';
 import {
@@ -132,6 +137,12 @@ export interface VoiceBotConfig {
    * to the next stream.
    */
   loadYoutubeDirectStream?: () => Promise<boolean>;
+  /**
+   * Asked when a video source finishes on its own (end of a clip, encoder
+   * exit). Resolving `true` means the caller took over, for example by
+   * switching to the next queued video, and the stream must stay up.
+   */
+  videoSourceFinished?: (reason: MediaStopReason, detail: string | null) => Promise<boolean>;
 }
 
 /** Per-stream overrides; anything omitted uses the admin defaults. */
@@ -183,6 +194,8 @@ interface ResolvedStreamSource {
   live?: boolean;
   durationSec: number | null;
   resolution?: { width: number; height: number };
+  /** The source's video codec when known (YouTube direct), so the sidecar can decode AV1 on the GPU. */
+  videoCodec?: SourceVideoCodec;
 }
 
 /**
@@ -208,9 +221,18 @@ const FLOOD_HOLD_MS = 30_000;
 
 export interface MusicStartOptions {
   replaceSessionIds?: string[];
+  /** Internal fallback playback ownership; never accepted from an API request. */
+  automation?: () => boolean;
+}
+
+/** One log record for a viewer-controlled signaling error. */
+function quoteLog(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return JSON.stringify(message);
 }
 
 export class VoiceBot extends EventEmitter {
+  automation?: AutomationController;
   private client: Ts3Client;
   private pipeline: AudioPipeline;
   readonly queue: PlayQueue;
@@ -234,6 +256,13 @@ export class VoiceBot extends EventEmitter {
    * stopped or replaced track never starts. Pausing does not replace it.
    */
   private playbackOwner: object = {};
+  /**
+   * Advanced by an explicit Stop (music, or video when the caller asks), a
+   * queue clear and stopping the bot; never by a skip, a track change, Auto-DJ,
+   * media replacement or an automatic video stop. A slow request compares it
+   * before queueing, so music it resolved before a Stop cannot start after it.
+   */
+  private _stopGeneration = 0;
   private fileStdout: Readable | null = null;
   private fileFramesSent = 0;
   private fileBaseSeconds = 0;
@@ -268,6 +297,8 @@ export class VoiceBot extends EventEmitter {
 
   // Reconnect: distinguishes manual stop from unexpected disconnect
   private _manuallyStopped: boolean = false;
+  private connectionEpoch = 0;
+  private connectionIntent = 0;
 
   // Video streaming state
   private signaling: StreamSignaling | null = null;
@@ -310,6 +341,13 @@ export class VoiceBot extends EventEmitter {
   private _videoHealth: VideoStreamHealth | null = null;
   private _videoHealthTimer: ReturnType<typeof setInterval> | null = null;
   private _videoHealthPolling = false;
+  /** Adaptive Auto quality for the running source; null for fixed presets. */
+  private _videoAdaptive: AdaptiveQualityController | null = null;
+  /** True while an automatic quality change is restarting the encode. */
+  private _qualityChangeActive = false;
+  /** Probed length of the running source, for resuming a looped file mid-loop. */
+  private _videoSourceDurationSec: number | null = null;
+  private _adaptiveResumeWarned = false;
   private _videoStarting = false;
   /** Set while startVideoStreamClaimed awaits TeamSpeak; used to abort that wait. */
   private _videoStartReject: ((err: Error) => void) | null = null;
@@ -332,6 +370,8 @@ export class VoiceBot extends EventEmitter {
   private _videoProbedDurationSec: number | null = null;
   /** Serializes seeks so two quick `!seek` commands do not interleave. */
   private _videoSeekChain: Promise<void> = Promise.resolve();
+  /** Pauses, resumes and seeks queued or running (see queueSeek). */
+  private _videoSeeksPending = 0;
   /** When a seek on a remote source was last allowed (0 = never). */
   private _lastRemoteSeekAt = 0;
   private _lastRemoteResumeAt = 0;
@@ -383,7 +423,15 @@ export class VoiceBot extends EventEmitter {
     this._videoStreamVolume = config.videoStreamVolume ?? config.volume;
     this.client = new Ts3Client();
     this.pipeline = new AudioPipeline();
-    this.queue = new PlayQueue();
+    this.queue = new PlayQueue(createQueueChangeHook({
+      automation: () => this.automation,
+      isConnected: () => this._status === 'connected',
+      nowPlaying: () => this.nowPlaying,
+      hasVideoSession: () => Boolean(this.videoSessionInfo()),
+      next: () => this.queue.next(),
+      play: item => this.play(item),
+      emitError: err => this.emit('error', err),
+    }));
 
     this.client.on('error', (err) => {
       this._status = 'error';
@@ -393,6 +441,9 @@ export class VoiceBot extends EventEmitter {
 
     this.client.on('disconnected', () => {
       this.cancelNicknameReclaim();
+      this.automation?.disconnected();
+      this.connectionEpoch++;
+      if (this.musicActive) this.endMusicSession('server_disconnect', 'Disconnected from TeamSpeak');
       // Cancel the separate avatar transfer socket so a later start() is not queued behind it.
       this.avatarAbort?.abort();
       this._streamNotificationsRegistered = false;
@@ -435,6 +486,16 @@ export class VoiceBot extends EventEmitter {
 
   get status(): VoiceBotStatus {
     return this._status;
+  }
+
+  /** Changes for every playback start/stop, even when replaying the same queue item. */
+  get playbackToken(): object {
+    return this.playbackOwner;
+  }
+
+  /** Changes on every explicit Stop or queue clear; see {@link _stopGeneration}. */
+  get stopGeneration(): number {
+    return this._stopGeneration;
   }
 
   get nowPlaying(): QueueItem | null {
@@ -634,6 +695,7 @@ export class VoiceBot extends EventEmitter {
 
     this.autoStopEmptySince = null;
     this.autoStopTimer = setInterval(() => {
+      if (this.automation?.active && !this.automation.configuration.requireListeners) return;
       if (this._status !== 'playing' && !this._videoStreaming) {
         this.stopAutoStopTimer();
         return;
@@ -738,8 +800,22 @@ export class VoiceBot extends EventEmitter {
     this._videoEndTimer = setTimeout(() => {
       this._videoEndTimer = null;
       console.log(`[VoiceBot ${this.config.id}] Video ended, auto-stopping`);
-      this.stopVideoStream('source_ended', 'Video reached its end').catch((err) => this.emit('error', err));
+      this.handleVideoSourceFinished('source_ended', 'Video reached its end').catch((err) => this.emit('error', err));
     }, (durationSec + 2) * 1000);
+  }
+
+  /** A source finished on its own: let the hook take over, otherwise stop as usual. */
+  private async handleVideoSourceFinished(reason: MediaStopReason, detail: string | null): Promise<void> {
+    if (!this._videoStreaming || this._videoStopping) return;
+    let handled = false;
+    if (this.config.videoSourceFinished) {
+      try {
+        handled = await this.config.videoSourceFinished(reason, detail);
+      } catch (err) {
+        console.error(`[VoiceBot ${this.config.id}] videoSourceFinished hook failed:`, err);
+      }
+    }
+    if (!handled) await this.stopVideoStream(reason, detail);
   }
 
   /**
@@ -754,7 +830,7 @@ export class VoiceBot extends EventEmitter {
   ): Promise<ResolvedStreamSource> {
     const maxDur = this.config.maxVideoDurationSec ?? 900;
     const youtubeDirect = await this.youtubeDirectStream();
-    const { path: filePath, audioPath, durationSec, live, resolution } = await downloadVideoForStream(
+    const { path: filePath, audioPath, durationSec, live, resolution, videoCodec } = await downloadVideoForStream(
       source,
       maxHeight,
       maxDur,
@@ -792,10 +868,10 @@ export class VoiceBot extends EventEmitter {
     // after the sidecar accepts the source in applyVideoSource.
     if (live === false && durationSec != null && durationSec > 0) {
       this._videoDurationSec = durationSec;
-      return { path: filePath, audioPath, loop: false, live, durationSec, resolution };
+      return { path: filePath, audioPath, loop: false, live, durationSec, resolution, videoCodec };
     }
 
-    return { path: filePath, audioPath, loop: true, live, durationSec, resolution };
+    return { path: filePath, audioPath, loop: true, live, durationSec, resolution, videoCodec };
   }
 
   /** A failed read keeps the default: download first. */
@@ -926,11 +1002,13 @@ export class VoiceBot extends EventEmitter {
   }
 
   async start(): Promise<void> {
-    if (this._status === 'connected' || this._status === 'playing' || this._status === 'paused') {
+    if (this._status === 'starting' || this._status === 'connected' || this._status === 'playing' || this._status === 'paused') {
       throw new Error('Bot is already running');
     }
 
     this._manuallyStopped = false;
+    this.connectionIntent++;
+    const connectionEpoch = ++this.connectionEpoch;
     this._status = 'starting';
     this.emit('statusChange', this._status);
 
@@ -942,13 +1020,15 @@ export class VoiceBot extends EventEmitter {
       identity: this.identity,
       nickname: this.config.nickname,
       serverPassword: this.config.serverPassword,
-      defaultChannel: this.config.defaultChannel,
+      defaultChannel: this.automation?.keepChannel && this.automation.state.channelId
+        ? String(this.automation.state.channelId) : this.config.defaultChannel,
       channelPassword: this.config.channelPassword,
     };
 
     // A new connection has no server-side notification registrations yet.
     this._streamNotificationsRegistered = false;
     await this.client.connect(opts);
+    if (connectionEpoch !== this.connectionEpoch) return;
     this._status = 'connected';
     this.emit('statusChange', this._status);
     this.emit('connected');
@@ -959,6 +1039,10 @@ export class VoiceBot extends EventEmitter {
   }
 
   async stop(): Promise<void> {
+    this.connectionIntent++;
+    this.connectionEpoch++;
+    this._stopGeneration++;
+    this.automation?.disconnected();
     this._manuallyStopped = true;
     this.cancelNicknameReclaim();
     this.avatarAbort?.abort();
@@ -981,27 +1065,34 @@ export class VoiceBot extends EventEmitter {
   }
 
   async restart(): Promise<void> {
+    // stop() claims the next intent synchronously, before any video cleanup awaits.
+    const connectionIntent = this.connectionIntent + 1;
     await this.stop();
     await new Promise<void>((resolve) => {
       const check = () => {
-        if (this._status === 'stopped') resolve();
+        if (connectionIntent !== this.connectionIntent || this._status === 'stopped') resolve();
         else setTimeout(check, 100);
       };
       setTimeout(check, 600);
     });
-    await this.start();
+    if (connectionIntent === this.connectionIntent) await this.start();
   }
 
   /** Returns sessions actually replaced (this bot's video) when starting music. */
   async play(item: QueueItem, options: MusicStartOptions = {}): Promise<MediaSessionInfo[]> {
+    if (item.streamUrl) return this.playStream(item, options);
     if (this._status !== 'connected' && this._status !== 'playing' && this._status !== 'paused') {
       throw new Error('Bot is not connected');
     }
+    if (options.automation && !options.automation()) return [];
+    if (!options.automation) this.automation?.requestQueued();
+    const intent = this.playbackOwner = {};
     const replaced: MediaSessionInfo[] = [];
     if (this._videoStreaming || this._videoStarting) {
       const session = await this.replaceVideoWithMusic(options.replaceSessionIds);
       if (session) replaced.push(session);
     }
+    if (intent !== this.playbackOwner) return replaced;
     this.beginMusicSession();
 
     this.stopIcyPolling();
@@ -1050,6 +1141,7 @@ export class VoiceBot extends EventEmitter {
       this._status = 'connected';
       this._nowPlaying = null;
       this.emit('statusChange', this._status);
+      this.automation?.sourceEnded({ failed: true });
       throw err;
     }
     return replaced;
@@ -1107,6 +1199,10 @@ export class VoiceBot extends EventEmitter {
           return;
         }
         if (!this._videoStreaming) this.stopAutoStopTimer();
+        if (this.recoverAutomatedFailure()) {
+          this.emit('error', new Error(`FFmpeg file playback exited with code ${code}`));
+          return;
+        }
         this._status = 'error';
         this.emit('error', new Error(`FFmpeg file playback exited with code ${code}`));
         this.emit('statusChange', this._status);
@@ -1124,6 +1220,10 @@ export class VoiceBot extends EventEmitter {
       this.streamChunks = [];
       this.streamChunksSize = 0;
       if (!this._videoStreaming) this.stopAutoStopTimer();
+      if (this.recoverAutomatedFailure()) {
+        this.emit('error', err);
+        return;
+      }
       this._status = 'error';
       this.emit('error', err);
       this.emit('statusChange', this._status);
@@ -1165,6 +1265,7 @@ export class VoiceBot extends EventEmitter {
         this._status = 'connected';
         this._nowPlaying = null;
         this.emit('statusChange', this._status);
+        this.automation?.sourceEnded({ failed: true });
         this.emit('error', err instanceof Error ? err : new Error(String(err)));
       });
   }
@@ -1219,6 +1320,7 @@ export class VoiceBot extends EventEmitter {
   };
 
   private finishFileTrack(): void {
+    if (this.fileFramesSent === 0 && this.recoverAutomatedFailure()) return;
     this.client.sendVoiceStop();
     this.clearTimer();
     this._fileStreamActive = false;
@@ -1233,6 +1335,13 @@ export class VoiceBot extends EventEmitter {
     this.emit('statusChange', this._status);
     this.emit('trackEnd', finished);
 
+    if (this.automation?.active) {
+      this.endMusicSession('source_ended', 'Auto-DJ track finished');
+      this.resetNickname();
+      this.automation.sourceEnded();
+      return;
+    }
+
     if (this.queue.repeat === 'track' && finished) {
       this.play(finished).catch((err) => this.emit('error', err));
       return;
@@ -1245,6 +1354,7 @@ export class VoiceBot extends EventEmitter {
       this.endMusicSession('source_ended', 'Queue finished');
       this.resetNickname();
       if (!this._videoStreaming) this.stopAutoStopTimer();
+      void this.automation?.reconcile();
     }
   }
 
@@ -1288,15 +1398,21 @@ export class VoiceBot extends EventEmitter {
     if (!item.streamUrl) {
       throw new Error('No streamUrl provided');
     }
+    if (options.automation && !options.automation()) return [];
+    if (!options.automation) this.automation?.requestQueued();
+    const intent = this.playbackOwner = {};
     const replaced: MediaSessionInfo[] = [];
     if (this._videoStreaming || this._videoStarting) {
       const session = await this.replaceVideoWithMusic(options.replaceSessionIds);
       if (session) replaced.push(session);
     }
+    if (intent !== this.playbackOwner) return replaced;
     this.beginMusicSession();
 
     this.stopIcyPolling();
     this.stopPlayback();
+    const owner = this.playbackOwner;
+    const current = () => owner === this.playbackOwner;
     this._nowPlaying = item;
     this._isStreaming = true;
     this._status = 'playing';
@@ -1308,6 +1424,10 @@ export class VoiceBot extends EventEmitter {
 
     try {
       const stream = await this.pipeline.toPcmStream(item.streamUrl);
+      if (!current()) {
+        stream.kill();
+        return replaced;
+      }
       this.streamKill = stream.kill;
       this.streamChunks = [];
       this.streamChunksSize = 0;
@@ -1322,8 +1442,10 @@ export class VoiceBot extends EventEmitter {
         this.streamChunksSize += chunk.length;
       });
 
-      stream.process.on('close', () => {
+      stream.process.on('close', (code) => {
         if (epoch !== this.loopEpoch) return;
+        this.stopIcyPolling();
+        this.stopPlayback();
         this.client.sendVoiceStop();
         this._isStreaming = false;
         this.streamKill = null;
@@ -1332,10 +1454,15 @@ export class VoiceBot extends EventEmitter {
         this.endMusicSession('source_ended', 'Stream ended');
         this.emit('statusChange', this._status);
         this.emit('trackEnd', item);
+        this.automation?.sourceEnded({ failed: code != null && code !== 0 });
       });
 
       stream.process.on('error', (err) => {
         if (epoch !== this.loopEpoch) return;
+        if (this.recoverAutomatedFailure()) {
+          this.emit('error', err);
+          return;
+        }
         this._isStreaming = false;
         this.streamKill = null;
         this._status = 'error';
@@ -1390,6 +1517,10 @@ export class VoiceBot extends EventEmitter {
       this.startAutoStopTimer();
     } catch (err) {
       // A failed start must not leave ICY polling running for a dead stream.
+      if (!current()) {
+        console.warn('[VoiceBot %s] Discarding failed stale stream startup', this.config.id);
+        return replaced;
+      }
       this.stopIcyPolling();
       this._isStreaming = false;
       this.streamKill = null;
@@ -1397,14 +1528,27 @@ export class VoiceBot extends EventEmitter {
       this._status = 'connected';
       this._nowPlaying = null;
       this.emit('statusChange', this._status);
+      this.automation?.sourceEnded({ failed: true });
       throw err;
     }
     return replaced;
   }
 
+  private recoverAutomatedFailure(): boolean {
+    if (!this.automation?.active) return false;
+    this.clearPlayback('source_unreachable', 'Auto-DJ source failed');
+    this.automation.sourceEnded({ failed: true });
+    return true;
+  }
+
   /** Stop current audio without disconnecting the bot (used by clear-queue). */
   clearPlayback(reason: MediaStopReason = 'manual', detail: string | null = null): void {
-    if (this.musicActive) this.endMusicSession(reason, detail);
+    const hadMusic = this.musicActive;
+    if (reason === 'manual') {
+      this._stopGeneration++;
+      this.automation?.manualStop();
+    }
+    if (hadMusic) this.endMusicSession(reason, detail);
     this.stopIcyPolling();
     this.stopPlayback();
     try {
@@ -1458,7 +1602,8 @@ export class VoiceBot extends EventEmitter {
       const item = this._nowPlaying;
       this._status = 'playing';
       this.emit('statusChange', this._status);
-      this.playStream(item).catch((err) => this.emit('error', err));
+      this.playStream(item, this.automation?.active ? { automation: () => this.automation?.active ?? false } : {})
+        .catch((err) => this.emit('error', err));
     }
   }
 
@@ -1574,9 +1719,7 @@ export class VoiceBot extends EventEmitter {
    * ffmpeg would catch up in a burst when it woke, and the picture would race ahead.
    */
   pauseVideo(): Promise<void> {
-    const run = this._videoSeekChain.then(() => this.pauseVideoNow());
-    this._videoSeekChain = run.catch(() => undefined);
-    return run;
+    return this.queueSeek(() => this.pauseVideoNow());
   }
 
   private async pauseVideoNow(): Promise<void> {
@@ -1608,9 +1751,7 @@ export class VoiceBot extends EventEmitter {
    * the video stuck for the length of the cooldown. Only a short resume cooldown applies.
    */
   resumeVideo(): Promise<void> {
-    const run = this._videoSeekChain.then(() => this.resumeVideoNow());
-    this._videoSeekChain = run.catch(() => undefined);
-    return run;
+    return this.queueSeek(() => this.resumeVideoNow());
   }
 
   private async resumeVideoNow(): Promise<void> {
@@ -1623,7 +1764,20 @@ export class VoiceBot extends EventEmitter {
 
   /** Restart the encode at `seconds` into the running video. Seeks run one at a time. */
   seekVideo(seconds: number): Promise<void> {
-    const run = this._videoSeekChain.then(() => this.seekVideoNow(seconds));
+    return this.queueSeek(() => this.seekVideoNow(seconds));
+  }
+
+  /**
+   * Pause, resume and seek run one at a time, each after any volume or Auto quality restart
+   * that is already under way: all of them restart ffmpeg, and the last one to reach the sidecar
+   * would otherwise undo the others. While one is queued, Auto quality leaves the encode alone.
+   */
+  private queueSeek(work: () => Promise<void>): Promise<void> {
+    this._videoSeeksPending++;
+    const run = this._videoSeekChain
+      .then(() => this._volumePushTail)
+      .then(work)
+      .finally(() => { this._videoSeeksPending--; });
     this._videoSeekChain = run.catch(() => undefined);
     return run;
   }
@@ -1657,6 +1811,7 @@ export class VoiceBot extends EventEmitter {
     // Same source as the running one: the downloaded temp file, or a fresh direct URL.
     let sourcePath: string;
     let audioPath: string | undefined;
+    let videoCodec: SourceVideoCodec | undefined;
     let loop = false;
     let tempPath: string | null = null;
     if (this._videoTempFile) {
@@ -1675,6 +1830,7 @@ export class VoiceBot extends EventEmitter {
       const resolved = await this.resolveForSeek(source, STREAM_PRESETS[quality.actual].height);
       sourcePath = resolved.path;
       audioPath = resolved.audioPath;
+      videoCodec = resolved.videoCodec;
       loop = resolved.loop;
     }
     // A stop or source change that began while resolving owns the sidecar now.
@@ -1692,7 +1848,7 @@ export class VoiceBot extends EventEmitter {
     // Stay clear of the very end so the encode still has something to play.
     const target = Math.max(0, Math.min(seconds, duration != null ? Math.max(0, duration - 2) : Infinity));
 
-    await this.sendSourceToSidecar(sourcePath, loop && mode === 'file', quality, mode, audioPath, target);
+    await this.sendSourceToSidecar(sourcePath, loop && mode === 'file', quality, mode, { audioSource: audioPath, videoCodec }, target);
     // Only a stream that already had an end-stop clock keeps one, now for what is left.
     if (!loop && this._videoDurationSec != null) this.scheduleVideoEndStop(this._videoDurationSec - target);
   }
@@ -1743,6 +1899,7 @@ export class VoiceBot extends EventEmitter {
       this._status = 'connected';
       this._nowPlaying = null;
       this.emit('statusChange', this._status);
+      this.automation?.sourceEnded({ failed: true });
       this.emit('error', err instanceof Error ? err : new Error(String(err)));
       throw err;
     }
@@ -1834,6 +1991,19 @@ export class VoiceBot extends EventEmitter {
     }
   }
 
+  /** Resolve the running source again for an encoder restart (volume or quality change). */
+  private async resolveRunningSource(
+    maxHeight: number,
+  ): Promise<{ sourcePath: string; audioPath?: string; videoCodec?: SourceVideoCodec; loop: boolean }> {
+    if (this._videoTempFile) {
+      try {
+        return { sourcePath: resolvePathUnderMusicDir(this._videoTempFile), loop: false };
+      } catch { /* the download is gone: resolve it again */ }
+    }
+    const resolved = await this.resolveStreamSource(this._videoSource!, maxHeight);
+    return { sourcePath: resolved.path, audioPath: resolved.audioPath, videoCodec: resolved.videoCodec, loop: resolved.loop };
+  }
+
   /** Restart the running encode so the sidecar picks up `_videoStreamVolume`. */
   private async pushVideoStreamVolume(): Promise<void> {
     if (!this._videoStreaming || !this.sidecarHttp || !this._videoSource) {
@@ -1841,26 +2011,7 @@ export class VoiceBot extends EventEmitter {
     }
     // Reuse the resolved quality: a volume change must not re-probe the source.
     const quality = this._videoQuality ?? resolveQuality(this._videoPreset, this._videoSettings.autoMaxPreset, null);
-    const maxHeight = STREAM_PRESETS[quality.actual].height;
-    let sourcePath: string;
-    let audioPath: string | undefined;
-    let loop = true;
-    if (this._videoTempFile) {
-      try {
-        sourcePath = resolvePathUnderMusicDir(this._videoTempFile);
-        loop = false;
-      } catch {
-        const resolved = await this.resolveStreamSource(this._videoSource, maxHeight);
-        sourcePath = resolved.path;
-        audioPath = resolved.audioPath;
-        loop = resolved.loop;
-      }
-    } else {
-      const resolved = await this.resolveStreamSource(this._videoSource, maxHeight);
-      sourcePath = resolved.path;
-      audioPath = resolved.audioPath;
-      loop = resolved.loop;
-    }
+    const { sourcePath, audioPath, videoCodec, loop } = await this.resolveRunningSource(STREAM_PRESETS[quality.actual].height);
     // Source resolution can take a while; a stop or source change that began
     // meanwhile owns the sidecar now, and a /source here would restart ffmpeg
     // after the stop, or on the old source.
@@ -1871,7 +2022,7 @@ export class VoiceBot extends EventEmitter {
     const resumeAt = !this._videoLoop && this._videoSourceMode !== 'live'
       ? Math.min(this.videoPositionSec ?? 0, knownLength != null ? Math.max(0, knownLength - 2) : Infinity)
       : 0;
-    await this.sendSourceToSidecar(sourcePath, loop && mode === 'file', quality, mode, audioPath, resumeAt);
+    await this.sendSourceToSidecar(sourcePath, loop && mode === 'file', quality, mode, { audioSource: audioPath, videoCodec }, resumeAt);
     // Re-arm the auto-stop timer for what is left of a non-looping on-demand clip.
     if (!loop && this._videoDurationSec != null) {
       this.scheduleVideoEndStop(this._videoDurationSec - resumeAt);
@@ -1880,6 +2031,7 @@ export class VoiceBot extends EventEmitter {
   }
 
   skip(options: MusicStartOptions = {}): void {
+    if (this.automation?.active) this.automation.requestQueued();
     this.stopIcyPolling();
     this.stopPlayback();
     this._nowPlaying = null;
@@ -1891,10 +2043,13 @@ export class VoiceBot extends EventEmitter {
       this.play(next, options).catch((err) => this.emit('error', err));
     } else {
       this.resetNickname();
+      this.endMusicSession('source_ended', 'Queue finished');
+      void this.automation?.reconcile();
     }
   }
 
   previous(options: MusicStartOptions = {}): void {
+    if (this.automation?.active) this.automation.requestQueued();
     this.stopIcyPolling();
     this.stopPlayback();
     this._nowPlaying = null;
@@ -1906,11 +2061,17 @@ export class VoiceBot extends EventEmitter {
       this.play(prev, options).catch((err) => this.emit('error', err));
     } else {
       this.resetNickname();
+      this.endMusicSession('source_ended', 'No previous request');
+      void this.automation?.reconcile();
     }
   }
 
-  stopAudio(): void {
-    if (this.musicActive) this.endMusicSession('manual', null);
+  /** Stop music. A skip past the last track passes `keepPendingRequests`, so requests still loading are kept. */
+  stopAudio(options: { keepPendingRequests?: boolean } = {}): void {
+    const hadMusic = this.musicActive;
+    if (!options.keepPendingRequests) this._stopGeneration++;
+    this.automation?.manualStop();
+    if (hadMusic) this.endMusicSession('manual', null);
     this.stopIcyPolling();
     this.stopPlayback();
     this.client.sendVoiceStop();
@@ -2095,7 +2256,15 @@ export class VoiceBot extends EventEmitter {
       preparing: this.videoPreparation,
       lastMusicStop: this._lastMusicStop,
       lastVideoStop: this._lastVideoStop,
+      automation: this.automationOverview(),
     };
+  }
+
+  /** Auto-DJ and 24/7 status for the Bot hub and `!help`; null when both are off. */
+  automationOverview(): BotAutomationOverview | null {
+    const automation = this.automation;
+    if (!automation) return null;
+    return summarizeBotAutomation(automation.configuration, automation.active, automation.state.presenceSuppressed);
   }
 
   /**
@@ -2131,7 +2300,9 @@ export class VoiceBot extends EventEmitter {
       viewerCount: this._viewers.size,
       viewers: Array.from(this._viewers.values()),
       sidecar: null,
-      quality: this._videoStreaming ? this._videoQuality : null,
+      quality: this._videoStreaming && this._videoQuality
+        ? { ...this._videoQuality, adaptation: this._videoAdaptive?.snapshot() ?? null }
+        : null,
       encoder: this._videoStreaming ? this._videoEncoder : null,
       noViewer: { timeoutSec: this._noViewerTimeoutSec, stopAt: this._noViewerStopAt },
       lastStop: this._lastVideoStop,
@@ -2240,15 +2411,29 @@ export class VoiceBot extends EventEmitter {
       this._videoHealthTimer = null;
     }
     this._videoHealth = null;
+    this._videoAdaptive = null;
   }
 
   /** One health sample; stops the stream with a truthful reason if ffmpeg died. */
   async pollVideoHealth(): Promise<void> {
     if (!this._videoStreaming || !this.sidecarHttp || this._videoHealthPolling || this._videoStopping) return;
+    if (this._videoSourceChangesPending > 0 || this._volumePushActive || this._qualityChangeActive) return;
     this._videoHealthPolling = true;
+    const sidecar = this.sidecarHttp;
+    const streamId = this._activeStreamId;
+    const encoder = this._videoEncoder;
     try {
-      const stats = await this.sidecarHttp.getStats();
-      if (!this._videoStreaming || this._videoStopping) return;
+      const stats = await sidecar.getStats();
+      if (!this._videoStreaming || this._videoStopping || this.sidecarHttp !== sidecar
+        || this._activeStreamId !== streamId || this._videoEncoder !== encoder
+        || this._videoSourceChangesPending > 0 || this._volumePushActive || this._qualityChangeActive) return;
+
+      // A GPU decoder can fail after POST /source has already returned. Refresh
+      // its session even when FFmpeg has not produced a health sample yet.
+      // Older sidecars may omit the session; keep the startup result in that case.
+      if (stats.encoder && isEncoderId(stats.encoder.active) && this.applyEncoderSession(stats.encoder)) {
+        this.emit('statusChange', this._status);
+      }
 
       if (stats.encoder?.state === 'exited') {
         const exit = classifyEncoderExit({
@@ -2256,8 +2441,8 @@ export class VoiceBot extends EventEmitter {
           loop: this._videoLoop,
           exitError: stats.encoder.exitError ?? null,
         });
-        console.warn(`[VoiceBot ${this.config.id}] Encoder exited (${exit.reason}); stopping stream`);
-        await this.stopVideoStream(exit.reason, exit.detail);
+        console.warn(`[VoiceBot ${this.config.id}] Encoder exited (${exit.reason})`);
+        await this.handleVideoSourceFinished(exit.reason, exit.detail);
         return;
       }
 
@@ -2289,6 +2474,7 @@ export class VoiceBot extends EventEmitter {
       if (h.belowRealtime) {
         console.warn(`[VoiceBot ${this.config.id}] ${this._videoHealth.warning}`);
       }
+      await this.adaptVideoQuality(h);
     } finally {
       this._videoHealthPolling = false;
     }
@@ -2305,6 +2491,133 @@ export class VoiceBot extends EventEmitter {
     this.recordVideoStop('source_unreachable', detail.slice(0, 240));
   }
 
+  // ─── Adaptive Auto quality (#253) ─────────────────────────
+
+  /** Feed one health sample to the Auto controller and apply what it decides. */
+  private async adaptVideoQuality(h: SidecarStreamHealth): Promise<void> {
+    const ctl = this._videoAdaptive;
+    // A volume restart in flight resets the encoder's health; wait for the next sample.
+    if (!ctl || !this.canPushVideoVolume() || this._volumePushActive || this._videoSeeksPending > 0) return;
+    const decision = ctl.observe({
+      speed: h.speed > 0 ? h.speed : null,
+      belowRealtime: !!h.belowRealtime,
+      belowRealtimeSecs: h.belowRealtimeSecs ?? 0,
+      sampleAgeSecs: h.sampleAgeSecs ?? 0,
+    }, Date.now());
+    if (!decision) return;
+
+    // A restart replays an on-demand source from its start unless the sidecar
+    // can say where playback is; one that cannot is older than this feature.
+    if (this._videoSourceMode !== 'live' && h.positionSecs == null) {
+      ctl.reject(Date.now());
+      if (!this._adaptiveResumeWarned) {
+        this._adaptiveResumeWarned = true;
+        console.warn(
+          `[VoiceBot ${this.config.id}] Auto quality stays at ${ctl.current}: the sidecar does not report `
+          + 'the playback position, so a restart would replay the video from the start. Update the sidecar.',
+        );
+      }
+      return;
+    }
+
+    this._qualityChangeActive = true;
+    const run = this._volumePushTail.then(() => this.changeVideoQuality(ctl, decision, h.positionSecs ?? null));
+    this._volumePushTail = run.catch(() => { /* reported below */ });
+    try {
+      await run;
+    } catch (err: any) {
+      console.error(`[VoiceBot ${this.config.id}] Auto quality change failed: ${err?.message ?? err}`);
+    } finally {
+      this._qualityChangeActive = false;
+    }
+  }
+
+  /**
+   * Where a restarted encode should resume. Undefined restarts from the
+   * beginning (live sources have no position).
+   */
+  private resumeOffset(positionSecs: number | null, loop: boolean): number | undefined {
+    if (this._videoSourceMode === 'live' || positionSecs == null || positionSecs <= 0) return undefined;
+    if (!loop) return positionSecs;
+    // ffmpeg's clock keeps counting across loops of a file.
+    const duration = this._videoSourceDurationSec;
+    return duration != null && duration > 0 ? positionSecs % duration : undefined;
+  }
+
+  /** Restart the encode one preset away, resuming where playback was. */
+  private async changeVideoQuality(
+    ctl: AdaptiveQualityController,
+    decision: QualityDecision,
+    polledPositionSecs: number | null,
+  ): Promise<void> {
+    const previous = this._videoQuality;
+    const sidecar = this.sidecarHttp;
+    if (!previous || !sidecar || this._videoAdaptive !== ctl || !this.canPushVideoVolume()) return;
+    const preset = STREAM_PRESETS[decision.to];
+    const target: VideoStreamQualityInfo = { ...previous, actual: decision.to, width: preset.width, height: preset.height };
+
+    let resolved: { sourcePath: string; audioPath?: string; videoCodec?: SourceVideoCodec; loop: boolean };
+    try {
+      resolved = await this.resolveRunningSource(preset.height);
+    } catch (err) {
+      // Nothing was sent to the sidecar: the current encode is still running.
+      ctl.reject(Date.now());
+      throw err;
+    }
+    if (this._videoAdaptive !== ctl || !this.canPushVideoVolume()) return;
+
+    // Resolving can take seconds; ask again so viewers do not see them twice.
+    let positionSecs = polledPositionSecs;
+    try {
+      const stats = await sidecar.getStats();
+      if (stats.encoder?.state === 'exited') return; // the next health sample ends the stream
+      positionSecs = stats.health?.positionSecs ?? positionSecs;
+    } catch { /* keep the sampled position */ }
+    // A seek or pause asked for meanwhile wins: its restart would undo this one's position.
+    if (this._videoAdaptive !== ctl || !this.canPushVideoVolume() || this._videoSeeksPending > 0) return;
+
+    const { sourcePath, audioPath, videoCodec } = resolved;
+    const mode: VideoSourceMode = /^https?:\/\//i.test(sourcePath) ? (this._videoSourceMode ?? 'vod') : 'file';
+    const loop = resolved.loop && mode === 'file';
+    const startAt = this.resumeOffset(positionSecs, loop);
+    const remainingSec = !loop && this._videoDurationSec != null
+      ? this._videoDurationSec - (startAt ?? 0)
+      : null;
+    if (remainingSec != null && remainingSec < 15) {
+      // Nearly over: a restart would cost more of the ending than it could save.
+      ctl.reject(Date.now());
+      this.scheduleVideoEndStop(Math.max(0, remainingSec));
+      return;
+    }
+
+    try {
+      await this.sendSourceToSidecar(sourcePath, loop, target, mode, { audioSource: audioPath, videoCodec }, startAt);
+    } catch (err) {
+      ctl.rejectFailedStart(decision, Date.now());
+      // The sidecar stops the old encode before it starts the new one, so a
+      // failed start can leave nothing running. Go back to what was working.
+      try {
+        await this.sendSourceToSidecar(sourcePath, loop, previous, mode, { audioSource: audioPath, videoCodec }, startAt);
+        if (remainingSec != null) this.scheduleVideoEndStop(remainingSec);
+      } catch {
+        this._qualityChangeActive = false;
+        void this.stopVideoStream('encoder_failure', 'The encoder did not restart after an automatic quality change')
+          .catch((stopErr) => this.emit('error', stopErr));
+      }
+      throw err;
+    }
+    if (remainingSec != null) this.scheduleVideoEndStop(remainingSec);
+
+    const change = ctl.commit(decision, Date.now());
+    const arrow = change.direction === 'down' ? 'reduced' : 'raised';
+    console.log(
+      `[VoiceBot ${this.config.id}] Auto quality ${arrow} ${change.from} → ${change.to} `
+      + `(Auto started at ${ctl.ceiling}): ${change.reason}`,
+    );
+    this.emit('videoQualityChanged', { ...change, ceiling: ctl.ceiling });
+    this.emit('statusChange', this._status);
+  }
+
   private recordVideoStop(reason: MediaStopReason, detail: string | null): void {
     this._lastVideoStop = { reason, at: Date.now(), detail };
   }
@@ -2312,9 +2625,9 @@ export class VoiceBot extends EventEmitter {
   // ─── Source / encoder application ─────────────────────────
 
   /** Record what the sidecar reports running; an old sidecar ignores encoders and runs VP8. */
-  private applyEncoderSession(session: SidecarEncoderSession | null): void {
+  private applyEncoderSession(session: SidecarEncoderSession | null): boolean {
     const enc = this._videoEncoder;
-    if (!enc) return;
+    if (!enc) return false;
     if (!session || !isEncoderId(session.active)) {
       this._videoEncoder = {
         ...enc,
@@ -2324,8 +2637,10 @@ export class VoiceBot extends EventEmitter {
         fallbackReason: enc.selected === 'vp8'
           ? null
           : 'Sidecar did not report encoder support — update the sidecar image',
+        decoder: null,
+        decoderFallbackReason: null,
       };
-      return;
+      return true;
     }
     this._videoEncoder = {
       ...enc,
@@ -2333,12 +2648,23 @@ export class VoiceBot extends EventEmitter {
       codec: ENCODER_CODEC[session.active],
       hardware: isHardwareEncoder(session.active),
       fallbackReason: session.fallbackReason || null,
+      decoder: session.decoder || null,
+      decoderFallbackReason: session.decoderFallbackReason || null,
     };
-    if (session.fallbackReason) {
+    if (session.fallbackReason && session.fallbackReason !== enc.fallbackReason) {
       console.warn(
         `[VoiceBot ${this.config.id}] Encoder fallback ${session.requested} → ${session.active}: ${session.fallbackReason}`,
       );
     }
+    if (session.decoderFallbackReason && session.decoderFallbackReason !== enc.decoderFallbackReason) {
+      console.warn(
+        `[VoiceBot ${this.config.id}] AV1 GPU decoding failed, decoding on the CPU (${session.decoder || 'software'}): ${session.decoderFallbackReason}`,
+      );
+    }
+    const next = this._videoEncoder;
+    return enc.active !== next.active || enc.fallbackReason !== next.fallbackReason
+      || (enc.decoder ?? null) !== next.decoder
+      || (enc.decoderFallbackReason ?? null) !== next.decoderFallbackReason;
   }
 
   /** The sidecar reads a remote video for us (through its egress rules) and reports what it is made of. */
@@ -2577,8 +2903,8 @@ export class VoiceBot extends EventEmitter {
     loop: boolean,
     quality: VideoStreamQualityInfo,
     mode: VideoSourceMode,
-    audioSource?: string,
-    startSeconds = 0,
+    inputs: { audioSource?: string; videoCodec?: SourceVideoCodec } = {},
+    startAtSecs?: number,
   ): Promise<void> {
     if (!this.sidecarHttp || !this._videoEncoder) throw new Error('No active video stream');
     const preset = STREAM_PRESETS[quality.actual];
@@ -2603,8 +2929,9 @@ export class VoiceBot extends EventEmitter {
       cpuUsed: this._videoSettings.cpuUsed,
       threads: this.effectiveEncodeThreads || undefined,
       cpuPriority: this.effectiveCpuPriority,
-      audioSource,
-      startSeconds: startSeconds > 0 ? startSeconds : undefined,
+      audioSource: inputs.audioSource,
+      ...(inputs.videoCodec ? { videoCodec: inputs.videoCodec } : {}),
+      ...(startAtSecs && startAtSecs > 0 ? { startAtSecs } : {}),
       passthrough: directCodec ? true : undefined,
       pacing: directCodec ? this._videoSettings.directPacing : undefined,
     });
@@ -2612,12 +2939,13 @@ export class VoiceBot extends EventEmitter {
 
     // ffmpeg runs again, so a paused video is playing from here.
     this._videoPaused = false;
-    // The encode now runs from `startSeconds`; progress is counted from this moment.
-    this._videoOffsetSec = startSeconds;
+    // The encode now runs from `startAtSecs`; progress is counted from this moment.
+    this._videoOffsetSec = startAtSecs && startAtSecs > 0 ? startAtSecs : 0;
     this._videoOffsetAt = Date.now();
     this._videoSourceMode = mode;
     this._videoLoop = loop;
     this._videoHealth = null;
+    this._videoAdaptive?.noteRestart();
 
     this._videoQuality = quality;
     this._videoPreset = quality.actual;
@@ -2689,7 +3017,17 @@ export class VoiceBot extends EventEmitter {
       isLocal = true;
       mode = 'file';
     }
-    await this.sendSourceToSidecar(resolved.path, resolved.loop && mode === 'file', quality, mode, resolved.audioPath);
+    await this.sendSourceToSidecar(resolved.path, resolved.loop && mode === 'file', quality, mode, {
+      audioSource: resolved.audioPath,
+      videoCodec: resolved.videoCodec,
+    });
+    // Each source starts at Auto's own choice, which is as high as it may go. A direct stream is
+    // copied, not encoded, so there is no encoder load for Auto to adapt to: it keeps its quality.
+    this._videoAdaptive = requested === 'auto' && !this._videoDirectRequested
+      ? new AdaptiveQualityController(quality.actual)
+      : null;
+    this._videoSourceDurationSec = probe?.durationSec ?? resolved.durationSec ?? null;
+    this._adaptiveResumeWarned = false;
 
     // Pass-through / remote VOD: drop any prior YouTube download temp so a later
     // volume change cannot restart the old file. Keep temp for downloaded clips.
@@ -2791,7 +3129,7 @@ export class VoiceBot extends EventEmitter {
     if (this._videoStreaming || this._videoStarting || this._videoStopping) {
       this.refuseActiveVideoStart(source, options);
     }
-    const music = this.musicSessionInfo();
+    const music = this.automation?.active ? null : this.musicSessionInfo();
     if (music && !options.replaceSessionIds?.includes(music.id)) {
       throw new MediaSessionConflictError('video', [music]);
     }
@@ -2801,6 +3139,7 @@ export class VoiceBot extends EventEmitter {
     this._videoStarting = true;
     this._videoStartAbortError = null;
     this._videoSessionId = newMediaSessionId();
+    this.automation?.requestQueued();
     try {
       if (music) {
         this.clearPlayback('replaced_by_video', 'Replaced by a video stream');
@@ -3081,9 +3420,16 @@ export class VoiceBot extends EventEmitter {
   /**
    * Stop video streaming, recording why it stopped. A caller that arrives
    * while a stop is running waits for that same stop, so nothing (music, a
-   * new stream) starts before the old stream is gone.
+   * new stream) starts before the old stream is gone. An explicit Stop passes
+   * `cancelPendingRequests`, so music requests still loading are dropped too.
    */
-  stopVideoStream(reason: MediaStopReason = 'manual', detail: string | null = null): Promise<void> {
+  stopVideoStream(
+    reason: MediaStopReason = 'manual',
+    detail: string | null = null,
+    options: { cancelPendingRequests?: boolean } = {},
+  ): Promise<void> {
+    if (options.cancelPendingRequests) this._stopGeneration++;
+    if (reason === 'manual') this.automation?.manualStop();
     if (!this._videoStopPromise) {
       this._videoStopPromise = this.stopVideoStreamOnce(reason, detail).finally(() => {
         this._videoStopPromise = null;
@@ -3112,7 +3458,7 @@ export class VoiceBot extends EventEmitter {
       // Let a volume restart already talking to the sidecar finish before
       // stopSource, so it cannot start ffmpeg again after the stop.
       this._volumePushWanted = null;
-      if (this._volumePushActive) await this._volumePushTail;
+      if (this._volumePushActive || this._qualityChangeActive) await this._volumePushTail;
       // Same for a source change: the running one finishes before stopSource;
       // queued ones see the stop and drop out without touching the sidecar.
       if (this._videoSourceChangesPending > 0) await this._videoSourceChangeTail;
@@ -3222,7 +3568,8 @@ export class VoiceBot extends EventEmitter {
   ): Promise<void> {
     // A volume restart still resolving the old source would post it after
     // this change; with a change pending it stops before /source. Let it finish.
-    if (this._volumePushActive) await this._volumePushTail;
+    // The same goes for an automatic quality change.
+    if (this._volumePushActive || this._qualityChangeActive) await this._volumePushTail;
     if (!this._videoStreaming || this._videoStopping || !this.sidecarHttp || this._activeStreamId !== streamId) {
       throw new Error('No active video stream');
     }
@@ -3405,7 +3752,7 @@ export class VoiceBot extends EventEmitter {
           try {
             await this.sidecarHttp.setAnswer(String(msg.clid), msg.sdp);
           } catch (err: any) {
-            console.error(`[VoiceBot ${this.config.id}] setAnswer error (clid=${msg.clid}): ${err.message}`);
+            console.error(`[VoiceBot ${this.config.id}] setAnswer error (clid=${msg.clid}): ${quoteLog(err)}`);
           }
         }
         break;
@@ -3419,7 +3766,7 @@ export class VoiceBot extends EventEmitter {
               msg.sdpMlineIndex ?? 0
             );
           } catch (err: any) {
-            console.error(`[VoiceBot ${this.config.id}] addIceCandidate error (clid=${msg.clid}): ${err.message}`);
+            console.error(`[VoiceBot ${this.config.id}] addIceCandidate error (clid=${msg.clid}): ${quoteLog(err)}`);
           }
         }
         break;

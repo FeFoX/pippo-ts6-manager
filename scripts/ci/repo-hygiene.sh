@@ -49,12 +49,22 @@ if [[ "$fail" -eq 0 ]]; then
   echo "OK: shell -n passed for ${#shell_scripts[@]} script(s)"
 fi
 
+echo "==> Deno install verifies pinned checksum"
+if ! sh "$ROOT/docker-commands/install-deno.test.sh"; then
+  fail=1
+fi
+
 echo "==> pnpm lockfile overrides match package.json"
 if ! command -v python3 >/dev/null 2>&1; then
   echo "python3 is required for pnpm overrides check" >&2
   exit 1
 fi
 if ! python3 "$ROOT/scripts/ci/check-pnpm-overrides.py"; then
+  fail=1
+fi
+
+echo "==> docs public/internal/agents layout"
+if ! python3 "$ROOT/scripts/ci/check-docs-layout.py"; then
   fail=1
 fi
 
@@ -88,6 +98,7 @@ fi
 export JWT_SECRET=dummy
 export ENCRYPTION_KEY=dummy
 export SIDECAR_SECRET=dummy
+export TS6_BETA_TAG=v0.0.0-beta.0
 
 # Override files are not complete projects: they only make sense layered on a
 # base file, so that is how they are validated.
@@ -111,6 +122,11 @@ for compose in "${compose_files[@]}"; do
 done
 if [[ "$fail" -eq 0 ]]; then
   echo "OK: docker compose config for ${#compose_files[@]} file(s)"
+fi
+
+echo "==> beta compose isolation"
+if ! python3 "$ROOT/scripts/ci/check-beta-compose.py"; then
+  fail=1
 fi
 
 if [[ "$fail" -ne 0 ]]; then

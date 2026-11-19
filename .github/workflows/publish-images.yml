@@ -32,12 +32,14 @@ env:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   build-and-push:
     name: Build ${{ matrix.component }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     strategy:
       # Fail the matrix if any component fails so we never promote a mixed :latest set.
       fail-fast: true
@@ -103,7 +105,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -159,6 +161,9 @@ jobs:
   build-all-in-one:
     name: Build all-in-one
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Validate release tag
         env:
@@ -211,7 +216,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -264,6 +269,8 @@ jobs:
     name: Promote ${{ matrix.component }}:latest
     needs: build-and-push
     runs-on: ubuntu-latest
+    permissions:
+      packages: write
     strategy:
       fail-fast: true
       matrix:
@@ -284,7 +291,7 @@ jobs:
           fi
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -322,6 +329,8 @@ jobs:
     name: Promote all-in-one:latest
     needs: build-all-in-one
     runs-on: ubuntu-latest
+    permissions:
+      packages: write
     steps:
       - name: Detect Docker Hub credentials
         id: hub
@@ -338,7 +347,7 @@ jobs:
           fi
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -370,71 +379,18 @@ jobs:
           docker buildx imagetools create --tag "${DST}" "${SRC}"
 
   # Keep Hub's README/short description in sync with the released git tag.
-  # Uses the same DOCKERHUB_* secrets as the mirror; PAT needs Read/Write/Delete.
-  # Docker Hub truncates full descriptions at 25k bytes.
+  # dockerhub-description.yml uses its own environment token and never reads
+  # DOCKERHUB_TOKEN. Nothing needs this job, so a failed update never holds
+  # back the images; it only marks the run as failed.
   update-dockerhub-description:
-    name: Update Docker Hub description
+    name: Docker Hub description
     needs: [build-and-push, build-all-in-one]
-    runs-on: ubuntu-latest
     if: always() && (needs.build-and-push.result == 'success' || needs.build-all-in-one.result == 'success')
-    steps:
-      - name: Detect Docker Hub credentials
-        id: hub
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
-            echo "push_hub=1" >> "$GITHUB_OUTPUT"
-          else
-            echo "push_hub=0" >> "$GITHUB_OUTPUT"
-            echo "::warning::DOCKERHUB_USERNAME/TOKEN unset; skipping Hub description update"
-          fi
-
-      # Copy the rewriter from the workflow revision first. A workflow_dispatch
-      # recovery run can check out an older tag that does not contain the script.
-      - name: Checkout workflow revision
-        if: steps.hub.outputs.push_hub == '1'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Keep Hub README rewrite script
-        if: steps.hub.outputs.push_hub == '1'
-        run: |
-          set -euo pipefail
-          cp scripts/ci/complete-relative-readme-urls.py "$RUNNER_TEMP/complete-relative-readme-urls.py"
-
-      - name: Checkout release tag
-        if: steps.hub.outputs.push_hub == '1'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: refs/tags/${{ inputs.tag }}
-          persist-credentials: false
-
-      # The Hub action completes URLs from GITHUB_REF_NAME (caller ref, usually
-      # main). GitHub forbids overriding GITHUB_* env vars, so rewrite first.
-      - name: Point relative README URLs at the release tag
-        if: steps.hub.outputs.push_hub == '1'
-        env:
-          TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-          python3 "$RUNNER_TEMP/complete-relative-readme-urls.py" \
-            README.md "$RUNNER_TEMP/dockerhub-readme.md" --ref "$TAG"
-
-      - name: Docker Hub Description
-        if: steps.hub.outputs.push_hub == '1'
-        continue-on-error: true
-        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: ${{ env.DOCKERHUB_IMAGE }}
-          short-description: ${{ github.event.repository.description }}
-          readme-filepath: ${{ runner.temp }}/dockerhub-readme.md
-          enable-url-completion: false
+    uses: ./.github/workflows/dockerhub-description.yml
+    with:
+      tag: ${{ inputs.tag }}
+    # Named secrets would hide the environment's token from the called job.
+    secrets: inherit
 
   # First publish often creates private packages; attempt to mark them public for pull-without-auth.
   # If this fails (org policy / token scope), set visibility manually under Packages → Package settings.
