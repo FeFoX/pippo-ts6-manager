@@ -422,18 +422,10 @@ export async function onTextMessage(
   // Ignore messages from ourselves (the bot)
   if (userClid === bot.ts3ClientId) return;
 
-  // Remote issuance has a private-only failure path, including lookup/service failures.
-  if (command === 'remote') {
-    await handleListenerRemote(context, botId, bot, userClid, data.invokeruid);
-    return;
-  }
-
-  // Built-in commands
+  // Only members of the groups set under Settings > Bot access may use the bot's built-in
+  // commands, the listener remote (!remote) included. The media command permissions below
+  // narrow that further per group of commands.
   if (MUSIC_COMMANDS.has(command)) {
-    if (!await checkMediaCommand(context, bot, userClid, command, args, data.invokeruid)) return;
-    if (bot.floodHoldActive) { bot.noteIgnoredCommand(); return; }
-    console.log(`[MusicCmd] Bot ${botId}: !${command} ${args} (from clid=${userClid})`);
-    // Only members of the groups set under Settings > Bot access may use the bot.
     const access = controlAccessFor(context);
     const cfg = context.botChannelConfig.get(botId);
     const configId = cfg?.serverConfigId ?? bot.currentConfig.serverConfigId;
@@ -446,6 +438,19 @@ export async function onTextMessage(
       }
       return;
     }
+  }
+
+  // Remote issuance has a private-only failure path, including lookup/service failures.
+  if (command === 'remote') {
+    await handleListenerRemote(context, botId, bot, userClid, data.invokeruid);
+    return;
+  }
+
+  // Built-in commands
+  if (MUSIC_COMMANDS.has(command)) {
+    if (!await checkMediaCommand(context, bot, userClid, command, args, data.invokeruid)) return;
+    if (bot.floodHoldActive) { bot.noteIgnoredCommand(); return; }
+    console.log(`[MusicCmd] Bot ${botId}: !${command} ${args} (from clid=${userClid})`);
     try {
       switch (command) {
         case 'help':

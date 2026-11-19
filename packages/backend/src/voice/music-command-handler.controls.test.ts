@@ -323,6 +323,24 @@ test('with a control group configured only its members can use the bot', async (
   }
 });
 
+test('a user outside the control group cannot get a listener remote with !remote', async () => {
+  setControlAccessForTests(new ControlAccess(async () => ['Music Bot Controllers'], {
+    clientGroups: async () => [7],
+    serverGroups: async () => [{ id: 999, name: 'Music Bot Controllers' }, { id: 7, name: 'Newcomer' }],
+  }));
+  try {
+    const f = fixture();
+    const touched: string[] = [];
+    f.handler.listenerRemote = new Proxy({}, { get: (_t, key) => { touched.push(String(key)); return () => undefined; } });
+    await f.command('!remote');
+    assert.deepEqual(touched, [], 'no remote was issued');
+    assert.equal(f.replies.length, 1);
+    assert.match(f.replies[0], /Music Bot Controllers/);
+  } finally {
+    setControlAccessForTests(null);
+  }
+});
+
 test('!playlist that does not fit is refused whole with a message', async () => {
   const f = fixture();
   f.bot.queue.addMany(Array.from({ length: MAX_QUEUE_ITEMS }, (_, i) => ({ id: `q${i}`, title: `Q${i}`, filePath: '', source: 'local' as const })));

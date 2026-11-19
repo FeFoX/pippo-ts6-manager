@@ -99,6 +99,7 @@ test('missing channel mapping resolves the persisted SID instead of defaulting t
   f.handler.botChannelConfig.clear();
   f.handler.prisma.musicBot = { findUnique: async () => ({ serverConfigId: 9, virtualServerId: 2 }) };
   f.handler.prisma.appSetting.findUnique = async ({ where }: any) => {
+    if (where.key === 'bot_control_groups') return null; // this fork's Bot access: not set, everybody
     assert.equal(where.key, 'media_command_permissions:9:2');
     return { value: JSON.stringify(restricted) };
   };
