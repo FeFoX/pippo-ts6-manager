@@ -1,15 +1,14 @@
 # Changes from upstream
 
-This fork starts from [uniskela/ts6-manager](https://github.com/uniskela/ts6-manager) v1.10.1
-(commit [`7d81468`](https://github.com/uniskela/ts6-manager/commit/7d814684c65369b8ba3f8cf68843dd79283a0938))
-and three later upstream commits that only touch documentation and CI. Upstream has since released 1.11.x, and these
-changes have not been rebased onto it yet.
+This fork follows [uniskela/ts6-manager](https://github.com/uniskela/ts6-manager). It started from v1.10.1 and is now
+merged with upstream [v1.11.4](https://github.com/uniskela/ts6-manager/releases/tag/v1.11.4); everything upstream added
+up to that release is here too. [Merged with upstream 1.11.4](#merged-with-upstream-1114) lists where the two met.
 
 The new settings live in the database and are edited in the web GUI. The new environment variables are
-`TRUST_PROXY` (ported from upstream 1.11, see Security), `VIDEO_CONVERT_THREADS` and `FFMPEG_THREAD_QUEUE_SIZE`. The database schema is the same
+`VIDEO_CONVERT_THREADS` and `FFMPEG_THREAD_QUEUE_SIZE`. The database schema is the same
 as upstream's: each new setting is a key/value row with a built-in default.
 
-[`docs/music-bots.md`](docs/music-bots.md) and [`docs/video-streaming.md`](docs/video-streaming.md) cover each
+[`docs/public/music-bots.md`](docs/public/music-bots.md) and [`docs/public/video-streaming.md`](docs/public/video-streaming.md) cover each
 feature in more detail.
 
 ## Summary
@@ -47,7 +46,8 @@ feature in more detail.
 
 `!seek` now works inside a non-live video as well as a track, and changing the volume keeps the position.
 
-- API: the sidecar's `POST /source` accepts `startSeconds`.
+- API: the sidecar's `POST /source` takes the offset in `startAtSecs`, the field upstream 1.11 added for its quality
+  restarts, so a later Auto quality change resumes from the seeked position.
 - Files: `packages/backend/src/voice/voice-bot.ts`, `voice/commands/playback.ts`, `voice/streaming/sidecar-client.ts`,
   `packages/sidecar/main.go`.
 
@@ -70,7 +70,9 @@ between two such seeks, whoever asks. Seeks in a file that is already on the ser
 ### Bot access control
 
 Only members of the chosen TeamSpeak server groups can use the built-in chat commands (`!play`, `!stop`, `!seek`,
-`!help` and the rest, including the cross-channel `!here`, `!come` and `!help`).
+`!help` and the rest, including the cross-channel `!here`, `!come` and `!help`, and upstream's `!remote` and
+`!voteskip`). Upstream 1.11's media command permissions (playback, queue and video, per server) still apply on top:
+a member of the control group must also be allowed by them.
 
 - Setting `bot_control_groups` (group names or ids). Default empty, which means everybody can use the bot.
 - The manager asks TeamSpeak for the sender's groups at every command, so taking a group away works at once. If
@@ -241,9 +243,9 @@ A flow whose command trigger names a channel needs its own SSH command listener 
 
 ## Security
 
-- `TRUST_PROXY` from upstream 1.11, ported unchanged, replaces the hard-coded one hop. The all-in-one image defaults to
+- `TRUST_PROXY` is upstream's own now (it was ported from 1.11 before the merge). The all-in-one image defaults to
   `loopback`; behind a reverse proxy (Caddy, nginx, Traefik) set `TRUST_PROXY=loopback,<proxy address>`, or every user
-  shares one login rate limit.
+  shares one login rate limit. The fork keeps one extra test for an edge proxy in front of the bundled nginx.
 - Refresh tokens are stored as SHA-256 hashes. Unhashed rows are deleted at startup, so everyone signs in once more.
 - `JWT_REFRESH_EXPIRY` now sets the refresh token lifetime (it was ignored: always 7 days). A bad value stops startup.
 - Login runs one bcrypt comparison for unknown and disabled users too, so timing no longer shows which usernames exist.
@@ -251,6 +253,23 @@ A flow whose command trigger names a channel needs its own SSH command listener 
 - Player widget tokens are compared in constant time. They still travel in the URL (`?token=`), so they still reach
   access logs: TeamSpeak clients and embeds fetch these widgets as plain URLs and cannot send a header. The token only
   gives read access to that bot's now-playing data, and revoking it still means rotating `JWT_SECRET`.
+
+## Merged with upstream 1.11.4
+
+Where upstream and this fork changed the same thing:
+
+- **Viewer offer**: the send-only offer for TeamSpeak 6.0.0-beta5 is in upstream 1.11.2 too; upstream's code is kept,
+  with this fork's RTCP readers on the two senders.
+- **Trust proxy**: upstream's implementation, see Security.
+- **Start offset**: seek, resume and volume restarts send upstream's `startAtSecs`; the sidecar has one `-ss` per input.
+- **Adaptive Auto quality** (upstream 1.11): steps use this fork's bitrate per resolution. It is off for direct streams,
+  which are copied and have no encoder load to adapt to. Pause, resume and seek wait for a volume or quality restart
+  in progress, and Auto quality does not restart while one of them is queued.
+- **Sidecar forwarding**: upstream split it into helpers; keyframe pacing stays before forwarding and the VP9
+  descriptor rewrite runs inside it. Upstream's GPU filter chain applies to re-encoded streams only.
+- **Media command permissions** (upstream 1.11) and **Bot access** both apply, Bot access first; `!streamdirect` is in
+  the video group.
+- **Docs** moved to `docs/public/` upstream; the fork's additions moved with them.
 
 ## Known limits
 
@@ -269,5 +288,5 @@ bot-access list is empty (everybody may use the bot) until groups are added in S
 ## Tests
 
 The sidecar's `go vet` and `go test ./...`, the backend and frontend unit suites, and the typecheck for common, backend
-and frontend all pass. The Settings limits card, which sets the seek and resume cooldowns, has a Playwright spec in
+and frontend all pass (backend tests that read the proxy environment need it unset). The Settings limits card, which sets the seek and resume cooldowns, has a Playwright spec in
 [`packages/frontend/tests/settings-limits.spec.ts`](packages/frontend/tests/settings-limits.spec.ts).
