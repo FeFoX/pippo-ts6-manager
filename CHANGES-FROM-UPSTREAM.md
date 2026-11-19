@@ -262,8 +262,9 @@ Where upstream and this fork changed the same thing:
   with this fork's RTCP readers on the two senders.
 - **Trust proxy**: upstream's implementation, see Security.
 - **Start offset**: seek, resume and volume restarts send upstream's `startAtSecs`; the sidecar has one `-ss` per input.
-- **Adaptive Auto quality** (upstream 1.11): steps use this fork's bitrate per resolution. It is off for direct streams,
-  which are copied and have no encoder load to adapt to. Pause, resume and seek wait for a volume or quality restart
+- **Adaptive Auto quality** (upstream 1.11): steps use this fork's bitrate per resolution. It is off while the picture
+  is copied (a direct stream, or a converted file), which has no encoder load to adapt to; a direct start that fell
+  back to re-encoding live keeps it. Pause, resume and seek wait for a volume or quality restart
   in progress, and Auto quality does not restart while one of them is queued.
 - **Sidecar forwarding**: upstream split it into helpers; keyframe pacing stays before forwarding and the VP9
   descriptor rewrite runs inside it. Upstream's GPU filter chain applies to re-encoded streams only.
@@ -278,6 +279,8 @@ Where upstream and this fork changed the same thing:
 - YouTube's H.264 usually has B-frames, so direct streams from YouTube rely on VP9 or on the convert-first fallback.
 - Direct streams use the source's bitrate for every viewer.
 - The default video encoder is still VP8; a direct stream switches viewers to H.264 or VP9.
+- Bot access is checked when `!remote` hands out a listener remote, not on each use of it: someone removed from the
+  control group keeps a remote already issued until it expires or they leave the channel.
 
 ## Deploying
 

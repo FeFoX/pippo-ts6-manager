@@ -345,3 +345,67 @@ describe('adaptive Auto quality on a running stream', () => {
     assert.equal(b._videoAdaptive, null, 'a stopped stream keeps no adaptation state');
   });
 });
+
+describe('Auto quality next to direct streams, seeks and pauses', () => {
+  beforeEach(() => {
+    mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 1_000_000 });
+  });
+  afterEach(() => {
+    mock.timers.reset();
+  });
+
+  it('is off for a source that is copied, and on for a direct start that re-encodes', () => {
+    const { b } = streamingBot('auto', '1080p', 'vod');
+    b._videoDirect = true;
+    assert.equal(b.adaptiveQualityFor('auto', '1080p'), null, 'a copy has no encoder load');
+    b._videoDirect = false;
+    assert.ok(b.adaptiveQualityFor('auto', '1080p') instanceof AdaptiveQualityController, 'a direct start that fell back to re-encoding');
+    b._videoDirect = null;
+    assert.ok(b.adaptiveQualityFor('auto', '1080p') instanceof AdaptiveQualityController, 'a plain re-encoded stream');
+    assert.equal(b.adaptiveQualityFor('720p', '720p'), null, 'a fixed preset never adapts');
+  });
+
+  it('leaves the encode alone while a seek or pause is queued', async () => {
+    const { b, sources, poll } = streamingBot('auto', '1080p', 'live');
+    let releaseEarlier!: () => void;
+    b._videoSeekChain = new Promise<void>((resolve) => { releaseEarlier = resolve; });
+    let resolves = 0;
+    const resolveRunning = b.resolveRunningSource;
+    b.resolveRunningSource = (...args: unknown[]) => { resolves++; return resolveRunning(...args); };
+    const ran: string[] = [];
+    const seek = b.queueSeek(async () => { ran.push('seek'); });
+
+    await poll(health({ speed: 0.7, belowRealtimeSecs: 10 }));
+    await poll(overloaded({ speed: 0.62 }));
+    assert.equal(sources.length, 0, 'no quality restart under a queued seek');
+    assert.equal(resolves, 0, 'not even started: the source is not resolved again');
+
+    releaseEarlier();
+    await seek;
+    assert.deepEqual(ran, ['seek']);
+    assert.equal(b._videoSeeksPending, 0);
+    await poll(overloaded({ speed: 0.62 }));
+    assert.equal(sources.length, 1, 'Auto works again once the seek is done');
+  });
+
+  it('a quality restart that is resolving gives way to a seek asked for meanwhile, which runs after it', async () => {
+    const { b, sources, poll } = streamingBot('auto', '1080p', 'live');
+    let releaseResolve!: () => void;
+    const resolving = new Promise<void>((resolve) => { releaseResolve = resolve; });
+    b.resolveRunningSource = async () => { await resolving; return { sourcePath: b._videoSource, loop: false }; };
+
+    await poll(health({ speed: 0.7, belowRealtimeSecs: 10 }));
+    const quality = poll(overloaded({ speed: 0.62 }));
+    await Promise.resolve();
+    const ran: string[] = [];
+    const seek = b.queueSeek(async () => { ran.push(`seek after ${sources.length} restarts`); });
+    await Promise.resolve();
+    assert.deepEqual(ran, [], 'the seek waits for the quality restart in progress');
+
+    releaseResolve();
+    await quality;
+    await seek;
+    assert.equal(sources.length, 0, 'the quality restart did not send its stale position');
+    assert.deepEqual(ran, ['seek after 0 restarts']);
+  });
+});

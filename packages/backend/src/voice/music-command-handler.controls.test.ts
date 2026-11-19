@@ -341,6 +341,25 @@ test('a user outside the control group cannot get a listener remote with !remote
   }
 });
 
+test('during a flood hold a user outside the control group is refused without a reply', async () => {
+  setControlAccessForTests(new ControlAccess(async () => ['Music Bot Controllers'], {
+    clientGroups: async () => [7],
+    serverGroups: async () => [{ id: 999, name: 'Music Bot Controllers' }, { id: 7, name: 'Newcomer' }],
+  }));
+  try {
+    const f = fixture();
+    let ignored = 0;
+    Object.assign(f.bot, { floodHoldActive: true, noteIgnoredCommand: () => { ignored++; } });
+    // A sender no earlier test was refused for, so the 30 s notice throttle cannot hide a reply.
+    await f.handler.onTextMessage(1, f.bot, { invokerid: '61', msg: '!seek 30' });
+    assert.deepEqual(f.seeks, [], 'still refused');
+    assert.deepEqual(f.replies, [], 'the bot stays quiet during the hold');
+    assert.equal(ignored, 1);
+  } finally {
+    setControlAccessForTests(null);
+  }
+});
+
 test('!playlist that does not fit is refused whole with a message', async () => {
   const f = fixture();
   f.bot.queue.addMany(Array.from({ length: MAX_QUEUE_ITEMS }, (_, i) => ({ id: `q${i}`, title: `Q${i}`, filePath: '', source: 'local' as const })));

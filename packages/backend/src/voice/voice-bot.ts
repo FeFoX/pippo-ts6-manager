@@ -2493,6 +2493,16 @@ export class VoiceBot extends EventEmitter {
 
   // ─── Adaptive Auto quality (#253) ─────────────────────────
 
+  /**
+   * Auto quality for a source that has just started. Each source starts at Auto's own choice,
+   * which is as high as it may go. A source that is copied (a direct stream, or a converted file
+   * sent by copy) has no encoder load to adapt to and keeps its quality; a direct stream that fell
+   * back to re-encoding live is encoded like any other and does get Auto.
+   */
+  private adaptiveQualityFor(requested: VideoQualityRequest, actual: VideoStreamPresetKey): AdaptiveQualityController | null {
+    return requested === 'auto' && this._videoDirect !== true ? new AdaptiveQualityController(actual) : null;
+  }
+
   /** Feed one health sample to the Auto controller and apply what it decides. */
   private async adaptVideoQuality(h: SidecarStreamHealth): Promise<void> {
     const ctl = this._videoAdaptive;
@@ -3021,11 +3031,7 @@ export class VoiceBot extends EventEmitter {
       audioSource: resolved.audioPath,
       videoCodec: resolved.videoCodec,
     });
-    // Each source starts at Auto's own choice, which is as high as it may go. A direct stream is
-    // copied, not encoded, so there is no encoder load for Auto to adapt to: it keeps its quality.
-    this._videoAdaptive = requested === 'auto' && !this._videoDirectRequested
-      ? new AdaptiveQualityController(quality.actual)
-      : null;
+    this._videoAdaptive = this.adaptiveQualityFor(requested, quality.actual);
     this._videoSourceDurationSec = probe?.durationSec ?? resolved.durationSec ?? null;
     this._adaptiveResumeWarned = false;
 
