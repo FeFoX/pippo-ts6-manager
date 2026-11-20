@@ -98,6 +98,22 @@ describe('parseYoutubeResolve', () => {
     });
   });
 
+  it('marks a source delivered as an HLS playlist, and only then', () => {
+    assert.equal(parseYoutubeResolve(pair).hls, undefined);
+    const hlsPair = {
+      ...pair,
+      requested_formats: [{ ...pair.requested_formats[0], protocol: 'm3u8_native' }, { ...pair.requested_formats[1], protocol: 'https' }],
+    };
+    assert.equal(parseYoutubeResolve(hlsPair).hls, true);
+    const hlsSound = {
+      ...pair,
+      requested_formats: [{ ...pair.requested_formats[0], protocol: 'https' }, { ...pair.requested_formats[1], url: 'https://rr1.example/playlist/index.m3u8' }],
+    };
+    assert.equal(parseYoutubeResolve(hlsSound).hls, true);
+    assert.equal(parseYoutubeResolve({ url: 'https://rr1.example/v.mp4', protocol: 'https', vcodec: 'avc1.4d401f' }).hls, undefined);
+    assert.equal(parseYoutubeResolve({ url: 'https://rr1.example/index.m3u8', protocol: 'm3u8_native', vcodec: 'avc1.4d401f' }).hls, true);
+  });
+
   it("names the chosen video format's codec, so the sidecar can decode AV1 on the GPU", () => {
     const av1 = { ...pair, requested_formats: [{ ...pair.requested_formats[0], vcodec: 'av01.0.12M.08' }, pair.requested_formats[1]] };
     assert.equal(parseYoutubeResolve(av1).videoCodec, 'av1');
@@ -126,6 +142,7 @@ describe('parseYoutubeResolve', () => {
       durationSec: null,
       live: true,
       resolution: { width: 1920, height: 1080 },
+      hls: true,
     });
   });
 

@@ -99,6 +99,18 @@ export class SeekRateLimitedError extends Error {
   }
 }
 
+/**
+ * Thrown when a video is only available as an HLS playlist that cannot be jumped into: ffmpeg
+ * would read and drop every segment from the start, so the picture would hang for as long as
+ * it takes to reach the position.
+ */
+export class SeekUnsupportedError extends Error {
+  constructor() {
+    super('This video is only available as a segmented HLS stream, which cannot be seeked quickly');
+    this.name = 'SeekUnsupportedError';
+  }
+}
+
 export interface VoiceBotConfig {
   id: number;
   serverConfigId: number;
@@ -196,6 +208,8 @@ interface ResolvedStreamSource {
   resolution?: { width: number; height: number };
   /** The source's video codec when known (YouTube direct), so the sidecar can decode AV1 on the GPU. */
   videoCodec?: SourceVideoCodec;
+  /** The picture or the sound is an HLS playlist, which cannot be seeked quickly. */
+  hls?: boolean;
 }
 
 /**
@@ -827,14 +841,16 @@ export class VoiceBot extends EventEmitter {
     maxHeight: number,
     /** True once the caller gave up waiting: the result is then dropped, not applied. */
     isAbandoned: () => boolean = () => false,
+    /** The video is reopened at another position: formats ffmpeg can jump into come first. */
+    seekable = false,
   ): Promise<ResolvedStreamSource> {
     const maxDur = this.config.maxVideoDurationSec ?? 900;
     const youtubeDirect = await this.youtubeDirectStream();
-    const { path: filePath, audioPath, durationSec, live, resolution, videoCodec } = await downloadVideoForStream(
+    const { path: filePath, audioPath, durationSec, live, resolution, videoCodec, hls } = await downloadVideoForStream(
       source,
       maxHeight,
       maxDur,
-      { localHosts: this._videoLocalHosts, youtubeDirect, forDirect: this._videoDirectRequested },
+      { localHosts: this._videoLocalHosts, youtubeDirect, forDirect: this._videoDirectRequested, seekable },
     );
     const isDownloadedTemp = filePath.includes('.stream-') && filePath.endsWith('.mp4');
     if (isAbandoned()) {
@@ -868,10 +884,10 @@ export class VoiceBot extends EventEmitter {
     // after the sidecar accepts the source in applyVideoSource.
     if (live === false && durationSec != null && durationSec > 0) {
       this._videoDurationSec = durationSec;
-      return { path: filePath, audioPath, loop: false, live, durationSec, resolution, videoCodec };
+      return { path: filePath, audioPath, loop: false, live, durationSec, resolution, videoCodec, hls };
     }
 
-    return { path: filePath, audioPath, loop: true, live, durationSec, resolution, videoCodec };
+    return { path: filePath, audioPath, loop: true, live, durationSec, resolution, videoCodec, hls };
   }
 
   /** A failed read keeps the default: download first. */
@@ -1786,7 +1802,7 @@ export class VoiceBot extends EventEmitter {
   private async resolveForSeek(source: string, maxHeight: number): Promise<ResolvedStreamSource> {
     let abandoned = false;
     let timer: NodeJS.Timeout | undefined;
-    const work = this.resolveStreamSource(source, maxHeight, () => abandoned);
+    const work = this.resolveStreamSource(source, maxHeight, () => abandoned, true);
     const limit = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         abandoned = true;
@@ -1828,6 +1844,12 @@ export class VoiceBot extends EventEmitter {
       if (opts.resume) await this.claimRemoteResume();
       else await this.claimRemoteSeek();
       const resolved = await this.resolveForSeek(source, STREAM_PRESETS[quality.actual].height);
+      if (resolved.hls && !resolved.live && seconds > 0) {
+        // Only an HLS playlist is on offer. A resume has to go on from where it paused, slowly;
+        // a seek is refused, and the video keeps playing where it was.
+        if (!opts.resume) throw new SeekUnsupportedError();
+        this.notice('This video is delivered as an HLS stream, so reaching the paused position can take a while.');
+      }
       sourcePath = resolved.path;
       audioPath = resolved.audioPath;
       videoCodec = resolved.videoCodec;
@@ -1991,16 +2013,21 @@ export class VoiceBot extends EventEmitter {
     }
   }
 
-  /** Resolve the running source again for an encoder restart (volume or quality change). */
+  /**
+   * Resolve the running source again for an encoder restart (volume or quality change). A restart
+   * from a position after the start reopens the video like a seek does, so it asks for formats
+   * ffmpeg can jump into (`resumeAt` > 0).
+   */
   private async resolveRunningSource(
     maxHeight: number,
+    resumeAt = 0,
   ): Promise<{ sourcePath: string; audioPath?: string; videoCodec?: SourceVideoCodec; loop: boolean }> {
     if (this._videoTempFile) {
       try {
         return { sourcePath: resolvePathUnderMusicDir(this._videoTempFile), loop: false };
       } catch { /* the download is gone: resolve it again */ }
     }
-    const resolved = await this.resolveStreamSource(this._videoSource!, maxHeight);
+    const resolved = await this.resolveStreamSource(this._videoSource!, maxHeight, undefined, resumeAt > 0);
     return { sourcePath: resolved.path, audioPath: resolved.audioPath, videoCodec: resolved.videoCodec, loop: resolved.loop };
   }
 
@@ -2011,7 +2038,10 @@ export class VoiceBot extends EventEmitter {
     }
     // Reuse the resolved quality: a volume change must not re-probe the source.
     const quality = this._videoQuality ?? resolveQuality(this._videoPreset, this._videoSettings.autoMaxPreset, null);
-    const { sourcePath, audioPath, videoCodec, loop } = await this.resolveRunningSource(STREAM_PRESETS[quality.actual].height);
+    const { sourcePath, audioPath, videoCodec, loop } = await this.resolveRunningSource(
+      STREAM_PRESETS[quality.actual].height,
+      !this._videoLoop && this._videoSourceMode !== 'live' ? this.videoPositionSec ?? 0 : 0,
+    );
     // Source resolution can take a while; a stop or source change that began
     // meanwhile owns the sidecar now, and a /source here would restart ffmpeg
     // after the stop, or on the old source.
@@ -2568,7 +2598,7 @@ export class VoiceBot extends EventEmitter {
 
     let resolved: { sourcePath: string; audioPath?: string; videoCodec?: SourceVideoCodec; loop: boolean };
     try {
-      resolved = await this.resolveRunningSource(preset.height);
+      resolved = await this.resolveRunningSource(preset.height, polledPositionSecs ?? 0);
     } catch (err) {
       // Nothing was sent to the sidecar: the current encode is still running.
       ctl.reject(Date.now());

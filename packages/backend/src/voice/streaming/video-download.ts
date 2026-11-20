@@ -44,21 +44,38 @@ function rejectYtDlpOptionUrl(url: string): void {
  */
 export const YOUTUBE_VIDEO_FORMAT_SORT = 'res,fps,vcodec:vp9';
 
+/** Excludes an HLS (m3u8) playlist: yt-dlp names its protocol m3u8 or m3u8_native. */
+const NOT_HLS = '[protocol!*=m3u8]';
+
 /**
  * A direct stream sends the file's own video to viewers, which can be H.264 or VP9. YouTube's
  * H.264 has B-frames (a copy of it would play out of order), its VP9 does not, so VP9 (vp09) is
  * asked for first, then H.264 (avc1, which may still turn out to be copyable), then the usual
  * choice. A video that cannot be copied is re-encoded and the user is told why.
+ *
+ * Within each codec a plain https file is preferred to an HLS playlist, which ffmpeg cannot seek
+ * (see `seekable`). `seekable` is for reopening the video at a new position: every choice is then
+ * tried without HLS first, and an HLS format is the last resort, which the caller refuses to seek.
  */
-export function youtubeVideoFormatArgs(maxHeight: number, forDirect = false): string[] {
+export function youtubeVideoFormatArgs(maxHeight: number, forDirect = false, seekable = false): string[] {
   const generic =
     `bv*[height<=${maxHeight}][dynamic_range=SDR]+ba` +
     `/bv*[height<=${maxHeight}]+ba/b[height<=${maxHeight}]/bv*+ba/b`;
+  const picture = (codec: string, notHls: string) =>
+    `bv*[vcodec^=${codec}][height<=${maxHeight}][dynamic_range=SDR]${notHls}+ba${notHls}`;
+  const copyable = (notHls: string) => ['vp09', 'avc1'].map((codec) => picture(codec, notHls));
+  if (seekable) {
+    const strict = NOT_HLS;
+    const strictGeneric =
+      `bv*[height<=${maxHeight}][dynamic_range=SDR]${strict}+ba${strict}` +
+      `/bv*[height<=${maxHeight}]${strict}+ba${strict}/b[height<=${maxHeight}]${strict}` +
+      `/bv*${strict}+ba${strict}/b${strict}`;
+    const choices = [...(forDirect ? copyable(strict) : []), strictGeneric, ...(forDirect ? copyable('') : []), generic];
+    return ['-f', choices.join('/'), '-S', YOUTUBE_VIDEO_FORMAT_SORT];
+  }
   if (!forDirect) return ['-f', generic, '-S', YOUTUBE_VIDEO_FORMAT_SORT];
-  const copyable = ['vp09', 'avc1']
-    .map((codec) => `bv*[vcodec^=${codec}][height<=${maxHeight}][dynamic_range=SDR]+ba`)
-    .join('/');
-  return ['-f', `${copyable}/${generic}`, '-S', YOUTUBE_VIDEO_FORMAT_SORT];
+  const choices = ['vp09', 'avc1'].flatMap((codec) => [picture(codec, NOT_HLS), picture(codec, '')]);
+  return ['-f', `${choices.join('/')}/${generic}`, '-S', YOUTUBE_VIDEO_FORMAT_SORT];
 }
 
 /**
@@ -260,6 +277,11 @@ export interface DownloadedStreamVideo {
    * and audio separately (YouTube above 720p). `path` is then video only.
    */
   audioPath?: string;
+  /**
+   * The picture or the sound comes as an HLS playlist. ffmpeg cannot jump into one that is
+   * still growing: a seek reads and drops every segment from the start. Only set when true.
+   */
+  hls?: boolean;
   /** The chosen format's picture size when the extractor reports it, so Auto quality needs no probe. */
   resolution?: { width: number; height: number };
   /**
@@ -412,6 +434,11 @@ function mediaUrl(value: unknown): string {
   return url.startsWith('http://') || url.startsWith('https://') ? url : '';
 }
 
+/** A yt-dlp format delivered as an HLS playlist (protocol m3u8 or m3u8_native, or an m3u8 address). */
+function isHlsFormat(format: Record<string, unknown>): boolean {
+  return /m3u8/i.test(String(format.protocol ?? '')) || /\.m3u8(\?|\/|$)/i.test(String(format.url ?? ''));
+}
+
 function pictureSize(format: Record<string, unknown>): { width: number; height: number } | undefined {
   const width = Number(format.width);
   const height = Number(format.height);
@@ -449,6 +476,7 @@ export function parseYoutubeResolve(data: Record<string, unknown>): DownloadedSt
       live: isLive,
       resolution: pictureSize(video) ?? pictureSize(data),
       ...(videoCodec ? { videoCodec } : {}),
+      ...(isHlsFormat(video) || isHlsFormat(audio) ? { hls: true } : {}),
     };
   }
 
@@ -457,7 +485,14 @@ export function parseYoutubeResolve(data: Record<string, unknown>): DownloadedSt
     throw new VideoSourceFailedError('yt-dlp did not return a playable YouTube stream URL');
   }
   const videoCodec = videoCodecFamily(data.vcodec);
-  return { path: combined, durationSec, live: isLive, resolution: pictureSize(data), ...(videoCodec ? { videoCodec } : {}) };
+  return {
+    path: combined,
+    durationSec,
+    live: isLive,
+    resolution: pictureSize(data),
+    ...(videoCodec ? { videoCodec } : {}),
+    ...(isHlsFormat(data) ? { hls: true } : {}),
+  };
 }
 
 /**
@@ -467,8 +502,8 @@ export function parseYoutubeResolve(data: Record<string, unknown>): DownloadedSt
  * because YouTube refuses these URLs from some networks; the download path
  * exists for that. "Max video duration" is not applied: nothing is stored.
  */
-async function resolveYoutubeStreamUrl(url: string, maxHeight: number, forDirect = false): Promise<DownloadedStreamVideo> {
-  const data = await resolveWithYtDlp(url, youtubeVideoFormatArgs(maxHeight, forDirect), 'YouTube');
+async function resolveYoutubeStreamUrl(url: string, maxHeight: number, forDirect = false, seekable = false): Promise<DownloadedStreamVideo> {
+  const data = await resolveWithYtDlp(url, youtubeVideoFormatArgs(maxHeight, forDirect, seekable), 'YouTube');
   const resolved = parseYoutubeResolve(data);
   // Second hop, as for Twitch: the media URLs are checked again (no LAN
   // allowlist; YouTube's CDN is public).
@@ -483,6 +518,7 @@ async function resolveYoutubeStreamUrl(url: string, maxHeight: number, forDirect
   console.log(
     `[VideoDownload] Resolved YouTube ${resolved.live ? 'live' : 'VOD'} for direct streaming` +
       (resolved.audioPath ? ' (separate video and audio)' : '') +
+      (resolved.hls ? ' (HLS)' : '') +
       (resolved.resolution ? `, ${resolved.resolution.width}x${resolved.resolution.height}` : '') +
       (resolved.durationSec != null ? `, ${Math.round(resolved.durationSec)}s` : ''),
   );
@@ -549,7 +585,7 @@ export async function downloadVideoForStream(
   url: string,
   maxHeight: number = 720,
   maxDurationSec: number = 900,
-  options: { localHosts?: string[]; youtubeDirect?: boolean; forDirect?: boolean } = {},
+  options: { localHosts?: string[]; youtubeDirect?: boolean; forDirect?: boolean; seekable?: boolean } = {},
 ): Promise<DownloadedStreamVideo> {
   rejectYtDlpOptionUrl(url);
 
@@ -580,7 +616,7 @@ export async function downloadVideoForStream(
   }
 
   if (options.youtubeDirect) {
-    return resolveYoutubeStreamUrl(url, maxHeight, options.forDirect);
+    return resolveYoutubeStreamUrl(url, maxHeight, options.forDirect, options.seekable);
   }
 
   const musicRoot = ensureMusicDir();

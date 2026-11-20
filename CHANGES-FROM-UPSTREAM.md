@@ -48,8 +48,16 @@ feature in more detail.
 
 - API: the sidecar's `POST /source` takes the offset in `startAtSecs`, the field upstream 1.11 added for its quality
   restarts, so a later Auto quality change resumes from the seeked position.
+- A YouTube video streamed directly can come as an HLS playlist instead of a plain file. ffmpeg cannot jump into
+  such a playlist: it fetches every segment from the start and drops them until it reaches the position, so a seek
+  froze the picture for as long as that takes (tens of seconds, minutes for a long video). The direct format choice
+  now prefers a plain file within each codec, and a seek asks yt-dlp for formats without HLS first, which can be a
+  different (lower) resolution than the one playing. When only an HLS format exists, `!seek` is refused with a
+  message and the video keeps playing; resuming a paused video goes on from where it paused, with a notice. A volume
+  change or an automatic quality step that restarts the video from a later position asks for the same formats, and a
+  Bot Flow "Voice Seek" step skips a refused seek instead of failing.
 - Files: `packages/backend/src/voice/voice-bot.ts`, `voice/commands/playback.ts`, `voice/streaming/sidecar-client.ts`,
-  `packages/sidecar/main.go`.
+  `voice/streaming/video-download.ts`, `packages/sidecar/main.go`.
 
 ### Seek cooldown
 

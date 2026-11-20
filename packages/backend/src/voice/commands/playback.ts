@@ -1,4 +1,4 @@
-import { SeekRateLimitedError, type VoiceBot } from '../voice-bot.js';
+import { SeekRateLimitedError, SeekUnsupportedError, type VoiceBot } from '../voice-bot.js';
 import type { QueueItem } from '../playlist/queue.js';
 import { formatRadioListMessage } from '../ts6-chat-format.js';
 import type { CommandContext } from './context.js';
@@ -164,6 +164,10 @@ export async function handleSeek(
         ? `${err.cooldownSec / 60} minute${err.cooldownSec === 60 ? '' : 's'}`
         : `${err.cooldownSec} seconds`;
       context.reply(bot, userClid, `Seeking a remote source is limited to once every ${every}. Try again in ${err.retryAfterSec} s.`);
+      return;
+    }
+    if (err instanceof SeekUnsupportedError) {
+      context.reply(bot, userClid, 'This video is only available as a segmented HLS stream, which cannot be seeked quickly. It keeps playing from where it was.');
       return;
     }
     context.reply(bot, userClid, bot.videoStreaming

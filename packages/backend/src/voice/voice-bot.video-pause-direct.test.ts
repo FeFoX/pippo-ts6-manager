@@ -7,7 +7,7 @@ import path from 'node:path';
 // The music folder is read when the module loads, so point it at a temporary folder first.
 const musicDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts6-pause-test-'));
 process.env.MUSIC_DIR = musicDir;
-const { VoiceBot } = await import('./voice-bot.js');
+const { VoiceBot, SeekUnsupportedError } = await import('./voice-bot.js');
 
 function makeBot(): InstanceType<typeof VoiceBot> {
   return new VoiceBot({
@@ -317,6 +317,50 @@ describe('direct stream decision', () => {
     assert.equal(last.options.passthrough, undefined);
     assert.equal(last.options.audioSource, AUDIO);
     assert.match(bot.videoStreamStatus.directFallback ?? '', /AV1/);
+  });
+
+  it('refuses a seek on a video that is only offered as an HLS playlist, and keeps playing', async () => {
+    const { b, bot, calls } = remoteBot('vp9');
+    b.resolveStreamSource = async () => ({ path: REMOTE_WEBM, loop: false, hls: true });
+    await assert.rejects(() => bot.seekVideo(165), SeekUnsupportedError);
+    assert.equal(calls.filter((c) => c.kind === 'source').length, 0, 'the running stream was not touched');
+  });
+
+  it('asks for the formats a seek can use, so an HLS playlist is only the last resort', async () => {
+    const { b, bot } = remoteBot('vp9');
+    const asked: boolean[] = [];
+    b.resolveStreamSource = async (_s: string, _h: number, _a: unknown, seekable: boolean) => {
+      asked.push(seekable);
+      return { path: REMOTE_WEBM, loop: false };
+    };
+    await bot.seekVideo(5);
+    assert.deepEqual(asked, [true]);
+  });
+
+  it('resumes a paused HLS video from where it paused, with a notice, instead of refusing', async () => {
+    const { b, bot, calls } = remoteBot('vp9');
+    const notices: string[] = [];
+    b._videoNotice = (m: string) => notices.push(m);
+    b.resolveStreamSource = async () => ({ path: REMOTE_WEBM, loop: false, hls: true });
+    await b.seekVideoNow(40, { resume: true });
+    assert.equal(calls.filter((c) => c.kind === 'source').length, 1);
+    assert.match(notices.join(' '), /HLS/);
+  });
+
+  it('a restart from a later position asks for the formats a seek can use, one from the start does not', async () => {
+    const { b, bot } = remoteBot('vp9');
+    const asked: boolean[] = [];
+    b.resolveStreamSource = async (_s: string, _h: number, _a: unknown, seekable: boolean) => {
+      asked.push(seekable);
+      return { path: REMOTE_WEBM, loop: false };
+    };
+    b._videoOffsetSec = 0;
+    b._videoOffsetAt = Date.now();
+    await bot.applyVolume(30);
+    b._videoOffsetSec = 90;
+    b._videoOffsetAt = Date.now();
+    await bot.applyVolume(40);
+    assert.deepEqual(asked, [false, true]);
   });
 
   it('a different file is judged on its own, not by the previous answer', async () => {

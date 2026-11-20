@@ -11,7 +11,7 @@ import { avatarImageType, saveBotAvatar, readBotAvatar, removeBotAvatarFile, MAX
 import { requireRole } from '../middleware/rbac.js';
 import { AppError } from '../middleware/error-handler.js';
 import type { VoiceBotManager } from '../voice/voice-bot-manager.js';
-import { SeekRateLimitedError, type VoiceBot } from '../voice/voice-bot.js';
+import { SeekRateLimitedError, SeekUnsupportedError, type VoiceBot } from '../voice/voice-bot.js';
 import { serializeCommandChannelIds, parseCommandChannelIds } from '../voice/music-command-channels.js';
 import { playerWidgetToken } from './widget-public.routes.js';
 import { parseStreamStartOptions } from '../voice/streaming/start-options.js';
@@ -766,6 +766,7 @@ musicBotRoutes.post('/:id/seek', async (req: Request, res: Response, next) => {
       await bot.seek(parseFloat(seconds) || 0);
     } catch (err) {
       if (err instanceof SeekRateLimitedError) throw new AppError(429, err.message);
+      if (err instanceof SeekUnsupportedError) throw new AppError(422, err.message);
       throw err;
     }
     res.json({ success: true });

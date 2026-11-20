@@ -90,6 +90,26 @@ describe('YouTube formats for a direct stream', () => {
     assert.ok(args[1].indexOf('vcodec^=vp09') < args[1].indexOf('vcodec^=avc1'), 'VP9 before H.264');
     assert.ok(args[1].includes('/bv*[height<=720][dynamic_range=SDR]+ba'), 'the fallback is still there');
   });
+
+  it('prefers a plain file to an HLS playlist within a codec, but keeps HLS as an option', () => {
+    const choices = youtubeVideoFormatArgs(720, true)[1].split('/');
+    const vp9Plain = choices.findIndex((c) => c.includes('vcodec^=vp09') && c.includes('[protocol!*=m3u8]'));
+    const vp9Any = choices.findIndex((c) => c.includes('vcodec^=vp09') && !c.includes('protocol'));
+    const avc1Plain = choices.findIndex((c) => c.includes('vcodec^=avc1') && c.includes('[protocol!*=m3u8]'));
+    assert.ok(vp9Plain === 0 && vp9Any === 1, 'the plain VP9 file, then any VP9');
+    assert.ok(avc1Plain > vp9Any, 'H.264 still comes after VP9');
+  });
+
+  it('for a seek, asks for formats without HLS first and falls back to the usual choice', () => {
+    for (const direct of [true, false]) {
+      const choices = youtubeVideoFormatArgs(720, direct, true)[1].split('/');
+      const firstAny = choices.findIndex((c) => !c.includes('[protocol!*=m3u8]'));
+      assert.ok(firstAny > 0, 'something without HLS is tried first');
+      assert.ok(choices.slice(0, firstAny).every((c) => c.includes('+ba[protocol!*=m3u8]') || c.endsWith('[protocol!*=m3u8]')));
+      assert.deepEqual(choices.slice(-2), ['bv*+ba', 'b'], 'the last resort is unchanged');
+    }
+    assert.ok(youtubeVideoFormatArgs(720, true, true)[1].startsWith('bv*[vcodec^=vp09][height<=720]'));
+  });
 });
 
 describe('direct in the start request', () => {
