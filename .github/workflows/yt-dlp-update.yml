@@ -15,6 +15,8 @@ permissions: {}
 jobs:
   check:
     name: Check latest stable yt-dlp
+    # Opens a pull request, which GitHub refuses on a fork: upstream only.
+    if: github.repository == 'uniskela/ts6-manager'
     runs-on: ubuntu-latest
     permissions:
       contents: write

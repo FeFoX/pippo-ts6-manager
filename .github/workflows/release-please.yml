@@ -19,6 +19,9 @@ concurrency:
 
 jobs:
   release-please:
+    # Upstream's release automation. A fork has no releases to cut, and GitHub
+    # refuses the release pull request there, so the job only runs upstream.
+    if: github.repository == 'uniskela/ts6-manager'
     runs-on: ubuntu-latest
     permissions:
       contents: write
