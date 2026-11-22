@@ -9,9 +9,11 @@ For source-revision evidence, provenance categories, and the maintainer policy f
 ## Fork
 
 [FeFoX/pippo-ts6-manager](https://github.com/FeFoX/pippo-ts6-manager) is a personalized fork of
-[uniskela/ts6-manager](https://github.com/uniskela/ts6-manager) release v1.10.1 (commit
-[`7d81468`](https://github.com/uniskela/ts6-manager/commit/7d814684c65369b8ba3f8cf68843dd79283a0938)).
-The code up to that commit comes from the uniskela/ts6-manager and clusterzx/ts6-manager maintainers and the
+[uniskela/ts6-manager](https://github.com/uniskela/ts6-manager). It started from release v1.10.1 (commit
+[`7d81468`](https://github.com/uniskela/ts6-manager/commit/7d814684c65369b8ba3f8cf68843dd79283a0938)) and is now
+merged with release v1.11.4 (commit
+[`be7930f`](https://github.com/uniskela/ts6-manager/commit/be7930fd6249473237599c76fae3923a44308dcb)).
+The code up to that release comes from the uniskela/ts6-manager and clusterzx/ts6-manager maintainers and the
 contributors credited in this file. The fork's own changes are listed in [CHANGES-FROM-UPSTREAM.md](CHANGES-FROM-UPSTREAM.md).
 
 ## Upstream project

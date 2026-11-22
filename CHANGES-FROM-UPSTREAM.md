@@ -287,6 +287,8 @@ Where upstream and this fork changed the same thing:
 - YouTube's H.264 usually has B-frames, so direct streams from YouTube rely on VP9 or on the convert-first fallback.
 - Direct streams use the source's bitrate for every viewer.
 - The default video encoder is still VP8; a direct stream switches viewers to H.264 or VP9.
+- Auto quality is chosen when a source starts. If viewers then settle on a codec the copied picture is not in, the
+  stream is re-encoded with Auto quality still off until the next source.
 - Bot access is checked when `!remote` hands out a listener remote, not on each use of it: someone removed from the
   control group keeps a remote already issued until it expires or they leave the channel.
 
@@ -295,6 +297,21 @@ Where upstream and this fork changed the same thing:
 This fork runs as an all-in-one image built locally from `Dockerfile.all-in-one`, not from the upstream
 registries. Build with `--build-arg GIT_SHA=<commit>` so `/api/health` reports the commit. After the first start, the
 bot-access list is empty (everybody may use the bot) until groups are added in Settings → Users → Bot access.
+
+### Upgrading from the 1.10.1-based fork
+
+The 1.11.4 merge brings upstream's 1.11 changes with it; upstream's
+[upgrade notes](docs/public/upgrading.md#upgrading-to-1110) apply. In short:
+
+- **Back up the data volume before the first start.** 1.11 changes the SQLite schema (a video queue table, Auto-DJ
+  columns on bots, history columns on media requests), and startup applies it with `prisma db push`. Going back to an
+  older image needs that backup as well as the old image.
+- Behind a reverse proxy, keep `TRUST_PROXY=loopback,<proxy address>` (see Security).
+- Media downloads go through a checking proxy inside the backend: `HTTP_PROXY` and `HTTPS_PROXY` no longer apply to
+  them (`MEDIA_UPSTREAM_PROXY` does), and links to private, shared (100.64.0.0/10) or non-80/443 addresses are
+  refused. Downloaded songs are kept in `.ts6-media-cache` inside the music folder; older files stay and keep playing.
+- `!remote` (upstream's listener remote) needs an HTTPS public URL (`PUBLIC_URL`).
+- Auto-DJ, 24/7 presence and the video queue are new and start off or empty.
 
 ## Tests
 
