@@ -80,6 +80,8 @@ For installation, safe-area behavior, updates, and offline limits, see [Install 
 
 Authenticated SSH Query is used for features that require file-transfer or event access.
 
+On TeamSpeak 6.0.0-beta14, channel file names are UTF-8. Files an older server stored under a non-UTF-8 locale stay hidden in this browser until they are renamed on that server. See [file names](teamspeak-compatibility.md#file-names-on-600-beta14).
+
 The UI includes:
 
 - channel file browsing (create/delete via SSH Query; upload/download still use the TeamSpeak client);
@@ -110,5 +112,14 @@ Treat widget tokens as public-access capabilities and expose only the informatio
 ## Access control
 
 The application has administrator and viewer roles plus per-server access control. Sensitive configuration, automation, and server-management operations remain administrator-only.
+
+Viewers see only their assigned servers in the server list and in server details. Requesting a server that is not assigned returns an authorization error. Assigned viewers can still browse that server's channels and connected clients. These reads are administrator-only, including on an assigned server:
+
+- complaints and messages;
+- instance information;
+- permissions;
+- file listings and storage summaries;
+- server and channel groups, including their members, permissions, and a connected client's group membership; and
+- bans, privilege tokens, and the client database.
 
 See [Security](security.md) for the controls around stored credentials, outbound requests, WebSockets, and automation.

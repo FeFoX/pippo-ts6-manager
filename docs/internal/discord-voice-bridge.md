@@ -1,10 +1,20 @@
 # Discord voice bridge — compatibility and trust contract
 
-Target: **v1.12.0**. Default: **disabled**. Status: **proposed; draft PR for owner review, not accepted**.
+Target: **later release** (after v1.12.0 and v2.0.0 under Option B). Default: **disabled**. Status: **accepted** ([#503](https://github.com/uniskela/ts6-manager/pull/503)); D1–D6 implementation and live acceptance still open.
 
-This is the Bridge-K contract. The draft PR is for review, not approval. Do not start Bridge-D1, merge, or publish until the owner explicitly accepts it. Do not shrink 5+1 to a single-bot product. Do not move incomplete work into another release. Escalate blockers.
+This is the Bridge-K contract. Do not shrink 5+1 to a single-bot product. Do not amend this contract without a separate owner-approved change (draft D2 amendments: [#563](https://github.com/uniskela/ts6-manager/pull/563)). Escalate blockers.
 
-Listener remote ([#442](https://github.com/uniskela/ts6-manager/issues/442)) stays in v1.12.0. v1.11.2 ([#460](https://github.com/uniskela/ts6-manager/pull/460)) stays on its current process.
+### Release targeting (Option B — 2026-11-15)
+
+Owner-approved sequence:
+
+1. **v1.12.0** — Changes already on `main` (Listener Remote, music search, playlist voting, session hardening, related improvements); **not** this bridge.
+2. **v2.0.0** — Commands & Radio ([#658](https://github.com/uniskela/ts6-manager/pull/658)); **excludes D1**.
+3. **Later** — this Discord ↔ TeamSpeak voice bridge (D1–D6).
+
+**Historical record:** On **10 November 2026**, Bridge-K, Commands & Radio, and Listener Remote were held together as a single v1.12.0 contract (“do not move incomplete bridge work out of v1.12.0 to ship sooner”). That decision was **superseded by Option B on 15 November 2026**. The 10 November wording is retained here only as history.
+
+Listener Remote and other on-`main` v1.12.0 work ship in v1.12.0. Commands & Radio ship in v2.0.0. Neither waits on D1–D6.
 
 Companion spec: [superpowers/specs/2026-10-23-discord-voice-bridge-design.md](superpowers/specs/2026-10-23-discord-voice-bridge-design.md).
 
@@ -23,7 +33,7 @@ Companion spec: [superpowers/specs/2026-10-23-discord-voice-bridge-design.md](su
 
 | Side | Contract |
 |---|---|
-| TeamSpeak server | Baseline **6.0.0-beta13** (`teamspeaksystems/teamspeak6-server:6.0.0-beta13`). TS3 servers are in-scope for the same TS3 UDP client if one is available during D1. |
+| TeamSpeak server | Baseline **6.0.0-beta14** (`teamspeaksystems/teamspeak6-server:6.0.0-beta14`). TS3 servers are in-scope for the same TS3 UDP client if one is available during D1. |
 | TeamSpeak voice | Existing TS3 UDP client (EAX). Incoming S2C voice is `VId u16 + speaker CId u16 + codec u8 + Opus` per ReSpeak `ts3protocol`. Live TS6 layout is **unverified** until D1. |
 | TeamSpeak video/WebRTC | Out of path. Do not use the media sidecar. |
 | Discord | Official bot API. Voice is pinned below. Discord required DAVE for voice from 1 March 2026. |
@@ -45,7 +55,7 @@ Compatibility CI today does not certify voice playback. D1 and D6 are real-serve
 8. The shared TeamSpeak client does not receive its own voice.
 9. Discord → TeamSpeak is one mix into that shared client. It must not appear again on any Discord slot or overflow bot.
 
-People who sit in both rooms will hear themselves. That is documented, not linked, in v1.12.0.
+People who sit in both rooms will hear themselves. That is documented, not linked, when the bridge product ships.
 
 ## Trust boundary
 
@@ -254,7 +264,7 @@ The smoke is a build gate, not a live receive proof.
 
 Required before the curated v1.12.0 release PR:
 
-- Real **TeamSpeak 6** server (beta13 baseline)
+- Real **TeamSpeak 6** server (6.0.0-beta14 baseline)
 - **Discord desktop**
 - Console Discord: test **Xbox** and **PlayStation** if both are claimed. Fill the table. A claimed console that was not in the run is **unverified** and must not be advertised as tested.
 - DAVE connect, transition, reconnect, and the #11653 join-order case
@@ -275,7 +285,7 @@ Required before the curated v1.12.0 release PR:
 
 | Client | Result | Notes |
 |---|---|---|
-| TeamSpeak 6 (beta13) | | |
+| TeamSpeak 6 (6.0.0-beta14) | | |
 | Discord desktop | | |
 | Discord Xbox | | unverified until tested |
 | Discord PlayStation | | unverified until tested |

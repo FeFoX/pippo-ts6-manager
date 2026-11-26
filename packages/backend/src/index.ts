@@ -7,6 +7,8 @@ import { BotEngine } from './bot-engine/engine.js';
 import { VoiceBotManager } from './voice/voice-bot-manager.js';
 import { MusicCommandHandler } from './voice/music-command-handler.js';
 import { ListenerRemoteService } from './voice/listener-remote.js';
+import { bindPlaylistVoteLifecycle } from './voice/playlist-vote/lifecycle.js';
+import { PlaylistVoteRuntime } from './voice/playlist-vote/runtime.js';
 import { config } from './config.js';
 import { describeTrustProxy } from './trust-proxy.js';
 import { purgeUnhashedRefreshTokens } from './utils/refresh-token.js';
@@ -19,10 +21,12 @@ import fs from 'fs';
 import path from 'path';
 import { startIptvAutoRefresh } from './iptv/iptv-scheduler.js';
 import { ListenerRemoteRefusalAudit, startAuditRetention } from './audit/index.js';
+import { startRefreshTokenRetention } from './auth/refresh-token-retention.js';
 import { bootstrapLocalDevConnection } from './bootstrap/local-dev-connection.js';
 import { ActivityJournalService } from './activity-journal/activity-journal-service.js';
 import { startMediaEgress } from './voice/egress/media-egress.js';
 import { runInOrderWithin } from './utils/ordered-shutdown.js';
+import { sqliteDatasourceUrl } from './utils/sqlite-datasource.js';
 
 async function main() {
   // C1: JWT secret startup guard
@@ -62,7 +66,11 @@ async function main() {
   // Non-blocking diagnostic only. Production images never self-update bundled tools.
   logYtDlpVersionInBackground();
 
-  const prisma = new PrismaClient();
+  // SQLite serialises writers on the database file, so a large Prisma pool
+  // only adds contention. A bounded pool keeps administrative writes (disable
+  // account, reset password) from timing out under ordinary authentication
+  // traffic. The operator can still override the size in DATABASE_URL.
+  const prisma = new PrismaClient({ datasourceUrl: sqliteDatasourceUrl(config.databaseUrl) });
 
   // Refresh tokens are stored hashed now; rows from before cannot be used and are removed.
   try {
@@ -157,6 +165,9 @@ async function main() {
   const musicCommandHandler = new MusicCommandHandler(prisma, voiceBotManager);
   const listenerRemote = new ListenerRemoteService();
   app.locals.listenerRemote = listenerRemote;
+  const playlistVotes = new PlaylistVoteRuntime((botId) => voiceBotManager.getBot(botId));
+  app.locals.playlistVotes = playlistVotes;
+  bindPlaylistVoteLifecycle(listenerRemote, playlistVotes);
   // Bounded audit totals for refused listener remote requests.
   const listenerRemoteRefusals = new ListenerRemoteRefusalAudit(prisma);
   app.locals.listenerRemoteRefusals = listenerRemoteRefusals;
@@ -175,6 +186,7 @@ async function main() {
 
   const stopIptvAutoRefresh = startIptvAutoRefresh(prisma);
   const stopAuditRetention = startAuditRetention(prisma);
+  const stopRefreshTokenRetention = startRefreshTokenRetention(prisma);
 
   // Media downloads connect only through the checking proxy; log its state before serving.
   await startMediaEgress();
@@ -191,6 +203,7 @@ async function main() {
     console.log('\n[TS6 WebUI] Shutting down...');
     stopIptvAutoRefresh();
     stopAuditRetention();
+    stopRefreshTokenRetention();
     await activityJournal.stop();
 
     await voiceBotManager.stopAll();

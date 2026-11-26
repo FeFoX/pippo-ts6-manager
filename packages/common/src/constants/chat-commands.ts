@@ -16,6 +16,7 @@ export const BUILTIN_CHAT_COMMANDS = [
   'skip',
   'next',
   'voteskip',
+  'playlistvote',
   'remote',
   'prev',
   'vol',
@@ -42,12 +43,13 @@ export const BUILTIN_CHAT_COMMANDS = [
 
 export type BuiltinChatCommand = (typeof BUILTIN_CHAT_COMMANDS)[number];
 
-export const MEDIA_COMMAND_GROUPS = ['playback', 'queue', 'video'] as const;
+export const MEDIA_COMMAND_GROUPS = ['playback', 'queue', 'video', 'playlistBypass'] as const;
 export type MediaCommandGroup = (typeof MEDIA_COMMAND_GROUPS)[number];
 export type MediaCommandAccess =
   | { mode: 'everyone' }
   | { mode: 'server_groups'; serverGroupIds: number[] };
-export type MediaCommandPermissions = Record<MediaCommandGroup, MediaCommandAccess>;
+export type MediaCommandPermissions = Record<Exclude<MediaCommandGroup, 'playlistBypass'>, MediaCommandAccess>
+  & { playlistBypass: { mode: 'server_groups'; serverGroupIds: number[] } };
 
 /** Exhaustive so new built-ins must explicitly choose an authorization group. */
 export const MEDIA_COMMAND_GROUP_BY_COMMAND = {
@@ -58,7 +60,7 @@ export const MEDIA_COMMAND_GROUP_BY_COMMAND = {
   prev: 'playback', vol: 'playback', volume: 'playback', repeat: 'playback', seek: 'playback',
   queue: 'queue', add: 'queue', shuffle: 'queue', playlist: 'queue', pl: 'queue', remove: 'queue',
   stream: 'video', streamdirect: 'video', stopstream: 'video', tv: 'video', iptv: 'video',
-  voteskip: 'listener', remote: 'listener',
+  voteskip: 'listener', playlistvote: 'listener', remote: 'listener',
 } as const satisfies Record<BuiltinChatCommand, MediaCommandGroup | 'info' | 'listener'>;
 
 /** Read-only command forms stay public even when controls are restricted. */

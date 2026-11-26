@@ -22,8 +22,9 @@ function fakePrisma() {
   let nextId = 1;
   const matches = (row: Row, where: Partial<Row>) =>
     Object.entries(where).every(([k, v]) => (row as any)[k] === v);
-  return {
+  const prisma: any = {
     tokens,
+    $transaction: async (fn: (tx: any) => Promise<unknown>) => fn(prisma),
     user: {
       findUnique: async ({ where }: any) => users.find((u) => (where.username ? u.username === where.username : u.id === where.id)) ?? null,
       update: async () => ({}),
@@ -54,6 +55,7 @@ function fakePrisma() {
       },
     },
   };
+  return prisma as { tokens: Row[] } & Record<string, any>;
 }
 
 function buildApp(prisma: ReturnType<typeof fakePrisma>): Express {
@@ -111,21 +113,24 @@ describe('refresh tokens', () => {
     assert.ok(ttl >= config.refreshTokenTtlMs && ttl < config.refreshTokenTtlMs + 5_000, `ttl ${ttl}`);
   });
 
-  it('rotates by hash, and a reused token revokes every session of the user', async () => {
+  it('rotates by hash, and a reused token revokes its session family', async () => {
     const prisma = fakePrisma();
     const app = buildApp(prisma);
     const login = await post(app, '/api/auth/login', { username: 'admin', password: PASSWORD });
 
     const first = await post(app, '/api/auth/refresh', { refreshToken: login.body.refreshToken });
     assert.equal(first.status, 200);
-    assert.equal(prisma.tokens.length, 1);
-    assert.equal(prisma.tokens[0].token, hashRefreshToken(first.body.refreshToken));
+    // The consumed row stays (for replay detection) and points at the successor by hash.
+    assert.equal(prisma.tokens.length, 2);
+    const [consumed, successor] = prisma.tokens;
+    assert.equal(consumed.token, hashRefreshToken(login.body.refreshToken));
+    assert.equal(consumed.replacedBy, hashRefreshToken(first.body.refreshToken));
+    assert.equal(successor.token, hashRefreshToken(first.body.refreshToken));
 
-    // Reuse detection needs the replaced row; keep one around as the real flow would during a race.
-    prisma.tokens.push({ id: 99, token: 'x'.repeat(64), userId: 1, expiresAt: new Date(Date.now() + 60_000), family: null, replacedBy: hashRefreshToken(login.body.refreshToken) });
     const reuse = await post(app, '/api/auth/refresh', { refreshToken: login.body.refreshToken });
     assert.equal(reuse.status, 401);
     assert.equal(prisma.tokens.length, 0);
+    assert.equal((await post(app, '/api/auth/refresh', { refreshToken: first.body.refreshToken })).status, 401);
   });
 
   it('does not accept the stored hash itself as a token', async () => {
