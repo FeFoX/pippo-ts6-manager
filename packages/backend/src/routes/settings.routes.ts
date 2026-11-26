@@ -304,6 +304,7 @@ settingsRoutes.put('/bot-access', requireAdmin, async (req: Request, res: Respon
     const prisma = req.app.locals.prisma;
     const parsed = parseControlGroupsUpdate(req.body?.controlGroups);
     if (!parsed.ok) throw new AppError(400, parsed.error);
+    const before = await loadBotControlGroups(prisma);
 
     await recordLocalSuccess(
       prisma,
@@ -322,6 +323,11 @@ settingsRoutes.put('/bot-access', requireAdmin, async (req: Request, res: Respon
       },
     );
 
+    // Remote sessions were checked against the old list; end them so nobody it no longer
+    // allows keeps a remote until their next request. Allowed listeners ask for a new link.
+    if (JSON.stringify(before) !== JSON.stringify(parsed.groups)) {
+      (req.app.locals.listenerRemote as { revokeAll(): number } | undefined)?.revokeAll();
+    }
     res.json({ controlGroups: parsed.groups });
   } catch (err) { next(err); }
 });

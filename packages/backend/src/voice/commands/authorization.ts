@@ -45,6 +45,33 @@ export class ControlAccess {
   ) {}
 
   async check(configId: number, sid: number, clid: number): Promise<AccessDecision> {
+    return this.decide(
+      configId, sid,
+      () => this.source.clientGroups(configId, sid, clid),
+      () => this.source.serverGroups(configId, sid),
+    );
+  }
+
+  /**
+   * The same decision for a client whose server groups the caller has just read (the listener
+   * remote reads them with clientinfo on every request). The server group list comes from
+   * `serverGroups`, which the caller runs against the bot's own server.
+   */
+  async checkKnownGroups(
+    configId: number,
+    sid: number,
+    clientGroupIds: readonly number[],
+    serverGroups: () => Promise<Array<{ id: number; name: string }>>,
+  ): Promise<AccessDecision> {
+    return this.decide(configId, sid, async () => [...clientGroupIds], serverGroups);
+  }
+
+  private async decide(
+    configId: number,
+    sid: number,
+    clientGroups: () => Promise<number[]>,
+    serverGroups: () => Promise<Array<{ id: number; name: string }>>,
+  ): Promise<AccessDecision> {
     let groups: string[];
     try {
       groups = await this.loadGroups();
@@ -55,8 +82,8 @@ export class ControlAccess {
     if (groups.length === 0) return { restricted: false, allowed: true, groups };
     try {
       const [mine, allowed] = await Promise.all([
-        this.source.clientGroups(configId, sid, clid),
-        this.allowedGroupIds(configId, sid, groups),
+        clientGroups(),
+        this.allowedGroupIds(configId, sid, groups, serverGroups),
       ]);
       return { restricted: true, allowed: mine.some((id) => allowed.has(id)), groups };
     } catch (err: any) {
@@ -65,13 +92,18 @@ export class ControlAccess {
     }
   }
 
-  private async allowedGroupIds(configId: number, sid: number, groups: string[]): Promise<Set<number>> {
+  private async allowedGroupIds(
+    configId: number,
+    sid: number,
+    groups: string[],
+    serverGroups: () => Promise<Array<{ id: number; name: string }>>,
+  ): Promise<Set<number>> {
     // The group list is part of the key, so editing the setting never reuses an old answer.
     const key = `${configId}:${sid}:${groups.join('\u0000')}`;
     const hit = this.groupIds.get(key);
     if (hit && this.now() - hit.at < GROUP_LIST_TTL_MS) return hit.ids;
 
-    const list = await this.source.serverGroups(configId, sid);
+    const list = await serverGroups();
     const ids = new Set<number>();
     for (const entry of groups) {
       const wanted = entry.toLowerCase();

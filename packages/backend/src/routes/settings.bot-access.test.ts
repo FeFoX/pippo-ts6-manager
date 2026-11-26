@@ -4,6 +4,7 @@ import express, { type Express } from 'express';
 import { settingsRoutes } from './settings.routes.js';
 import { errorHandler } from '../middleware/error-handler.js';
 import { loadBotControlGroups, loadResumeCooldownSec, loadSeekCooldownSec } from '../utils/app-settings.js';
+import { ListenerRemoteService } from '../voice/listener-remote.js';
 
 function fakePrisma() {
   const settings = new Map<string, string>();
@@ -25,8 +26,9 @@ function fakePrisma() {
   return { prisma, settings, audit };
 }
 
-async function serve(role: 'admin' | 'viewer', prisma: unknown) {
+async function serve(role: 'admin' | 'viewer', prisma: unknown, listenerRemote?: ListenerRemoteService) {
   const app: Express = express();
+  app.locals.listenerRemote = listenerRemote;
   app.use(express.json());
   app.use((req, _res, next) => {
     (req as any).user = { id: 1, role, username: 'u' };
@@ -58,6 +60,29 @@ describe('bot access and seek cooldown settings', () => {
       assert.equal(audit[0].action, 'settings.bot_access_update');
       await put(`${s.base}/bot-access`, { controlGroups: [] });
       assert.deepEqual(await loadBotControlGroups(prisma), [], 'cleared: everybody again');
+    } finally { await s.close(); }
+  });
+
+  it('ends every listener remote session when the list changes, and only then', async () => {
+    const { prisma } = fakePrisma();
+    const remote = new ListenerRemoteService();
+    const ended: string[] = [];
+    remote.onGrantInvalidated((binding, reason) => ended.push(`${binding.clid}:${reason}`));
+    const issue = (clid: number) =>
+      remote.issue({ botId: 1, serverConfigId: 1, virtualServerId: 1, channelId: 2, clid, uid: `listener-${clid}` });
+    const s = await serve('admin', prisma, remote);
+    try {
+      issue(5);
+      issue(6);
+      assert.equal((await put(`${s.base}/bot-access`, { controlGroups: ['Music Bot Controllers'] })).status, 200);
+      assert.deepEqual(ended.sort(), ['5:revoked', '6:revoked']);
+
+      issue(7);
+      assert.equal((await put(`${s.base}/bot-access`, { controlGroups: ['Music Bot Controllers'] })).status, 200);
+      assert.deepEqual(ended.sort(), ['5:revoked', '6:revoked'], 'an unchanged list keeps sessions');
+
+      assert.equal((await put(`${s.base}/bot-access`, { controlGroups: [] })).status, 200);
+      assert.deepEqual(ended.sort(), ['5:revoked', '6:revoked', '7:revoked']);
     } finally { await s.close(); }
   });
 

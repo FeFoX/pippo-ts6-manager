@@ -88,6 +88,10 @@ a member of the control group must also be allowed by them.
   TeamSpeak does not answer, or a listed group does not exist, nobody is allowed (a name or numeric id that matches no
   server group is logged as a warning). Anyone refused gets one short reply every 30 seconds, also for `!here`, `!come`
   and `!help` typed outside the bot's channel, and the command does not run.
+- The listener remote (`!remote`) follows the same list on every request, not only when the link is handed out: the
+  listener's groups come from the same TeamSpeak lookup that already checks they are still in the channel. Someone
+  outside the list, or any failed lookup, ends that remote session. Changing the list ends every open remote session;
+  listeners who are still allowed type `!remote` again.
 - Custom chat commands, watching a video stream and the web panel are not restricted.
 - API (new, admin only): `GET /api/settings/bot-access` and `PUT /api/settings/bot-access` with
   `{ "controlGroups": ["..."] }`. Entries are trimmed and de-duplicated without regard to case.
@@ -269,6 +273,9 @@ A flow whose command trigger names a channel needs its own SSH command listener 
   are kept. This fork still stores only a hash of each refresh token (`token` and `replacedBy`), takes the lifetime
   from `JWT_REFRESH_EXPIRY`, and checks unknown usernames against a dummy password hash so login timing does not
   reveal which accounts exist. Upstream's tests that write refresh tokens straight into the database store the hash.
+  A reused refresh token now ends that login's chain of sessions (its family), not every session of the user.
+- **Listener remote sessions** last 12 hours (24 with "remember") in 1.12.0 instead of 15 minutes, so Bot access is
+  now checked on every remote request, not only when `!remote` hands out the link (see Bot access control).
 - **Bot access** also covers upstream's new `!playlistvote`, which is in the listener permission group.
 - **Video start volume**: upstream's live volume confirmation runs after this fork's early "still starting" answer,
   when the start actually finishes.
@@ -301,8 +308,6 @@ Where upstream and this fork changed the same thing:
 - The default video encoder is still VP8; a direct stream switches viewers to H.264 or VP9.
 - Auto quality is chosen when a source starts. If viewers then settle on a codec the copied picture is not in, the
   stream is re-encoded with Auto quality still off until the next source.
-- Bot access is checked when `!remote` hands out a listener remote, not on each use of it: someone removed from the
-  control group keeps a remote already issued until it expires or they leave the channel.
 
 ## Deploying
 

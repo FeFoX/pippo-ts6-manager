@@ -200,6 +200,17 @@ export class ListenerRemoteService {
     return count;
   }
 
+  /** End every remote session, e.g. when Settings > Bot access changes. */
+  revokeAll(): number {
+    this.prune();
+    let count = 0;
+    for (const grant of [...this.grants.values()]) {
+      this.remove(grant, 'revoked');
+      count++;
+    }
+    return count;
+  }
+
   revokeClient(serverConfigId: number, virtualServerId: number, clid: number): void {
     this.prune();
     for (const grant of this.grants.values()) {

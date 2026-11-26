@@ -2,7 +2,9 @@ import type { Request, Response, RequestHandler } from 'express';
 import { createHash, createHmac } from 'node:crypto';
 import type { z } from 'zod';
 import { ListenerRemoteError, type Binding as ListenerRemoteBinding, type ListenerRemoteService } from '../../voice/listener-remote.js';
-import { resolveMediaIdentity } from '../../voice/media-listeners.js';
+import { listServerGroups, resolveMediaIdentity } from '../../voice/media-listeners.js';
+import { ControlAccess } from '../../voice/commands/authorization.js';
+import { loadBotControlGroups } from '../../utils/app-settings.js';
 import { authorizeMediaCommand, loadMediaCommandPermissions } from '../../voice/media-command-permissions.js';
 import type { VoiceBotManager } from '../../voice/voice-bot-manager.js';
 import type { EventBridge } from '../../bot-engine/event-bridge.js';
@@ -204,6 +206,24 @@ export function botFor(req: Request, binding: ListenerRemoteBinding) {
 /** The bound bot, once `botFor` has confirmed it still serves the listener's channel. */
 export type ListenerBot = NonNullable<ReturnType<typeof botFor>>;
 
+// One Bot access policy per database: it caches each server's group list for a minute,
+// keyed by the configured groups, so a settings change never reuses an old answer.
+const remoteControlAccess = new WeakMap<object, ControlAccess>();
+const unusedSource = {
+  clientGroups: async (): Promise<number[]> => { throw new Error('listener remote reads client groups itself'); },
+  serverGroups: async (): Promise<Array<{ id: number; name: string }>> => { throw new Error('listener remote reads server groups itself'); },
+};
+
+function controlAccessFor(req: Request): ControlAccess {
+  const prisma = req.app.locals.prisma;
+  let access = remoteControlAccess.get(prisma);
+  if (!access) {
+    access = new ControlAccess(() => loadBotControlGroups(prisma), unusedSource);
+    remoteControlAccess.set(prisma, access);
+  }
+  return access;
+}
+
 /** Verify the bound bot's server scope and current human identity, never browser claims. */
 export async function liveIdentity(req: Request, binding: ListenerRemoteBinding) {
   const bot = botFor(req, binding);
@@ -219,6 +239,12 @@ export async function liveIdentity(req: Request, binding: ListenerRemoteBinding)
   // must fail closed for vote tallies, not invalidate unrelated remotes).
   const identity = await resolveMediaIdentity(query, binding.clid, binding.uid);
   if (!identity || identity.channelId !== binding.channelId || !botFor(req, binding)) return null;
+  // Settings > Bot access applies to the remote as it does to chat commands, on every request:
+  // a listener taken out of the allowed groups loses the remote at once. Lookup failures deny.
+  const access = await controlAccessFor(req).checkKnownGroups(
+    binding.serverConfigId, binding.virtualServerId, identity.serverGroupIds, () => listServerGroups(query),
+  );
+  if (!access.allowed || !botFor(req, binding)) return null;
   return identity;
 }
 

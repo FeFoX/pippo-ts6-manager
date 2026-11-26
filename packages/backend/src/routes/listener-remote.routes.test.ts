@@ -40,6 +40,8 @@ async function fixture(role?: 'admin' | 'viewer' | 'operator', fullApp = false) 
     missingSong: false, failAudit: false, failHistory: false,
     video: null as { id: string; state: string } | null,
     playGate: null as (() => Promise<void>) | null, playError: false,
+    // Settings > Bot access, and the server's groups as servergrouplist reports them.
+    controlGroups: [] as string[], groupList: 'sgid=6 name=Guest|sgid=7 name=Music\\sFans' as string | null,
   };
   const history: unknown[] = [];
   const plays: { item: QueueItem; options: unknown; stream: boolean }[] = [];
@@ -82,6 +84,10 @@ async function fixture(role?: 'admin' | 'viewer' | 'operator', fullApp = false) 
   app.locals.eventBridge = { executeCommand: async (server: number, virtualServer: number, cmd: string) => {
     assert.equal(server, binding.serverConfigId);
     assert.equal(virtualServer, binding.virtualServerId);
+    if (cmd === 'servergrouplist') {
+      if (state.groupList === null) return 'error id=2568 msg=insufficient\\sclient\\spermissions';
+      return `${state.groupList}\nerror id=0 msg=ok`;
+    }
     if (cmd.startsWith('clientinfo')) {
       return `cid=${state.channelId} client_unique_identifier=${state.uid} client_servergroups=${state.groups} client_type=0\nerror id=0 msg=ok`;
     }
@@ -90,6 +96,9 @@ async function fixture(role?: 'admin' | 'viewer' | 'operator', fullApp = false) 
   } };
   app.locals.prisma = {
     appSetting: { findUnique: async (query: unknown) => {
+      if ((query as { where?: { key?: string } }).where?.key === 'bot_control_groups') {
+        return { value: JSON.stringify(state.controlGroups) };
+      }
       settingQueries.push(query);
       return state.policy === null ? null : { value: state.policy };
     } },
@@ -1268,5 +1277,42 @@ describe('listener remote playback start', () => {
     assert.equal(f.state.botStatus, 'playing');
     assert.equal(f.bot.queue.length, 1);
     assert.ok(reconciles > 0);
+  }));
+});
+
+describe('listener remote and Settings > Bot access', () => {
+  it('ends the session at the next request once the listener is outside the allowed groups', async () => using(async f => {
+    const { session } = await f.exchange();
+    const ended: string[] = [];
+    f.remote.onGrantInvalidated((_binding, reason) => ended.push(reason));
+    f.state.controlGroups = ['Admins only'];
+    assert.equal((await f.request('/queue', { session, body: { songId: 11 } })).status, 401);
+    assert.deepEqual(ended, ['rejected']);
+    assert.equal((await f.request('/state', { session })).status, 401, 'the grant is gone');
+    assert.equal(f.plays.length, 0);
+  }));
+
+  it('keeps working for a listener in an allowed group, by name or by id', async () => using(async f => {
+    f.state.controlGroups = ['music fans'];
+    const { session } = await f.exchange();
+    assert.equal((await f.request('/state', { session })).status, 200);
+    assert.equal((await f.request('/queue', { session, body: { songId: 11 } })).status, 200);
+    f.state.controlGroups = ['7'];
+    assert.equal((await f.request('/state', { session })).status, 200);
+  }));
+
+  it('refuses the exchange when the listener lost access before opening the link', async () => using(async f => {
+    f.state.controlGroups = ['Guest'];
+    const issued = f.remote.issue(binding);
+    assert.equal((await f.request('/exchange', { body: { token: issued.token } })).status, 401);
+  }));
+
+  it('denies when the server group list cannot be read', async () => using(async f => {
+    const { session } = await f.exchange();
+    f.state.controlGroups = ['Music Fans'];
+    f.state.groupList = null;
+    assert.equal((await f.request('/state', { session })).status, 401);
+    f.state.groupList = 'sgid=6 name=Guest|sgid=7 name=Music\\sFans';
+    assert.equal((await f.request('/state', { session })).status, 401, 'a denied session does not come back');
   }));
 });

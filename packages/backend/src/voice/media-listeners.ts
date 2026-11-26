@@ -19,6 +19,13 @@ function queryEntries(raw: string): Record<string, string>[] {
   });
 }
 
+/** The virtual server's server groups, through the same scoped query. Throws when the lookup fails. */
+export async function listServerGroups(query: MediaQuery): Promise<Array<{ id: number; name: string }>> {
+  return queryEntries(await query('servergrouplist'))
+    .map(entry => ({ id: Number(entry.sgid), name: entry.name ?? '' }))
+    .filter(group => Number.isSafeInteger(group.id) && group.id > 0);
+}
+
 /** Resolve membership from the server; a reused clid must never inherit an old UID's rights. */
 export async function resolveMediaIdentity(
   query: MediaQuery,
