@@ -13,6 +13,7 @@ import { userRoutes } from '../users.routes.js';
 import { authMiddleware } from '../../middleware/auth.js';
 import { errorHandler } from '../../middleware/error-handler.js';
 import { listen } from './listen-loopback.js';
+import { hashRefreshToken } from '../../utils/refresh-token.js';
 
 export type SqliteAuthPool = 'default' | number;
 
@@ -71,9 +72,10 @@ export async function openSqliteAuthApp(pool: SqliteAuthPool): Promise<{
   });
   app.get('/__test/refresh-state', async (_req, res, next) => {
     try {
-      const row = latest ? await prisma.refreshToken.findUnique({ where: { token: latest } }) : null;
+      // Rows hold hashes of the tokens (see utils/refresh-token.ts); report the raw token the client holds.
+      const row = latest ? await prisma.refreshToken.findUnique({ where: { token: hashRefreshToken(latest) } }) : null;
       const revoked = latest !== null && row === null;
-      res.json({ rotateCount, presented, live: row?.token ?? null, revoked,
+      res.json({ rotateCount, presented, live: row ? latest : null, revoked,
         replayRevokes: revoked && new Set(presented).size < presented.length ? 1 : 0,
         consumedCount: await prisma.refreshToken.count({ where: { replacedBy: { not: null } } }), engine, errors });
     } catch (err) { next(err); }
@@ -111,7 +113,7 @@ export async function openSqliteAuthApp(pool: SqliteAuthPool): Promise<{
       });
       const byToken = new Map(rows.map((r) => [r.token, r]));
       const events = presented.map((token, index) => {
-        const row = byToken.get(token);
+        const row = byToken.get(hashRefreshToken(token));
         return {
           index,
           known: Boolean(row),
@@ -120,7 +122,7 @@ export async function openSqliteAuthApp(pool: SqliteAuthPool): Promise<{
           consumed: Boolean(row?.replacedBy),
           family: row?.family ?? null,
           // Was this token the successor minted by an earlier presented token?
-          successorOfPresented: presented.slice(0, index).some((t) => byToken.get(t)?.replacedBy === token),
+          successorOfPresented: presented.slice(0, index).some((t) => byToken.get(hashRefreshToken(t))?.replacedBy === hashRefreshToken(token)),
           live: row ? !row.replacedBy : false,
         };
       });
