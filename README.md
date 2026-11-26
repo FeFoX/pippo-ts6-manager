@@ -6,7 +6,7 @@
 > TS6 Manager is the work of [@uniskela](https://github.com/uniskela) and the
 > [uniskela/ts6-manager contributors](https://github.com/uniskela/ts6-manager/graphs/contributors), building on the
 > original [clusterzx/ts6-manager](https://github.com/clusterzx/ts6-manager) by [@clusterzx](https://github.com/clusterzx)
-> and its contributors. This fork is merged with upstream v1.11.4, and
+> and its contributors. This fork is merged with upstream v1.12.0, and
 > [CHANGES-FROM-UPSTREAM.md](CHANGES-FROM-UPSTREAM.md) lists what it adds. Everything below this note is upstream's
 > README and describes the upstream project.
 

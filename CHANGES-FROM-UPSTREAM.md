@@ -1,8 +1,9 @@
 # Changes from upstream
 
 This fork follows [uniskela/ts6-manager](https://github.com/uniskela/ts6-manager). It started from v1.10.1 and is now
-merged with upstream [v1.11.4](https://github.com/uniskela/ts6-manager/releases/tag/v1.11.4); everything upstream added
-up to that release is here too. [Merged with upstream 1.11.4](#merged-with-upstream-1114) lists where the two met.
+merged with upstream [v1.12.0](https://github.com/uniskela/ts6-manager/releases/tag/v1.12.0); everything upstream added
+up to that release is here too. [Merged with upstream 1.12.0](#merged-with-upstream-1120) and
+[Merged with upstream 1.11.4](#merged-with-upstream-1114) list where the two met.
 
 The new settings live in the database and are edited in the web GUI. The new environment variables are
 `VIDEO_CONVERT_THREADS` and `FFMPEG_THREAD_QUEUE_SIZE`. The database schema is the same
@@ -262,6 +263,17 @@ A flow whose command trigger names a channel needs its own SSH command listener 
   access logs: TeamSpeak clients and embeds fetch these widgets as plain URLs and cannot send a header. The token only
   gives read access to that bot's now-playing data, and revoking it still means rotating `JWT_SECRET`.
 
+## Merged with upstream 1.12.0
+
+- **Refresh tokens**: upstream's atomic rotation, replay detection, family revoke on logout and background clean-up
+  are kept. This fork still stores only a hash of each refresh token (`token` and `replacedBy`), takes the lifetime
+  from `JWT_REFRESH_EXPIRY`, and checks unknown usernames against a dummy password hash so login timing does not
+  reveal which accounts exist. Upstream's tests that write refresh tokens straight into the database store the hash.
+- **Bot access** also covers upstream's new `!playlistvote`, which is in the listener permission group.
+- **Video start volume**: upstream's live volume confirmation runs after this fork's early "still starting" answer,
+  when the start actually finishes.
+- **Radio local hosts** (upstream) and this fork's seek and resume cooldowns are both read by the bot manager.
+
 ## Merged with upstream 1.11.4
 
 Where upstream and this fork changed the same thing:
@@ -297,6 +309,21 @@ Where upstream and this fork changed the same thing:
 This fork runs as an all-in-one image built locally from `Dockerfile.all-in-one`, not from the upstream
 registries. Build with `--build-arg GIT_SHA=<commit>` so `/api/health` reports the commit. After the first start, the
 bot-access list is empty (everybody may use the bot) until groups are added in Settings → Users → Bot access.
+
+### Upgrading from the 1.11.4-based fork
+
+The 1.12.0 merge brings upstream's 1.12.0 changes; upstream's
+[upgrade notes](docs/public/upgrading.md#upgrading-to-1120) apply. In short:
+
+- **Back up the data volume before the first start.** 1.12.0 adds a column to playlists (which ones the listener
+  remote may show). Going back needs the backup taken before the first 1.12.0 start, restored into a new volume.
+- Viewer accounts lose access to servers not assigned to them and to administrator-only reads; check each viewer's
+  server assignments.
+- Radio stations on private or LAN addresses need their host on the **Local hosts** list.
+- With playlist voting on, a chat `!playlist` request opens a vote instead of queueing at once.
+- Auto-Rank now counts online time from clientinfo: the first check credits each online client's current session in
+  full, so some promotions may happen at once.
+- The sidecar needs Go 1.26.11 or later to build; the Dockerfiles already use it.
 
 ### Upgrading from the 1.10.1-based fork
 
